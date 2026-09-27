@@ -1,0 +1,35 @@
+# BN Map Editor
+
+A Godot 4.7 (GDScript) map editor for Cataclysm-BN JSON mapgen. The design, scope and staged
+roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `../Cataclysm-BN`
+(override with `BN_PATH`).
+
+## Commands
+
+- Build json_formatter from the BN checkout into `build/`: `tools/build_json_formatter.sh [BN_PATH]`
+  (uses `$CXX`, else clang++, else g++).
+- Run all tests headless: `tools/run_tests.sh [FILTER...]`. A filter matches a `file::method`
+  substring, e.g. `tools/run_tests.sh roundtrip`. Exit code is 1 on any failure.
+- Tests call `godot --headless --path . --import` first. Without it, a fresh checkout has no
+  class_name cache and `-s` scripts can't see `BnJson` etc.
+
+## Layout
+
+- `src/json/bn_json.gd` (`BnJson`): the JSON reader/writer used for anything that gets saved.
+- `src/json/json_formatter.gd` (`JsonFormatter`): runs BN's json_formatter via a temp file.
+- `tests/test_*.gd`: test files; every `test_*` method runs. They extend
+  `tests/support/test_case.gd` (`check`, `check_eq`, `skip`). `tests/support/bn_env.gd` finds BN.
+- `tools/`: shell scripts. `build/`: local binaries (gitignored).
+
+## Rules
+
+- Never save with Godot's `JSON` class (it turns ints into floats). Save with
+  `BnJson.stringify` and then `JsonFormatter.format`. `JSON.parse_string` is fine for read-only
+  indexing, where it is ~20x faster than `BnJson.parse`.
+- `check_eq` is type-strict (`1` != `1.0`). Keep it that way; int vs float is what breaks saves.
+- Never write into the BN checkout, from tests or from the editor. Use a temp dir or the workspace.
+- A script error inside a test is a failure (the runner hooks `Logger`), so a test that hits
+  `push_error` on purpose will fail.
+- Inner classes can't call their outer class's static functions unqualified; use
+  `BnJson.encode_string(...)`.
+- Commit the `*.uid` and `*.import` files Godot generates next to scripts and assets.

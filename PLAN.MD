@@ -92,8 +92,20 @@ JSON formatting (decided: use BN's own formatter):
    or build it from the user's BN checkout on first run. Fall back to a clear error if it's missing.
    (Only g++ is installed on the dev machine right now; clang needs installing.)
  - Verified 2026-09-27: `g++ -std=c++23 -O2 -DCATA_IN_TOOL -Isrc tools/format/format.cpp src/json.cpp` builds
-   in ~4s. All 763 files in data/json/mapgen + mapgen_palettes are already formatted, so
+   in ~4s. All 1757 files in data/json/mapgen + mapgen_palettes + data/mods are already formatted, so
    `json_formatter < f` reproduces them byte-for-byte. A byte-identical round trip is achievable and testable.
+ - Godot's OS.execute can't write to a child's stdin, so the editor uses the file mode: write compact JSON to a
+   temp file, run `json_formatter <tmp>`, read it back. Exit 0 = unchanged, 1 = reformatted (but also
+   "Failed to open"; check the output), anything else = crash.
+ - Formatter quirks (verified):
+     - Floats are printed with std::to_string, so they're rounded to 6 decimals (0.1234567 -> 0.123457), then
+       trailing zeros are stripped. The editor writes floats the same way.
+     - A number with an exponent but no '.' (e.g. 1e3) is read as an integer and comes out wrong (1000000).
+       The editor never writes exponents.
+     - Invalid JSON makes it abort (exit 134) with a JsonError on stderr. The editor must never feed it
+       unparsed text.
+     - Wrapping: the top level and its direct children always wrap; deeper containers go on one line if they
+       fit in 120 chars. "rows" and "blueprint" always wrap. Only the formatter decides layout.
 
 
 Workspace and sync (decided: the editor never writes into BN directly):
@@ -149,7 +161,20 @@ Known pitfalls (verified):
  - Godot's built-in JSON cannot be used for saving. JSON.parse_string turns every int into a float, and
    JSON.stringify writes `1000` back as `1000.0` and sorts keys alphabetically by default. json_formatter keeps
    `1000.0` as is, so this would corrupt every file. The editor needs its own JSON reader/writer that keeps
-   int vs float, key order, and the original number and string text.
+   int vs float and key order.
+   Correction (Stage 0): keeping the original number and string text isn't needed. The formatter
+   normalizes numbers itself, and all data uses only the canonical escapes \" and \n, so native Godot values
+   (ordered Dictionary, int, float, String) plus a canonical writer round-trip every file. The reader
+   warns about the constructs that wouldn't come back identical (non-canonical escapes such as é or \/,
+   duplicate keys, exponents, ints beyond 64 bits, a BOM). If user files hit those, Stage 3 can keep the
+   original text of untouched top-level objects and write it back verbatim.
+ - BnJson.parse (GDScript) is ~20x slower than Godot's native JSON: ~9.5s vs ~0.5s for all 30MB of
+   data/json. Stage 1 should index read-only data with JSON.parse_string (int/float doesn't matter there)
+   and use BnJson only for files that are opened for editing and saved.
+ - class_name globals only resolve under `godot --headless -s` after `godot --headless --import` has built
+   .godot/global_script_class_cache.cfg. tools/run_tests.sh does this.
+ - A GDScript runtime error just aborts the current function, so a crashing test looks like a pass. The test
+   runner registers a Logger (Godot 4.5+) and counts script errors as failures.
  - Terrain/furniture use "copy-from" inheritance (161 uses in furniture_and_terrain). A tile's "symbol"/"color"
    may be inherited, so the index must resolve copy-from (and "abstract" entries) before rendering.
  - "rows" characters can be any non-double-width Unicode, including combining characters. A column is not
@@ -158,12 +183,16 @@ Known pitfalls (verified):
 
 
 Development stages (each ends with a headless-testable acceptance check):
- Stage 0 - Foundations
+ Stage 0 - Foundations  [DONE 2026-09-27]
    - git init, a Godot 4.7 project skeleton, a headless test runner (`godot --headless`), and a CLAUDE.md.
    - Build script for json_formatter (clang, with a g++ fallback).
    - Custom JSON reader/writer (see pitfalls).
    - Accept: every file in data/json/mapgen, mapgen_palettes and data/mods/*/ goes through
      read -> write -> json_formatter and comes back byte-identical.
+   - Result: tools/run_tests.sh passes 16 tests. All 1757 files round-trip byte-identically (~10s), and
+     breaking the writer (e.g. writing ints as floats) makes 1490 of them fail. Built with g++, since
+     clang still isn't installed. Only a bash build script exists so far. Windows needs a .ps1 or prebuilt
+     binaries later.
  Stage 1 - Data index (no UI)
    - Load core + selected mods (respect modinfo load order and "override"). Index terrain/furniture
      (resolving copy-from), palettes, item groups, monster groups, and mapgen entries by om_terrain /
