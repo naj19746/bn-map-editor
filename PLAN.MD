@@ -32,11 +32,13 @@ Mapgen format (what the editor models):
        nested, etc.
      - Coordinate-based placement. x/y are an int or an inclusive [min, max] range, which must not
        cross a 24x24 block boundary:
-         - place_items / items : item GROUP, "chance" is a percentage.
-         - place_item / item   : a specific item id, "amount", "repeat", "chance".
-         - place_loot          : a specific item or a group.
-         - place_monster       : ONE monster (a specific id, or one pick from a "group"), with chance, repeat, pack_size.
-         - place_monsters      : spawns the ENTIRE monster group, with chance (one-in-N), repeat, density.
+         - place_items / items : item GROUP, "chance" is a percentage (default 1).
+         - place_item / item   : a specific item id, "amount", "repeat", "chance" (a percentage, default 100;
+                                 BN's mapgen.md wrongly says one-in-N for "item").
+         - place_loot          : a specific item or a group, "chance" a percentage (default 100).
+         - place_monster       : ONE monster (a specific id, or one pick from a "group"), with chance
+                                 (a percentage, default 100), repeat, pack_size.
+         - place_monsters      : spawns the ENTIRE monster group, with chance (one-in-N, default 1), repeat, density.
          - place_nested / nested : place nested chunks, optionally conditional on neighbors or joins.
          - set, place_vehicles, place_signs, place_npcs, computers, ... (see the reference doc)
      - "rotation", "parameters", "predecessor_mapgen", "flags".
@@ -65,13 +67,14 @@ MVP scope:
  4. Paint rows with terrain and furniture. Show a symbol legend that says where each char is defined
     (which palette, or the map itself).
  5. Palette editor window: create and edit palettes and their includes, and show which maps use a palette.
-    New symbols go into a palette by default (the map's last-listed palette, or a new palette if the map
-    has none). Defining a symbol inline in the map's own "terrain"/"furniture" is an explicit opt-in.
-    Warn when an edit to a shared palette affects other maps.
+    New symbols go into the map's own "terrain"/"furniture" by default (decided 2026-09-27). Putting a
+    symbol in a palette is done in the palette editor, or by moving a map symbol into a palette. Warn when
+    an edit to a shared palette affects other maps, and name them.
  6. Item and monster placement: view and edit place_items/item(s), place_loot, place_monster(s) as points or
     rectangles with chance/repeat labels. Enforce the no-crossing-24x24 rule.
  7. Nested chunks: edit nested_mapgen_id entries, and show place_nested/nested placements on the parent map.
- 8. Create new mapgen (choose om_terrain grid size) and save round-trip-clean.
+ 8. Create new mapgen (choose om_terrain grid size) and save round-trip-clean. Warn when an om_terrain id
+    has no overmap_terrain definition, with an auto-fix that creates them.
  9. Validation: undefined chars, unknown ids, out-of-range coordinates.
 
 
@@ -143,9 +146,12 @@ UI layout (decided: canvas-first):
  - Toolbar tools: Paint, Rect, Fill, Line, Pick (eyedropper), Select (rectangle select; copy/paste/move).
  - One side drawer, collapsible and toggled by hotkeys, with tabs:
      - Browser: core + mods tree, search by om_terrain / nested id / file, marks workspace-modified files.
-     - Legend/Brush: id-first brush. Choose a terrain and/or furniture from searchable lists. The editor
-       reuses a char that already has that combo, or adds a new char to the active palette on the first
-       stroke. Legend chars can also be clicked directly as a brush. Each entry shows its source
+     - Legend/Brush: the brush is a symbol from the pool the map already has: every symbol defined by
+       the map or its palettes, used or not (decided 2026-09-27). Painting a symbol paints exactly what the
+       legend shows, extras (items, monsters, ...) and distributions/params included, so nothing is picked
+       up by accident. Search works by id: "f_chair" lists the symbols that place it, with their extras.
+       A combo that isn't in the pool is added with an explicit "New symbol" action (pick terrain and/or
+       furniture from all known ids), which defines it in the map itself. Each entry shows its source
        (palette name / map).
      - Inspector: the selected cell or placement. Placement fields (group/id, x/y ranges, chance, repeat,
        etc.) are edited here.
@@ -281,11 +287,47 @@ Development stages (each ends with a headless-testable acceptance check):
    - Test runner note: nodes added during SceneTree._initialize don't get _ready (the root isn't in the
      tree yet), so UI tests call _ready() themselves and main.gd's `auto_start = false` skips the
      deferred load.
+ Checked before Stage 3 (2026-09-27, against BN source and data; these correct or add to the plan above):
+   - Coordinate ranges: confirmed. A multi-tile map is loaded as one function per OMT, and each placement
+     belongs to the OMT containing its (min x, min y). If its max leaves that OMT, BN throws "coordinate
+     range cannot cross grid boundaries". A nested chunk checks against its mapgensize instead.
+   - "chance" means different things per placement type (see the corrected list under "Mapgen format").
+     The Inspector must label it per type, and BN's doc can't be trusted for "item".
+   - DECIDED: new symbols go into the map itself, and palettes are edited in the palette editor
+     (MVP item 5). Why: defaulting to "the map's last-listed palette" edits widely shared palettes:
+     standard_domestic_palette is used by 443 json mapgens, roof_palette by 478, lab_common_palette by 216.
+     Inline definitions are normal practice: 2637 of 4615 json mapgens define terrain/furniture inline, 1504
+     of them alongside palettes. Adding a key to a shared palette can also silently change OTHER maps: in
+     a map that lists this palette after another palette that already defines the key, the new definition
+     now wins for terrain/furniture, and items/monsters etc. add up rather than replace. So the palette
+     default needs more than a warning. A new key must be free in every palette of this map. When the
+     palette editor adds a key to a palette or moves a map symbol into one, it must check every map using
+     that palette (directly or through includes) and warn about each map whose symbols would change.
+   - DECIDED: the brush picks from the symbols already defined, not from ids (see Legend/Brush). Why:
+     auto-reusing "a char that already has that combo" goes wrong because a symbol is terrain + furniture +
+     extras. Reusing '1' (t_floor + f_cupboard) would also bring its "items", and a distribution or
+     param only sometimes gives the id. Picking the symbol makes that visible and deliberate.
+   - A new key must be one display column (CellText.starts_cell, not a zero-width code point). Undefined
+     " " and "." are meaningful in nested chunks and with fill_ter, so don't hand them out as new symbols.
+   - New om_terrain mapgen: BN never checks that an om_terrain id exists as an "overmap_terrain", so a map
+     with a new id just never generates. Creating one needs overmap_terrain entries (one per grid cell)
+     and, to spawn in a world, a city_building / overmap_special. DECIDED: warn, with an auto-fix that
+     writes a minimal overmap_terrain per missing id into the workspace (next to the map, or in an
+     overmap_terrain file of the same mod). DataIndex indexes overmap_terrain ids (Stage 7 validation
+     needs them anyway). Spawning (city_building / overmap_special) stays with z-level linking.
+   - Workspace layering needs DataIndex support: load the file list from BN, swap in workspace copies,
+     and add new workspace files at their relative path, which decides the mod they belong to (a new file
+     outside any mod's data folder won't load in BN). The Stage 1 read path (Godot JSON) stays for
+     indexing; files opened for editing are re-read with BnJson.
+   - A map without "rows" (fill_ter only) needs rows created on the first paint; multi-tile rows must stay
+     (24R) x (24C) with every row the same width in cells.
  Stage 3 - Editing core + workspace
-   - Paint terrain/furniture, pick symbols, undo/redo, save to the workspace through the formatter, create
-     new mapgen (choose om_terrain grid size).
+   - Paint with symbols from the pool, "New symbol" (defined in the map), pick symbols, undo/redo, save to
+     the workspace through the formatter, create new mapgen (choose om_terrain grid size) with the
+     overmap_terrain warning and auto-fix.
    - Accept: after an edit, a diff of the workspace file against its BN original touches only the edited
-     rows and the legend entries.
+     rows and the map's own "terrain"/"furniture" entries. (Palette files change only in Stage 4, and
+     their diffs must likewise touch only the edited palette.)
  Stage 3b - Sync window (push / refresh / conflict detection).
    - Accept: push into a temp copy of BN, and a conflict is detected when the BN file changed after the base
      was recorded.
