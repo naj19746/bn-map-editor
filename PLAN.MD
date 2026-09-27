@@ -89,7 +89,13 @@ Later milestones:
  - Tileset rendering via a BN tileset's tile_config.json.
  - Preview roll: resolve weights, distributions, chances and nested chunks into one sample outcome.
  - Multi-z-level linking (roofs, basements) through city_building/overmap_special.
- - update_mapgen, parameters/switch editing, rotation preview, vehicles/NPCs/computers.
+ - update_mapgen, parameters/switch editing, rotation preview, dedicated editors for vehicles/NPCs/
+   computers (since Stage 5 every place_* list is shown, moved and edited as fields; what's left are
+   id pickers and structured editors, e.g. computer options).
+ - The Select tool (copy/paste/move a block of rows, from the UI sketch) is still open from Stage 3;
+   when it's built, moving a block should offer to carry the placements anchored in it.
+ - A preview roll can take each kind's chance meaning and default from Placement.KINDS, and must
+   scale by BN's spawn-rate options the way each placement class does (see the field hints).
 
 
 JSON formatting (decided: use BN's own formatter):
@@ -722,17 +728,80 @@ Development stages (each ends with a headless-testable acceptance check):
      place_computers/zones/... can be edited and moved but not added from the panel; place_nested only
      shows its rectangle (the chunk itself is Stage 6); palette per-key items/monsters are still
      read-only in the palette editor (the panel's field text parsing can be reused there).
+ Checked after Stage 5 (2026-09-27, against BN 39f4883093 source and core data; reviews Stages 6-7
+ and the later milestones):
+   - Nested chunks (Stage 6), from jmapgen_nested and mapgen_function_json_nested::nest:
+     - "chunks" / "else_chunks" are weighted lists of plain ids or [id, weight] pairs (load_weighted_list
+       of strings, default weight 100): 1498 plain, 4290 pairs in core, never a param. "null" or ""
+       places nothing; an unknown id is a debugmsg and places nothing (a Stage 7 finding).
+     - A picked id is a second weighted pick: 169 of 1035 core nested ids have several mapgens, and
+       for 4 of them the variants differ in mapgensize. The overlay shows the first (or heaviest)
+       variant and says how many there are, like the resolver does for palette choices.
+     - neighbors/joins/connections decide between chunks and else_chunks, and need the overmap
+       around the map, which the editor doesn't have. The overlay draws "chunks" (conditions met) and
+       names the else_chunks; a toggle to show the else case can come later. Only "chunks" occurs in
+       the 445 core "nested" symbol mappings (no conditions, no rotation there).
+     - Rotation: the placing entry's "rotation" is a jmapgen_int (a [min, max] range is allowed; data
+       only uses 1-3) giving clockwise quarter turns, applied with point::rotate around the chunk's
+       mapgensize. For a non-square chunk (34 in core) one or three turns swap the footprint's width and
+       height. The chunk's own "rotation" (649 core chunks, 656 with mods) is ignored, as noted.
+     - Order: nested pieces run in mapgen_phase::nested_mapgen, after the parent's terrain,
+       furniture and other pieces and before transforms/faction ownership; within a chunk, its "set"
+       entries run before its objects. So a chunk draws over the parent's rows and place_terrain, and
+       later nested entries over earlier ones. Undefined " "/"." chunk cells leave the parent's cell.
+     - Footprint: Stage 5's place_nested rectangle is only the anchor range (where the chunk's
+       top-left corner is picked). BN only bounds that range, so the Place tool is right to keep only
+       the anchor inside one tile; the chunk's footprint (anchor range + rotated mapgensize) may run
+       past the tile or map. The overlay must draw the footprint and mark the overhang, not clamp it.
+       Overhang: map::ter_set writes by absolute position through the mapbuffer, so whether it survives
+       depends on whether the neighbouring tile is generated before or after (it would overwrite).
+       Still unverified in game; keep the mark.
+     - Parameters: nest() takes the chunk's own parameters with scope "nest"; the resolver's defaults
+       are fine for display.
+     - Counts (core): 2167 place_nested entries in 735 maps, 157 maps with a "nested" mapping, 1536
+       chunks, 170 of them placing chunks themselves, 926 using palettes.
+   - From the Stage 5 code, for Stage 6:
+     - Placement already lists and moves place_nested entries (Nested layer) and its template adds
+       {"chunks": []}; Stage 6 adds a chunk id picker to the inspector (the "chunks" field is JSON
+       text today) and the footprint drawing.
+     - The Placements panel's field text parsing, and PlacementsPanel/IntRange, can edit a chunk's own
+       place_* lists unchanged: a chunk opens as a map already, with the 24x24 bound handled.
+     - update_mapgen entries are treated like chunks (24x24 bound, "set" by mapgensize); not checked
+       further since update_mapgen is out of scope.
+   - Validation (Stage 7):
+     - Much of it exists: Placement.problems (dropped anchors, crossing and reversed ranges, entries
+       past a chunk's mapgensize, dropped "set", place_items chance, place_loot item/group, place_monster
+       without monster/group) plus the resolver's symbol checks feed MapDocument.problems(), and saving
+       refuses a crossing range. Stage 7 turns these strings into findings with a severity and a target
+       (a cell, a placement or a symbol) so the panel can select what it points at.
+     - Severity is needed: real maps now report BN quirks BN accepts (ws_regional_dump_0_2 shows 18
+       reversed-range notes), which reads as "18 problems". Proposed: error = BN refuses to load (a
+       crossing range, place_loot with both or neither of item/group, unknown terrain in rows);
+       warning = BN silently does nothing (dropped anchors and "set", place_items chance outside
+       1-100, unknown ids); note = BN does something odd but defined (reversed spans, overhang, an
+       ignored chunk rotation). The status bar counts errors and warnings.
+     - Core counts to use (the earlier list mixed core and core + mods): 19 dropped anchors, 54
+       reversed ranges spanning back, 209 dropped "set" in 44 maps, 13 place_* entries past their
+       chunk's mapgensize (the "8 chunks" was wrong), 649 ignored chunk rotations, 0 crossing ranges,
+       0 place_items chances outside 1-100, 0 place_loot with both/neither.
+     - Found in BN while doing Stage 5: a "set" entry with an unknown terrain/furniture/trap id makes
+       setup_setmap return, so every LATER "set" entry of that map is dropped too. Worth its own
+       finding once ids are indexed.
  Stage 6 - Nested chunks (MVP item 7).
-   - Proposed acceptance: create a new chunk (nested_mapgen_id + mapgensize) and place it in a map.
-     Every place_nested / "nested" mapping in core draws on its parent without errors: "null" places
-     nothing, recursion has a loop guard, the placing rotation is applied, and the overhang is marked.
-     Editing a chunk, or a palette it uses, redraws the open parents that place it, and the palette
-     warning names those parents.
- Stage 7 - Validation panel (MVP item 9). Basic checks can start earlier.
-   - Proposed acceptance: all core json mapgens validate with exactly the listed set of findings (the
-     counts under "Checked after Stage 4"), and seeded errors are each caught: unknown item, monster
-     or vehicle id; undefined symbol; out-of-range coordinate; crossing range; place_items chance
-     outside 1..100; place_loot with both or neither of item/group.
+   - Proposed acceptance: create a new chunk (nested_mapgen_id + mapgensize) and place it in a map
+     with the Place tool and a chunk picker. Every place_nested / "nested" mapping in core draws its
+     chunk's footprint on its parent without errors: "null" places nothing, recursion has a loop
+     guard, the placing rotation is applied (a non-square chunk's footprint swaps), chunks draw in
+     BN's order over the parent's cells, and the overhang past the anchor's tile is marked. Editing a
+     chunk, or a palette it uses, redraws the open parents that place it (directly or through a
+     "nested" mapping in one of their palettes), and the palette warning names those parents.
+ Stage 7 - Validation panel (MVP item 9). Basic checks exist since Stage 5.
+   - Proposed acceptance: all core json mapgens validate with exactly the core counts under "Checked
+     after Stage 5", sorted into error/warning/note, and seeded errors are each caught: unknown item,
+     monster, vehicle (group or prototype), trap or chunk id; undefined symbol; out-of-range
+     coordinate; crossing range; place_items chance outside 1..100; place_loot with both or neither of
+     item/group; a "set" with an unknown id (and the later "set" entries it drops). Selecting a finding
+     selects its cell, symbol or placement.
  Then the "Later milestones" list.
 
 Explicitly out of scope until the later milestones: tilesets, preview rolls, z-level linking, update_mapgen,
