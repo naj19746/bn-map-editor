@@ -17,8 +17,13 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
 
 - `src/json/bn_json.gd` (`BnJson`): the JSON reader/writer used for anything that gets saved.
 - `src/json/json_formatter.gd` (`JsonFormatter`): runs BN's json_formatter via a temp file.
+- `src/data/`: read-only BN index. `ModCatalog` (mods, load order), `DataIndex` (terrain/furniture with
+  copy-from, palettes, groups, mapgen refs by id), `MapgenResolver` -> `ResolvedMapgen` (a map's cells
+  and what each symbol means, with sources), `CellText` (rows -> cells, BN's wcwidth rule).
+- `src/app/app_settings.gd` (`AppSettings`): settings in user://settings.cfg.
 - `tests/test_*.gd`: test files; every `test_*` method runs. They extend
-  `tests/support/test_case.gd` (`check`, `check_eq`, `skip`). `tests/support/bn_env.gd` finds BN.
+  `tests/support/test_case.gd` (`check`, `check_eq`, `skip`). `tests/support/bn_env.gd` finds BN;
+  `tests/support/temp_tree.gd` builds fake BN checkouts in a temp dir.
 - `tools/`: shell scripts. `build/`: local binaries (gitignored).
 
 ## Rules

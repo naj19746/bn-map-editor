@@ -193,11 +193,55 @@ Development stages (each ends with a headless-testable acceptance check):
      breaking the writer (e.g. writing ints as floats) makes 1490 of them fail. Built with g++, since
      clang still isn't installed. Only a bash build script exists so far. Windows needs a .ps1 or prebuilt
      binaries later.
- Stage 1 - Data index (no UI)
-   - Load core + selected mods (respect modinfo load order and "override"). Index terrain/furniture
-     (resolving copy-from), palettes, item groups, monster groups, and mapgen entries by om_terrain /
-     nested_mapgen_id, keeping the source file for each.
+ Stage 1 - Data index (no UI)  [DONE 2026-09-27]
+   - Load core + selected mods in BN's load order. Index terrain/furniture (resolving copy-from), palettes,
+     item groups, monster groups, and mapgen entries by om_terrain / nested_mapgen_id, keeping the source
+     file for each.
    - Accept: apartments_mod_tower resolves to a 48x48 grid where every char has a terrain + source.
+   - Result: tools/run_tests.sh passes 32 tests. Core indexes in ~0.6s (1930 files), all 63 non-obsolete
+     mods in ~0.8s. apartments_mod_tower_NW..SE (apartment_mod.json, 2x2, weight 250) resolves to 48x48
+     with a known terrain in every cell, sourced from apartment_palette or fill_ter. All 4534 core and
+     4835 core+mod json mapgens (om_terrain + nested) resolve with no problems.
+   - Code: src/data/mod_catalog.gd (ModCatalog: modinfo scan, load order), data_index.gd (DataIndex),
+     mapgen_resolver.gd + resolved_mapgen.gd (palette resolution per map), cell_text.gd (rows -> cells),
+     src/app/app_settings.gd (AppSettings: user://settings.cfg, BN_PATH overrides the stored path).
+   - Checked against BN source (corrections to the earlier notes):
+     - Mod loading (mod_manager.cpp, init.cpp): modinfo.json is searched recursively under data/mods.
+       Core is the "bn" mod ("core": true, "path": "../../json"). A mod's data folder is its modinfo folder
+       joined with "path". Load order = the world's list with duplicates dropped and core moved first;
+       the mod picker has already put dependencies first. Mods sharing an id are all dropped.
+     - There is no mod-level "override". Per type: a later terrain/furniture/palette with the same id
+       replaces the earlier one; mapgens for the same id accumulate (weighted pick); monstergroup has its
+       own "override" flag (merge vs replace), not modelled yet. DataIndex keeps every definition in order.
+     - Files load in BFS order: a folder's *.json sorted, then its subfolders sorted. "mod_interactions"
+       folders are skipped, and <mod>/mod_interactions/<other mod>/ loads in a second pass only if
+       <other mod> is active (Arcana_BN uses this).
+     - copy-from copies whatever is loaded under that id (or abstract) at that moment, else the object is
+       deferred and retried after everything loads. So a mod overriding a base doesn't change copies made
+       before it. looks_like defaults to copy-from. "alias" ids point at the same definition.
+     - "symbol" is exactly one ASCII byte or LINE_XOXO (│) / LINE_OXOX (─), optionally 4 seasonal values.
+       "color" and "bgcolor" are mutually exclusive; either one replaces an inherited one.
+     - t_null and f_null are built into the code (blank, white). Palettes use f_null inside distributions.
+     - monstergroup is keyed by "name", not "id".
+     - Palettes don't "override": BN appends every piece for a key in order (included palettes, then the
+       palette, then the map). For terrain/furniture the last one placed wins, but items, monsters, traps,
+       etc. from every palette and the map all apply. The legend must show all of those.
+     - A plain "t_null"/"f_null" value is dropped, so it doesn't replace an earlier palette's terrain, but
+       any key mentioned in any mapping still counts as defined (speedway, convention_center rely on this).
+     - Besides "terrain"/"furniture"/..., palettes and maps can use "mapping": {"X": {"terrain": ...,
+       "furniture": ..., "items": ...}} (54 files). Read before the plain member of each kind.
+     - Terrain/furniture values: an id; a list of alternatives (ids, objects, [piece, count]); {"ter"/"furn":
+       value, "colors"/"palette": paint}; or {"distribution"}, {"param", "fallback"}, {"switch", "cases"}.
+       A "palettes" entry can also be a distribution/param. For display the resolver takes the first
+       possible id (parameter defaults resolved) and records the alternatives.
+     - Rows are split with BN's wcwidth rule (a zero-width code point joins the previous cell); ported in
+       CellText. Rows use 110+ combining marks in core.
+     - apartment_mod_new.json does not share ids with apartment_mod.json (it uses apartments_mod_tower_110
+       etc.), so the "several mapgens for one om_terrain" example was wrong; the case is still common
+       (e.g. house variants) and handled.
+   - Open for later stages: the resolver reads objects with Godot's JSON (floats). Stage 3 must re-read the
+     file with BnJson before editing. Monstergroup merge semantics and palette parameter "scope" aren't
+     modelled. Mod conflicts are reported as errors, not blocked.
  Stage 2 - Read-only ASCII viewer
    - Open a mapgen, resolve palettes, and render the multi-OMT grid with 24x24 boundaries. Legend shows where
      each symbol is defined. Hover shows the resolved ids.
