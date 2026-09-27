@@ -2,12 +2,18 @@ class_name MapCanvas
 extends Control
 ## Draws an AsciiMap as a grid of colored characters, with coordinate rulers
 ## and the 24x24 overmap-tile boundaries. Wheel zooms around the cursor;
-## middle or right drag (or space + left drag) pans.
+## middle or right drag (or space + left drag) pans. A left drag is reported
+## as cell_pressed / cell_dragged / cell_released for the drawing tools.
 
 ## The cell under the mouse changed; (-1, -1) when it left the map.
 signal cell_hovered(cell: Vector2i)
-## A cell was left-clicked.
-signal cell_clicked(cell: Vector2i)
+## The left button went down on a cell. [param alt] and [param shift] are
+## the modifier keys.
+signal cell_pressed(cell: Vector2i, alt: bool, shift: bool)
+## The mouse moved to another cell during a left drag (clamped to the map).
+signal cell_dragged(cell: Vector2i, shift: bool)
+## The left button was released (the cell is clamped to the map).
+signal cell_released(cell: Vector2i, shift: bool)
 
 const OMT := MapgenResolver.OMT_SIZE
 const RULER := 28.0
@@ -22,6 +28,7 @@ const HOVER := Color(1, 1, 1, 0.9)
 const HIGHLIGHT := Color8(120, 100, 20)
 const EMPTY_BG := Color8(34, 34, 40)
 const PROBLEM_BG := Color8(150, 0, 40)
+const PREVIEW_BG := Color(0.3, 0.6, 1.0, 0.45)
 
 ## Line characters drawn as lines, so walls join whatever the font:
 ## sides as [N, E, S, W].
@@ -48,6 +55,12 @@ var highlight_key := "":
 	set(v):
 		highlight_key = v
 		queue_redraw()
+## Cells a tool is about to paint, drawn with [member preview_key]'s look.
+var preview: Array[Vector2i] = []:
+	set(v):
+		preview = v
+		queue_redraw()
+var preview_key := ""
 var cell_size := 18.0
 ## Screen position of cell (0, 0)'s top-left corner.
 var origin := Vector2(RULER + 8, RULER + 8)
@@ -56,6 +69,8 @@ var hovered := -Vector2i.ONE
 var _font: Font
 var _panning := false
 var _space := false
+var _dragging := false
+var _drag_cell := -Vector2i.ONE
 
 
 func _init() -> void:
@@ -76,6 +91,12 @@ func cell_at(pos: Vector2) -> Vector2i:
 	if c.x < 0 or c.y < 0 or c.x >= ascii.size.x or c.y >= ascii.size.y:
 		return -Vector2i.ONE
 	return c
+
+
+## The cell at a point, clamped to the map (for drags that leave it).
+func cell_at_clamped(pos: Vector2) -> Vector2i:
+	var c := Vector2i(((pos - origin) / cell_size).floor())
+	return c.clamp(Vector2i.ZERO, ascii.size - Vector2i.ONE)
 
 
 ## Fits the whole map in view, capped at a readable size.
@@ -110,10 +131,16 @@ func _gui_input(event: InputEvent) -> void:
 				or (mb.button_index == MOUSE_BUTTON_LEFT and _space):
 			_panning = mb.pressed
 			accept_event()
-		elif mb.pressed and mb.button_index == MOUSE_BUTTON_LEFT:
-			var c := cell_at(mb.position)
-			if c.x >= 0:
-				cell_clicked.emit(c)
+		elif mb.button_index == MOUSE_BUTTON_LEFT:
+			if mb.pressed:
+				var c := cell_at(mb.position)
+				if c.x >= 0:
+					_dragging = true
+					_drag_cell = c
+					cell_pressed.emit(c, mb.alt_pressed, mb.shift_pressed)
+			elif _dragging:
+				_dragging = false
+				cell_released.emit(cell_at_clamped(mb.position), mb.shift_pressed)
 			accept_event()
 	elif event is InputEventMouseMotion:
 		var mm := event as InputEventMouseMotion
@@ -121,6 +148,11 @@ func _gui_input(event: InputEvent) -> void:
 			origin += mm.relative
 			queue_redraw()
 		_set_hovered(cell_at(mm.position))
+		if _dragging:
+			var c := cell_at_clamped(mm.position)
+			if c != _drag_cell:
+				_drag_cell = c
+				cell_dragged.emit(c, mm.shift_pressed)
 	elif event is InputEventKey:
 		var k := event as InputEventKey
 		if k.keycode == KEY_SPACE:
@@ -132,6 +164,9 @@ func _notification(what: int) -> void:
 	if what == NOTIFICATION_MOUSE_EXIT:
 		_set_hovered(-Vector2i.ONE)
 		_panning = false
+	elif what == NOTIFICATION_FOCUS_EXIT and _dragging:
+		_dragging = false
+		cell_released.emit(_drag_cell, false)
 
 
 func _set_hovered(c: Vector2i) -> void:
@@ -191,10 +226,31 @@ func _draw() -> void:
 				draw_string(_font, Vector2(p.x + (cs - tw) / 2.0, p.y + baseline), ch,
 						HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, ascii.fg[i])
 
+	_draw_preview(font_size, baseline, draw_text)
 	_draw_grid(x0, y0, x1, y1)
 	if hovered.x >= 0:
 		draw_rect(Rect2(origin + Vector2(hovered) * cs, Vector2(cs, cs)), HOVER, false, 2.0)
 	_draw_rulers(x0, y0, x1, y1)
+
+
+func _draw_preview(font_size: int, baseline: float, draw_text: bool) -> void:
+	if preview.is_empty():
+		return
+	var look := ascii.look_for(preview_key)
+	var cs := cell_size
+	for c in preview:
+		var p := origin + Vector2(c) * cs
+		var rect := Rect2(p, Vector2(cs, cs))
+		draw_rect(rect, look.colors.bg)
+		draw_rect(rect, PREVIEW_BG)
+		if draw_text and look.ch != " ":
+			var sides: Variant = LINES.get(look.ch)
+			if sides != null:
+				_draw_line_glyph(rect, sides, look.colors.fg)
+			else:
+				var tw := _font.get_string_size(look.ch, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
+				draw_string(_font, Vector2(p.x + (cs - tw) / 2.0, p.y + baseline), look.ch,
+						HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, look.colors.fg)
 
 
 func _draw_line_glyph(rect: Rect2, sides: Array, color: Color) -> void:

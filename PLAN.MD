@@ -174,6 +174,10 @@ Known pitfalls (verified):
    warns about the constructs that wouldn't come back identical (non-canonical escapes such as é or \/,
    duplicate keys, exponents, ints beyond 64 bits, a BOM). If user files hit those, Stage 3 can keep the
    original text of untouched top-level objects and write it back verbatim.
+   Correction (Stage 3): the formatter normalizes numbers (1.50 -> 1.5) but keeps string escapes exactly as
+   written ("é\/" stays), so re-encoding a file with such escapes WOULD change untouched strings.
+   JsonFile therefore writes every top-level object that is unchanged as its original text (BnJson
+   records each element's byte span), and only re-encodes edited objects.
  - BnJson.parse (GDScript) is ~20x slower than Godot's native JSON: ~9.5s vs ~0.5s for all 30MB of
    data/json. Stage 1 should index read-only data with JSON.parse_string (int/float doesn't matter there)
    and use BnJson only for files that are opened for editing and saved.
@@ -321,13 +325,59 @@ Development stages (each ends with a headless-testable acceptance check):
      indexing; files opened for editing are re-read with BnJson.
    - A map without "rows" (fill_ter only) needs rows created on the first paint; multi-tile rows must stay
      (24R) x (24C) with every row the same width in cells.
- Stage 3 - Editing core + workspace
+ Stage 3 - Editing core + workspace  [DONE 2026-09-27]
    - Paint with symbols from the pool, "New symbol" (defined in the map), pick symbols, undo/redo, save to
      the workspace through the formatter, create new mapgen (choose om_terrain grid size) with the
      overmap_terrain warning and auto-fix.
    - Accept: after an edit, a diff of the workspace file against its BN original touches only the edited
      rows and the map's own "terrain"/"furniture" entries. (Palette files change only in Stage 4, and
      their diffs must likewise touch only the edited palette.)
+   - Result: tools/run_tests.sh passes 59 tests. tests/test_edit_bn.gd edits apartments_mod_tower (2x2, no
+     own terrain/furniture yet) and house_01 (has both), paints rows in several OMTs, adds a symbol, saves
+     to a temp workspace and checks `diff -U0` against BN: every changed line is an edited row or inside
+     the map's terrain/furniture, every other object is unchanged, and BN's file keeps its sha256. A
+     main-scene test drives pick, line, undo/redo, the New symbol and New map dialogs, and save.
+   - Code: src/edit/ (EditSession, MapDocument, JsonFile, Workspace, MapTool, Shapes), src/ui/
+     new_symbol_dialog.gd, new_map_dialog.gd; MapCanvas drag signals + preview; LegendPanel "New
+     symbol..."; MapBrowser marks workspace files. DataIndex layers the workspace over BN (a workspace
+     file replaces the BN file at the same path; new files load in BFS order), indexes overmap_terrain ids,
+     and has file_path()/mod_for_path().
+   - How it works: every edit goes straight into the BnJson object (rows as strings, the map's own
+     terrain/furniture), so undo restores the exact object and saving is compose -> formatter -> write.
+     Maps from one file share a JsonFile. Tools: Paint (B), Line (L), Rect (R, Shift fills), Fill (F,
+     4-connected), Pick (I or Alt+click); Esc cancels a drag, Ctrl+Z / Ctrl+Y or Ctrl+Shift+Z. The brush is
+     per map. Closing the last map of a changed file, reloading, switching BN/mods/workspace and quitting
+     all ask to save or discard. Workspace: --workspace, File > Workspace folder, else
+     <user data>/workspace; it may not be inside BN (or contain it), and Workspace.write_file refuses to.
+     manifest.json records base_sha256 + base_commit (read from .git without running git) on the first
+     save of a BN file, or {"new": true}.
+   - Decisions and checks (against BN source/data):
+     - Undefined " " and "." are fine with fill_ter or in a nested chunk (mapgen.cpp setup_common), so a
+       map without rows gets rows of spaces on the first paint (undo removes them again), and a new map
+       starts as spaces over fill_ter. A new om_terrain map requires fill_ter.
+     - A new member ("rows", "terrain", "furniture") is inserted after fill_ter/rows/palettes rather than
+       appended, to match how BN files are laid out.
+     - New symbol keys: one display column, not wide (CJK), not " "/".", and not defined by the map or ANY
+       of its palettes (even a palette key with only items would add its items). The suggestion tries the
+       furniture's then the terrain's own symbol, then a-z, A-Z, 0-9, punctuation, then Latin-1 and up. The
+       dialog lists existing symbols with the same terrain + furniture so they can be reused instead.
+     - om_terrain -> overmap_terrain: mapgen ids match the overmap_terrain id itself (BN adds the
+       _north/... rotations), or a LINEAR overmap_terrain's id + _straight/_curved/_end/_tee/_four_way.
+       With that rule only 18 of 5544 core om_terrain ids have none (lab_* used by hardcoded mapgen,
+       FEMA_be, "null"), so the warning is meaningful and is listed with the map's problems.
+     - The auto-fix appends one overmap_terrain with the missing ids to the map's own file: copy-from the
+       core abstract generic_city_building, a name from the id, color light_gray. BN's strict loading
+       rejects a value equal to the inherited one, so "sym" is inherited ("^") rather than restated.
+     - BN ignores fill_ter in nested chunks (setup_internal for nested never reads it); no core or mod
+       nested chunk sets one, so the resolver's behaviour there doesn't matter yet.
+   - Not done / open: the Select tool (copy/paste/move) from the UI sketch; removing or renaming symbols;
+     the auto-fix isn't undoable (it marks the file changed; discarding drops it); edits to a file with
+     several open maps can only be discarded all together; a file saved while a workspace copy was
+     edited outside the editor is overwritten without warning (Stage 3b's sync compares against BN, not
+     the workspace). New files outside every loaded mod's data folder are refused; new mods aren't
+     supported. Stroke end re-resolves the map (opening the 16x8 nuclear plant, file read included, takes ~30 ms)
+     but skips the full redraw unless symbols changed (that was 130 ms there); painting itself
+     updates only the touched cells and their wall neighbours.
  Stage 3b - Sync window (push / refresh / conflict detection).
    - Accept: push into a temp copy of BN, and a conflict is detected when the BN file changed after the base
      was recorded.

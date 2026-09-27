@@ -21,6 +21,11 @@ class ParseResult:
 	## 1-based line of the error.
 	var error_line := 0
 	var warnings := PackedStringArray()
+	## Byte offset each warning refers to, parallel to [member warnings].
+	var warning_offsets := PackedInt64Array()
+	## When the top-level value is an array: each element's [start, end) byte
+	## range in the input, so an untouched element can be written back as it was.
+	var spans: Array[Vector2i] = []
 
 	func ok() -> bool:
 		return error.is_empty()
@@ -142,7 +147,8 @@ class _Parser:
 		if n >= 3 and b[0] == 0xef and b[1] == 0xbb and b[2] == 0xbf:
 			pos = 3
 			_warn("UTF-8 byte order mark")
-		var value: Variant = _value()
+		_skip_ws()
+		var value: Variant = _array(true) if pos < n and b[pos] == 0x5b else _value()
 		if result.ok():
 			_skip_ws()
 			if pos < n:
@@ -158,6 +164,7 @@ class _Parser:
 
 	func _warn(msg: String) -> void:
 		result.warnings.append("line %d: %s" % [b.slice(0, mini(pos, n)).count(0x0a) + 1, msg])
+		result.warning_offsets.append(pos)
 
 	func _skip_ws() -> void:
 		while pos < n:
@@ -234,7 +241,8 @@ class _Parser:
 				return null
 		return null
 
-	func _array() -> Variant:
+	## With [param top], records each element's span in result.spans.
+	func _array(top := false) -> Variant:
 		pos += 1
 		var a := []
 		_skip_ws()
@@ -242,9 +250,13 @@ class _Parser:
 			pos += 1
 			return a
 		while true:
+			_skip_ws()
+			var start := pos
 			var v: Variant = _value()
 			if not result.ok():
 				return null
+			if top:
+				result.spans.append(Vector2i(start, pos))
 			a.append(v)
 			_skip_ws()
 			if pos < n and b[pos] == 0x2c:

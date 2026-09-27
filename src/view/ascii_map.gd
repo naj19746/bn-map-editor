@@ -83,13 +83,31 @@ func refresh() -> void:
 	for y in size.y:
 		var row := resolved.cells[y]
 		for x in size.x:
-			var look := look_for(row[x])
-			var i := y * size.x + x
-			chars[i] = look.ch
-			fg[i] = look.colors.fg
-			bg[i] = look.colors.bg
-			states[i] = look.state
+			_set_look(x, y, look_for(row[x]))
 	_join_walls()
+
+
+## Recomputes [param points] after their keys changed (and the walls around
+## them), without redoing the whole map. The symbols must mean the same.
+func update_cells(points: Array[Vector2i]) -> void:
+	var rejoin := {}
+	for p in points:
+		_set_look(p.x, p.y, look_for(resolved.cells[p.y][p.x]))
+		for d: Vector2i in [Vector2i.ZERO, Vector2i.UP, Vector2i.DOWN, Vector2i.LEFT, Vector2i.RIGHT]:
+			var q := p + d
+			if q.x >= 0 and q.y >= 0 and q.x < size.x and q.y < size.y:
+				rejoin[q] = true
+	for q: Vector2i in rejoin:
+		chars[q.y * size.x + q.x] = looks[resolved.cells[q.y][q.x]].ch
+		_join_wall(q.x, q.y)
+
+
+func _set_look(x: int, y: int, look: Look) -> void:
+	var i := y * size.x + x
+	chars[i] = look.ch
+	fg[i] = look.colors.fg
+	bg[i] = look.colors.bg
+	states[i] = look.state
 
 
 func state_at(x: int, y: int) -> State:
@@ -189,21 +207,25 @@ func _make_look(key: String) -> Look:
 func _join_walls() -> void:
 	for y in size.y:
 		for x in size.x:
-			var look: Look = looks[resolved.cells[y][x]]
-			if not look.auto_wall:
-				continue
-			var group := look.terrain.connect_group
-			var mask := 0
-			if _connects(x, y + 1, group):
-				mask |= 1
-			if _connects(x + 1, y, group):
-				mask |= 2
-			if _connects(x - 1, y, group):
-				mask |= 4
-			if _connects(x, y - 1, group):
-				mask |= 8
-			if mask:
-				chars[y * size.x + x] = WALL_LINES[mask]
+			_join_wall(x, y)
+
+
+func _join_wall(x: int, y: int) -> void:
+	var look: Look = looks[resolved.cells[y][x]]
+	if not look.auto_wall:
+		return
+	var group := look.terrain.connect_group
+	var mask := 0
+	if _connects(x, y + 1, group):
+		mask |= 1
+	if _connects(x + 1, y, group):
+		mask |= 2
+	if _connects(x - 1, y, group):
+		mask |= 4
+	if _connects(x, y - 1, group):
+		mask |= 8
+	if mask:
+		chars[y * size.x + x] = WALL_LINES[mask]
 
 
 func _connects(x: int, y: int, group: String) -> bool:

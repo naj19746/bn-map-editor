@@ -11,6 +11,11 @@ extends RefCounted
 ##
 ## Files are read with Godot's JSON (numbers become floats), which is fine for
 ## an index. Anything that gets saved must be re-read with BnJson.
+##
+## With a workspace, its files are layered over BN's: a workspace file at the
+## same relative path replaces the BN file, and new workspace files load in
+## their place in BFS order. [member Source.path] stays relative either way;
+## file_path() says where the file actually is.
 
 const TYPE_TERRAIN := "terrain"
 const TYPE_FURNITURE := "furniture"
@@ -132,7 +137,13 @@ class MapgenRef:
 		return -Vector2i.ONE
 
 
+## om_terrain ids ending in one of these belong to the LINEAR overmap_terrain
+## without the suffix (BN's om_lines::mapgen_suffixes).
+const LINEAR_SUFFIXES := ["_straight", "_curved", "_end", "_tee", "_four_way"]
+
 var bn_path := ""
+## Folder layered over [member bn_path], or "".
+var workspace_path := ""
 var catalog: ModCatalog
 ## Mods in load order.
 var mods := PackedStringArray()
@@ -148,6 +159,8 @@ var om_terrain := {}
 var nested := {}
 var update := {}
 var mapgens: Array[MapgenRef] = []
+## overmap_terrain id -> Source of its last definition. Abstracts aren't ids.
+var overmap_terrain := {}
 ## Load problems: unparsable files, unresolved copy-from, bad mod selection.
 var errors := PackedStringArray()
 var file_count := 0
@@ -158,11 +171,13 @@ var _deferred: Array = []
 
 
 ## Loads the core mod plus [param selected] mods (in load order, with their
-## dependencies). Check [member errors] afterwards.
+## dependencies), with [param p_workspace] (if any) layered on top. Check
+## [member errors] afterwards.
 static func load_bn(p_bn_path: String, selected := PackedStringArray(),
-		p_catalog: ModCatalog = null) -> DataIndex:
+		p_catalog: ModCatalog = null, p_workspace := "") -> DataIndex:
 	var index := DataIndex.new()
 	index.bn_path = p_bn_path.simplify_path()
+	index.workspace_path = p_workspace.simplify_path() if p_workspace else ""
 	index.catalog = p_catalog if p_catalog else ModCatalog.scan(index.bn_path)
 	index.errors.append_array(index.catalog.errors)
 	var order := index.catalog.load_order(selected)
@@ -176,39 +191,63 @@ func _load_all() -> void:
 	_add_builtin(TYPE_TERRAIN, "t_null")
 	_add_builtin(TYPE_FURNITURE, "f_null")
 	for mod in mods:
-		for file in data_files(catalog.get_mod(mod).path):
+		var dir := catalog.get_mod(mod).path
+		for file in data_files(dir, true, _overlay(dir)):
 			_load_file(mod, file)
 	for mod in mods:
 		var interactions := catalog.get_mod(mod).path.path_join("mod_interactions")
-		if not DirAccess.dir_exists_absolute(interactions):
-			continue
 		for other in mods:
 			var dir := interactions.path_join(other)
-			if DirAccess.dir_exists_absolute(dir):
-				for file in data_files(dir, false):
-					_load_file(mod, file)
+			for file in data_files(dir, false, _overlay(dir)):
+				_load_file(mod, file)
 	_finish_deferred()
+
+
+## The workspace folder mirroring [param dir] (a folder in the BN checkout).
+func _overlay(dir: String) -> String:
+	if workspace_path.is_empty():
+		return ""
+	return workspace_path.path_join(relative_path(dir))
 
 
 ## The *.json files under [param dir] in BN's load order. With
 ## [param skip_interactions], folders named "mod_interactions" are left out.
-static func data_files(dir: String, skip_interactions := true) -> PackedStringArray:
+## With [param overlay], files and folders there are merged in, and an
+## overlay file replaces the one at the same relative path.
+static func data_files(dir: String, skip_interactions := true, overlay := "") -> PackedStringArray:
 	var out := PackedStringArray()
-	var queue := PackedStringArray([dir])
+	# Relative folders, "" for dir itself.
+	var queue := PackedStringArray([""])
 	var head := 0
 	while head < queue.size():
-		var d := queue[head]
+		var rel := queue[head]
 		head += 1
-		var files := DirAccess.get_files_at(d)
-		files.sort()
-		for f in files:
+		var d := dir.path_join(rel) if rel else dir
+		var o := (overlay.path_join(rel) if rel else overlay) if overlay else ""
+		for f in _union(_list(d, false), _list(o, false)):
 			if f.ends_with(".json"):
-				out.append(d.path_join(f))
-		var subdirs := DirAccess.get_directories_at(d)
-		subdirs.sort()
-		for s in subdirs:
+				out.append(o.path_join(f) if o and FileAccess.file_exists(o.path_join(f)) else d.path_join(f))
+		for s in _union(_list(d, true), _list(o, true)):
 			if not (skip_interactions and s == "mod_interactions"):
-				queue.append(d.path_join(s))
+				queue.append(rel.path_join(s) if rel else s)
+	return out
+
+
+## Files or folders in [param dir]; none if it doesn't exist (DirAccess would
+## log an error).
+static func _list(dir: String, folders: bool) -> PackedStringArray:
+	if dir.is_empty() or not DirAccess.dir_exists_absolute(dir):
+		return PackedStringArray()
+	return DirAccess.get_directories_at(dir) if folders else DirAccess.get_files_at(dir)
+
+
+## Sorted, without duplicates.
+static func _union(a: PackedStringArray, b: PackedStringArray) -> PackedStringArray:
+	var out := a.duplicate()
+	for s in b:
+		if not out.has(s):
+			out.append(s)
+	out.sort()
 	return out
 
 
@@ -241,8 +280,47 @@ func _load_file(mod: String, file: String) -> void:
 			_add_object(o, Source.new(mod, rel, i))
 
 
+## [param file] relative to the BN checkout (or the workspace, for a
+## workspace file).
 func relative_path(file: String) -> String:
+	if workspace_path and file.begins_with(workspace_path + "/"):
+		return file.trim_prefix(workspace_path + "/")
 	return file.trim_prefix(bn_path + "/")
+
+
+## Where the file at BN-relative [param rel] is read from: the workspace copy
+## if there is one, else the BN checkout.
+func file_path(rel: String) -> String:
+	if in_workspace(rel):
+		return workspace_path.path_join(rel)
+	return bn_path.path_join(rel)
+
+
+## True when the workspace has a file at [param rel].
+func in_workspace(rel: String) -> bool:
+	return not workspace_path.is_empty() and FileAccess.file_exists(workspace_path.path_join(rel))
+
+
+## The loaded mod whose data folder holds [param rel], or "" (a file there
+## wouldn't load in BN). The innermost folder wins, since a mod's folder can
+## sit inside another's.
+func mod_for_path(rel: String) -> String:
+	var best := ""
+	var best_len := -1
+	for mod in mods:
+		var dir := relative_path(catalog.get_mod(mod).path)
+		if rel.begins_with(dir + "/") and dir.length() > best_len and not _in_interactions(rel, dir):
+			best = mod
+			best_len = dir.length()
+	return best
+
+
+## True when [param rel] is in a "mod_interactions" folder that doesn't load:
+## only <dir>/mod_interactions/<loaded mod>/... does.
+func _in_interactions(rel: String, dir: String) -> bool:
+	var parts := rel.substr(dir.length() + 1).split("/")
+	var i := parts.find("mod_interactions")
+	return i >= 0 and (i != 0 or parts.size() < 3 or not mods.has(parts[1]))
 
 
 func _add_object(o: Dictionary, src: Source) -> void:
@@ -257,7 +335,10 @@ func _add_object(o: Dictionary, src: Source) -> void:
 		"monstergroup":
 			_add_definition(monster_groups, str(o.get("name", o.get("id", ""))), src)
 		"mapgen":
-			_add_mapgen(o, src)
+			add_mapgen(o, src)
+		"overmap_terrain":
+			for id in _tags(o.get("id", [])):
+				overmap_terrain[id] = src
 
 
 func _add_definition(table: Dictionary, id: String, src: Source, data := {}) -> void:
@@ -396,7 +477,9 @@ func _finish_deferred() -> void:
 	_deferred = []
 
 
-func _add_mapgen(o: Dictionary, src: Source) -> void:
+## Indexes the mapgen object [param o] (also used for mapgens the editor
+## creates). Returns its entry, or null if it has no id.
+func add_mapgen(o: Dictionary, src: Source) -> MapgenRef:
 	var ref := MapgenRef.new()
 	ref.source = src
 	ref.method = str(o.get("method", "json"))
@@ -429,7 +512,7 @@ func _add_mapgen(o: Dictionary, src: Source) -> void:
 		ref.chunk_size = _mapgensize(o)
 	else:
 		errors.append("mapgen without om_terrain, nested_mapgen_id or update_mapgen_id (%s)" % src)
-		return
+		return null
 	mapgens.append(ref)
 	var seen := {}
 	for id in ref.ids:
@@ -439,6 +522,29 @@ func _add_mapgen(o: Dictionary, src: Source) -> void:
 		if not table.has(id):
 			table[id] = []
 		table[id].append(ref)
+	return ref
+
+
+## Undoes add_mapgen, e.g. when a new, unsaved mapgen is discarded.
+func remove_mapgen(ref: MapgenRef) -> void:
+	mapgens.erase(ref)
+	for table: Dictionary in [om_terrain, nested, update]:
+		for id in ref.ids:
+			var refs: Array = table.get(id, [])
+			refs.erase(ref)
+			if refs.is_empty():
+				table.erase(id)
+
+
+## True when an overmap_terrain gives [param om_id] a place on the overmap:
+## defined under that id, or a LINEAR terrain's id plus one of its suffixes.
+func has_overmap_terrain(om_id: String) -> bool:
+	if overmap_terrain.has(om_id):
+		return true
+	for suffix: String in LINEAR_SUFFIXES:
+		if om_id.ends_with(suffix) and overmap_terrain.has(om_id.trim_suffix(suffix)):
+			return true
+	return false
 
 
 ## "mapgensize", defaulting to one overmap tile like BN.
@@ -468,7 +574,7 @@ func mapgens_for(id: String) -> Array[MapgenRef]:
 ## are floats; fine for viewing). Returns {} if the file can't be read.
 func read_object(src: Source) -> Dictionary:
 	var json := JSON.new()
-	if json.parse(FileAccess.get_file_as_string(bn_path.path_join(src.path))) != OK:
+	if json.parse(FileAccess.get_file_as_string(file_path(src.path))) != OK:
 		return {}
 	var objects: Variant = json.data
 	if objects is Dictionary:

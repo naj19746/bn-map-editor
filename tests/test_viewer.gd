@@ -3,6 +3,7 @@ extends "res://tests/support/test_case.gd"
 ## and the viewer UI opens them headless.
 
 const BnEnv := preload("res://tests/support/bn_env.gd")
+const TempTree := preload("res://tests/support/temp_tree.gd")
 const MAX_REPORTED := 20
 
 static var _core: DataIndex
@@ -109,6 +110,8 @@ func test_main_scene_opens_map() -> void:
 	# The runner works before the root enters the tree, so _ready won't fire
 	# on its own; build the UI directly.
 	main._ready()
+	var ws := TempTree.make({})
+	main._workspace_override = ws
 	main.load_index(index.bn_path)
 	var m: Variant = main.open_id("apartments_mod_tower_NW")
 	if check(m != null, "opened"):
@@ -128,8 +131,9 @@ func test_main_scene_opens_map() -> void:
 		check_eq(canvas.cell_at(Vector2(40 + 485, 45)), -Vector2i.ONE, "past the map")
 		canvas.cell_hovered.emit(Vector2i(30, 40))
 		check(main._status.text.contains("apartments_mod_tower_SE"), main._status.text)
-		canvas.cell_clicked.emit(Vector2i(30, 40))
-		check_eq(canvas.highlight_key, m.ascii.resolved.cells[40][30], "click highlights the symbol")
+		canvas.cell_pressed.emit(Vector2i(30, 40), true, false)
+		check_eq(canvas.highlight_key, m.ascii.resolved.cells[40][30], "alt+click picks and highlights the symbol")
+		check_eq(main.tool.key, m.ascii.resolved.cells[40][30], "and makes it the brush")
 
 		main.set_show_furniture(false)
 		check(not m.ascii.show_furniture, "furniture toggle reaches the map")
@@ -137,3 +141,73 @@ func test_main_scene_opens_map() -> void:
 		check_eq(main.maps.size(), 0)
 	check(main.open_id("no_such_map") == null, "unknown id")
 	main.free()
+	TempTree.remove(ws)
+
+
+## Paint, undo, new symbol and save through the main scene.
+func test_main_scene_edits_map() -> void:
+	var index := _core_index()
+	if index == null:
+		return
+	if not JsonFormatter.new().is_available():
+		skip("json_formatter not built")
+		return
+	var main: Control = load("res://main.tscn").instantiate()
+	main.auto_start = false
+	main._ready()
+	var ws := TempTree.make({})
+	main._workspace_override = ws
+	main.load_index(index.bn_path)
+	var m: Variant = main.open_id("house_01")
+	if not check(m != null, "opened"):
+		main.free()
+		return
+	var canvas: MapCanvas = m.canvas
+	var wall: String = m.doc.resolved.key_at(0, 0)
+	var target := Vector2i(5, 5)
+	var before: String = m.doc.resolved.key_at(target.x, target.y)
+
+	canvas.cell_pressed.emit(target, false, false)
+	check_eq(m.doc.resolved.key_at(target.x, target.y), before, "no brush, nothing painted")
+	canvas.cell_pressed.emit(Vector2i(0, 0), true, false)
+	check_eq(main.tool.key, wall, "picked")
+	main.set_tool(MapTool.Kind.LINE)
+	canvas.cell_pressed.emit(target, false, false)
+	canvas.cell_dragged.emit(target + Vector2i(3, 0), false)
+	check_eq(canvas.preview.size(), 4, "line preview on the canvas")
+	canvas.cell_released.emit(target + Vector2i(3, 0), false)
+	check(canvas.preview.is_empty(), "preview cleared")
+	check_eq(m.doc.resolved.key_at(target.x + 3, target.y), wall, "line painted")
+	check_eq(m.ascii.resolved, m.doc.resolved, "view follows the document")
+	check(main._tabs.get_tab_title(0).ends_with(" *"), "tab marked dirty")
+	main.undo()
+	check_eq(m.doc.resolved.key_at(target.x, target.y), before, "undone")
+	main.redo()
+
+	main._new_symbol_dialog.setup(m.doc)
+	main._new_symbol_dialog.terrain.select_id("t_floor")
+	main._new_symbol_dialog.furniture.select_id("f_chair")
+	main._new_symbol_dialog._on_ids_changed()
+	var key: String = main._new_symbol_dialog.key_edit.text
+	check(not key.is_empty(), "a key is suggested")
+	check(not main._new_symbol_dialog.get_ok_button().disabled, "valid")
+	main._new_symbol_dialog._on_confirmed()
+	check_eq(main.tool.key, key, "the new symbol becomes the brush")
+	check_eq(m.doc.object().furniture.get(key), "f_chair")
+
+	check_eq(main.save_current(), "")
+	check(not main._tabs.get_tab_title(0).ends_with(" *"), "clean after save")
+	check(FileAccess.file_exists(ws.path_join(m.ref.source.path)), "saved into the workspace")
+
+	# New map dialog.
+	main._new_map_dialog.setup(main.session)
+	main._new_map_dialog.base_edit.text = "stage3_test_map"
+	main._new_map_dialog.width.value = 2
+	main._new_map_dialog._autofill()
+	check(not main._new_map_dialog.get_ok_button().disabled, main._new_map_dialog._info.text)
+	main._new_map_dialog._on_confirmed()
+	check_eq(main.maps.size(), 2, "new map opened in a tab")
+	check_eq(main.current_map().doc.size(), Vector2i(48, 24))
+	check_eq(main.current_map().doc.problems(), PackedStringArray())
+	main.free()
+	TempTree.remove(ws)

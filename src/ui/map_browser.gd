@@ -2,7 +2,8 @@ class_name MapBrowser
 extends VBoxContainer
 ## Every mapgen entry in the index, as mod > file > entry. The search box
 ## matches om_terrain / nested ids and file paths. Activating an entry
-## (double-click or Enter) emits open_requested.
+## (double-click or Enter) emits open_requested. Files with a workspace copy
+## are marked.
 
 signal open_requested(ref: DataIndex.MapgenRef)
 
@@ -42,8 +43,16 @@ func _init() -> void:
 	add_child(_count)
 
 
+const WORKSPACE_COLOR := Color(0.55, 0.85, 1.0)
+
+
 func set_index(index: DataIndex) -> void:
 	_index = index
+	_rebuild()
+
+
+## Rebuilds the tree, e.g. after a save changed which files are in the workspace.
+func refresh() -> void:
 	_rebuild()
 
 
@@ -115,6 +124,10 @@ func _rebuild() -> void:
 			file_item = _tree.create_item(mod_item)
 			file_item.set_text(0, _file_label(ref))
 			file_item.set_tooltip_text(0, ref.source.path)
+			if _index.in_workspace(ref.source.path):
+				file_item.set_text(0, _file_label(ref) + "  [workspace]")
+				file_item.set_custom_color(0, WORKSPACE_COLOR)
+				file_item.set_tooltip_text(0, ref.source.path + "\nEdited: loaded from the workspace")
 			file_item.set_selectable(0, false)
 			file_item.set_selectable(1, false)
 			file_item.collapsed = query.is_empty()

@@ -3,9 +3,12 @@ extends VBoxContainer
 ## Lists the symbols of the open map: how each one looks, its terrain and
 ## furniture, and where every definition comes from (the map, fill_ter, or
 ## which palette). Symbols the rows don't use are listed separately.
+## Selecting a symbol makes it the brush; "New symbol..." defines another.
 
 ## A symbol was selected ("" when the selection was cleared).
 signal key_selected(key: String)
+## The "New symbol..." button was pressed.
+signal new_symbol_requested
 
 const MAX_VALUE_TEXT := 90
 
@@ -15,15 +18,27 @@ var _ascii: AsciiMap
 ## key -> the symbol's TreeItem.
 var _items := {}
 var _selecting := false
+## The selected symbol, kept across rebuilds; null for none.
+var _selected: Variant = null
+var _new_button: Button
 
 
 func _init() -> void:
 	name = "Legend"
+	var top := HBoxContainer.new()
+	add_child(top)
 	_filter = LineEdit.new()
 	_filter.placeholder_text = "Filter symbols, ids, palettes"
 	_filter.clear_button_enabled = true
+	_filter.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_filter.text_changed.connect(func(_t: String) -> void: _rebuild())
-	add_child(_filter)
+	top.add_child(_filter)
+	_new_button = Button.new()
+	_new_button.text = "New symbol..."
+	_new_button.tooltip_text = "Define a new symbol in this map (Ctrl+E)"
+	_new_button.disabled = true
+	_new_button.pressed.connect(func() -> void: new_symbol_requested.emit())
+	top.add_child(_new_button)
 	_tree = Tree.new()
 	_tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_tree.hide_root = true
@@ -39,13 +54,18 @@ func _init() -> void:
 	add_child(_tree)
 
 
-func show_map(ascii: AsciiMap) -> void:
+## Shows [param ascii]'s symbols. [param editable] enables "New symbol...".
+func show_map(ascii: AsciiMap, editable := true) -> void:
+	if ascii != _ascii:
+		_selected = null
 	_ascii = ascii
+	_new_button.disabled = ascii == null or not editable
 	_rebuild()
 
 
 ## Selects [param key]'s entry without emitting key_selected.
 func select_key(key: String) -> void:
+	_selected = key
 	var item: TreeItem = _items.get(key)
 	if item == null:
 		return
@@ -62,10 +82,15 @@ func _on_selected() -> void:
 	while item and item.get_parent() and item.get_parent().get_metadata(0) is String:
 		item = item.get_parent()
 	var key: Variant = item.get_metadata(0) if item else null
+	_selected = key if key is String else null
 	key_selected.emit(key if key is String else "")
 
 
 func _rebuild() -> void:
+	var expanded := {}
+	for key: String in _items:
+		if not _items[key].collapsed:
+			expanded[key] = true
 	_tree.clear()
 	_items.clear()
 	if _ascii == null:
@@ -115,6 +140,12 @@ func _rebuild() -> void:
 			if _add_symbol(unused, key, 0, filter):
 				shown += 1
 		unused.set_text(1, "%d defined by palettes or the map" % shown)
+
+	for key: String in expanded:
+		if _items.has(key):
+			_items[key].collapsed = false
+	if _selected is String and _items.has(_selected):
+		select_key(_selected)
 
 
 ## Adds a symbol row with one child per definition. Returns false if the
