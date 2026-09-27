@@ -7,7 +7,7 @@ extends RefCounted
 ## <root>/manifest.json records, per file, what it was copied from:
 ##   {"files": {"data/json/mapgen/house.json": {"base_sha256": "...", "base_commit": "..."},
 ##              "data/json/mapgen/mine.json": {"new": true}}}
-## Stage 3b's sync compares BN's current file against base_sha256.
+## WorkspaceSync compares BN's current file against base_sha256 and pushes.
 
 const MANIFEST := "manifest.json"
 

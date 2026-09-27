@@ -21,6 +21,8 @@ var single_object := false
 var base_sha256 := ""
 ## True when it was read from the workspace (or has been saved there).
 var in_workspace := false
+## True for a file created in the editor and not saved yet.
+var is_new := false
 var warnings := PackedStringArray()
 
 var _raw := PackedByteArray()
@@ -63,6 +65,7 @@ static func load_file(abs_path: String, rel: String, error_out: Array = []) -> J
 static func create(rel: String) -> JsonFile:
 	var f := JsonFile.new()
 	f.rel_path = rel
+	f.is_new = true
 	return f
 
 
@@ -84,7 +87,7 @@ func append(o: Dictionary) -> int:
 
 ## Unsaved changes: an object changed since the last save, or objects added.
 func is_dirty() -> bool:
-	if objects.size() != _saved_count or _raw.is_empty() and not in_workspace:
+	if objects.size() != _saved_count or is_new:
 		return true
 	for i: int in _pristine:
 		if BnJson.stringify(objects[i]) != _saved[i]:
@@ -131,8 +134,16 @@ func lossy_warnings() -> PackedStringArray:
 ## Records the current state as saved.
 func mark_saved() -> void:
 	in_workspace = true
+	is_new = false
 	_saved_count = objects.size()
 	for i: int in _pristine:
 		_saved[i] = BnJson.stringify(objects[i])
 	for i in range(_spans.size(), objects.size()):
 		_saved[i] = BnJson.stringify(objects[i])
+
+
+## The saved file was pushed into BN (and the workspace copy deleted):
+## [param sha256] is BN's file now, the base for the next save.
+func mark_pushed(sha256: String) -> void:
+	in_workspace = false
+	base_sha256 = sha256

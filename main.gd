@@ -3,7 +3,8 @@ extends Control
 ##
 ## Layout: menu bar and toolbar on top; map tabs with the canvas on the left;
 ## a side drawer (Browser, Legend) on the right; a status bar at the bottom.
-## Maps are edited through an EditSession and saved to the workspace.
+## Maps are edited through an EditSession and saved to the workspace; the
+## Sync window pushes workspace files into BN.
 ##
 ## Command line (after "--"): --bn <path> overrides the BN checkout,
 ## --workspace <path> the workspace folder, and --open <id> opens a mapgen by
@@ -18,6 +19,7 @@ enum Menu {
 	SPRING, SUMMER, AUTUMN, WINTER,
 	NEW_MAP, SAVE, SAVE_ALL, WORKSPACE,
 	UNDO, REDO, NEW_SYMBOL, ADD_OVERMAP,
+	SYNC,
 }
 
 const SEASONS := ["Spring", "Summer", "Autumn", "Winter"]
@@ -78,6 +80,7 @@ var _bn_dialog: FileDialog
 var _workspace_dialog: FileDialog
 var _new_symbol_dialog: NewSymbolDialog
 var _new_map_dialog: NewMapDialog
+var _sync_dialog: SyncDialog
 var _unsaved_dialog: ConfirmationDialog
 var _unsaved_files := PackedStringArray()
 var _after_unsaved := Callable()
@@ -586,6 +589,9 @@ func _on_menu(id: int) -> void:
 				_new_symbol_dialog.open(current_map().doc)
 		Menu.ADD_OVERMAP:
 			add_missing_overmap_terrain()
+		Menu.SYNC:
+			if session:
+				_sync_dialog.open(session)
 		Menu.SHOW_FURNITURE:
 			set_show_furniture(not show_furniture)
 		Menu.SHOW_KEYS:
@@ -614,6 +620,20 @@ func _update_edit_menu() -> void:
 	_edit_menu.set_item_disabled(_edit_menu.get_item_index(Menu.NEW_SYMBOL), m == null)
 	_edit_menu.set_item_disabled(_edit_menu.get_item_index(Menu.ADD_OVERMAP),
 			m == null or m.doc.missing_overmap_terrain().is_empty())
+
+
+## The Sync window pushed or discarded files. A push leaves the loaded data
+## as it was (BN now has the same content); a discarded copy's content is
+## still loaded, so reload when that's safe.
+func _on_sync_files_changed(reload_needed: bool) -> void:
+	_browser.refresh()
+	_update_tab_titles()
+	if not reload_needed:
+		_status.text = "Pushed into %s. Review and commit there." % index.bn_path
+	elif maps.is_empty():
+		_load_later(index.bn_path)
+	else:
+		_status.text = "Discarded a workspace copy. Reload the data (F5) to see BN's version."
 
 
 func _on_bn_chosen(path: String) -> void:
@@ -686,6 +706,9 @@ func _build_ui() -> void:
 		["Show row symbols", Menu.SHOW_KEYS, KEY_MASK_CTRL | KEY_K, true],
 	])
 	_view_menu.set_item_checked(_view_menu.get_item_index(Menu.SHOW_FURNITURE), true)
+	_menu(menu_bar, "Sync", [
+		["Sync with BN...", Menu.SYNC, KEY_MASK_CTRL | KEY_MASK_SHIFT | KEY_P],
+	])
 	_season_menu = PopupMenu.new()
 	_season_menu.name = "Season"
 	for i in SEASONS.size():
@@ -806,6 +829,9 @@ func _build_ui() -> void:
 		_add_tab(doc)
 		_browser.refresh())
 	add_child(_new_map_dialog)
+	_sync_dialog = SyncDialog.new()
+	_sync_dialog.files_changed.connect(_on_sync_files_changed)
+	add_child(_sync_dialog)
 	_unsaved_dialog = ConfirmationDialog.new()
 	_unsaved_dialog.title = "Unsaved changes"
 	_unsaved_dialog.ok_button_text = "Save"

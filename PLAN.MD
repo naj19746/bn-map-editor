@@ -428,9 +428,50 @@ Development stages (each ends with a headless-testable acceptance check):
    - Validation (Stage 7): DataIndex only indexes item groups and monster groups. Checking place_item /
      place_loot item ids, place_monster monster ids, vehicles, traps, fields, npc templates and "set" ids
      needs those types indexed too (items come in many "type"s: GENERIC, TOOL, ARMOR, COMESTIBLE, ...).
- Stage 3b - Sync window (push / refresh / conflict detection).
+ Stage 3b - Sync window (push / refresh / conflict detection).  [DONE 2026-09-27]
    - Accept: push into a temp copy of BN, and a conflict is detected when the BN file changed after the base
      was recorded.
+   - Result: tools/run_tests.sh passes 69 tests. tests/test_sync.gd edits real house_01, saves it to a temp
+     workspace, pushes into a temp BN holding a byte copy of its file (real BN keeps its sha256), sees one
+     changed object ("mapgen house_01"), saves again on the new base, then appends to the copy and gets
+     CHANGED_IN_BN, and push refuses. Fake-BN tests cover every state, overwrite, new files, unsafe
+     manifest paths, the object pairing, the dialog and the main-scene wiring. Disabling the base check
+     fails both acceptance tests.
+   - Code: src/edit/workspace_sync.gd (WorkspaceSync: scan/status, summary, push, remove_copy),
+     src/ui/sync_dialog.gd (SyncDialog, Sync > Sync with BN..., Ctrl+Shift+P). EditSession.mark_pushed and
+     JsonFile.is_new/mark_pushed keep open files consistent after a push.
+   - How it works: per file, one state: new (BN has none), modified (BN still matches the base), same as
+     BN (push only drops the copy), and the conflicts: BN changed since the base, BN deleted it, BN added a
+     file where ours was new, or untracked (a workspace file with no manifest entry where BN has one: no
+     base to check). "Missing" is a manifest entry whose file is gone; Discard forgets it. Conflicts start
+     unchecked; pushing a checked conflict asks, then overwrites (the "overwrite" option; "skip" is leaving
+     it unchecked). push() re-checks the state itself, so a stale window can't overwrite an unseen change.
+     BN is written through <file>.bnme-tmp + rename and read back. After a push the workspace copy, its
+     manifest entry and empty folders are deleted (decided above). "Discard workspace copy" throws a
+     copy's edits away; it asks first.
+   - Decisions and checks:
+     - Refresh is a rescan. With copies deleted after a push, "update an untouched workspace copy" can't
+       happen: a copy exists only because it was saved, so BN changing under it is always a conflict.
+     - The summary compares the workspace file with BN's file as it is NOW (what push would do), not with
+       the base: only the base's sha256 is stored, not its text. For a CHANGED_IN_BN conflict the list
+       therefore includes BN's own changes, reversed; the details pane says so. Storing base text for a
+       real three-way view belongs with the object-level merge.
+     - Objects pair by type + id (id, abstract, om_terrain, nested_mapgen_id, update_mapgen_id, or a
+       string "name" for monstergroup) and occurrence; keyless objects by type and occurrence, labelled
+       "speech #12" by position. Unchanged objects are compared by their bytes, which works because both
+       sides come out of json_formatter. Inserting a new variant before an existing one of the same
+       om_terrain shifts the pairing, so later variants show as changed; acceptable for a summary, not for
+       a merge.
+     - The index layers every workspace file, manifest or not, so the window lists untracked files too.
+     - Found in Stage 3 code: after a push, an open JsonFile still claimed to be in the workspace with no
+       base, so its next save would have been recorded as a NEW file and the next push reported a false
+       conflict; and a pushed newly-created file counted as dirty again. mark_pushed fixes both.
+     - A file with unsaved editor changes can't be pushed (save first); a file open in the editor can't
+       be discarded (the open copy would be stale). A push leaves the index valid (BN now has the same
+       bytes); a discard doesn't, so the editor reloads if no map is open, else asks for F5.
+     - Manifest paths are not trusted: push refuses absolute paths, "..", backslashes, ":" and empty parts.
+   - Not done / open: object-level merge; a pushed file isn't checked with json_formatter again (it was
+     formatted when saved, and push copies bytes); the window doesn't watch the disk (press Refresh).
  Stage 4 - Palette editor window (MVP item 5).
  Stage 5 - Item/monster placement layers (MVP item 6).
  Stage 6 - Nested chunks (MVP item 7).

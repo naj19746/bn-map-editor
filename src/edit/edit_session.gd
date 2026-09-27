@@ -127,6 +127,14 @@ func save(rel: String) -> String:
 	return ""
 
 
+## [param rel] was pushed into BN and its workspace copy deleted. An open
+## copy now counts as read from BN, so its next save records BN's new file
+## as the base instead of marking the file new.
+func mark_pushed(rel: String) -> void:
+	if files.has(rel):
+		files[rel].mark_pushed(FileAccess.get_sha256(workspace.bn_path.path_join(rel)))
+
+
 ## Saves every file with changes. Returns the errors.
 func save_all() -> PackedStringArray:
 	var errors := PackedStringArray()
