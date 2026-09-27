@@ -36,8 +36,11 @@ Mapgen format (what the editor models):
          - place_item / item   : a specific item id, "amount", "repeat", "chance" (a percentage, default 100;
                                  BN's mapgen.md wrongly says one-in-N for "item").
          - place_loot          : a specific item or a group, "chance" a percentage (default 100).
-         - place_monster       : ONE monster (a specific id, or one pick from a "group"), with chance
-                                 (a percentage, default 100), repeat, pack_size.
+         - place_monster       : ONE monster (a specific id, one pick from a weighted list of ids, or one
+                                 pick from a "group"), with chance (a percentage scaled by spawn density,
+                                 default 100), repeat, pack_size.
+         - place_vehicles      : a vehicle GROUP id (every vehicle prototype is also a group of its own
+                                 id), "chance" a percentage scaled by the vehicle spawn rate, DEFAULT 1.
          - place_monsters      : spawns the ENTIRE monster group, with chance (one-in-N, default 1), repeat, density.
          - place_nested / nested : place nested chunks, optionally conditional on neighbors or joins.
          - set, place_vehicles, place_signs, place_npcs, computers, ... (see the reference doc)
@@ -404,7 +407,9 @@ Development stages (each ends with a headless-testable acceptance check):
      option of a palette distribution/param (only 2 maps and 1 palette choose palettes that way; the
      resolver only follows the first option). Parameter scopes in use: omt (17) and nest (7).
    - Placements (Stage 5): x/y (and repeat) are an int, [min, max], or a one-element [n] (60 uses); BN
-     reads [n] as n. chance is always an int. Keys by count: place_items 4279, place_loot 3342,
+     reads x/y [n] as n. (Corrected after Stage 3b: repeat, chance, amount and pack_size are read with a
+     default, so [n] means n..default, and rng swaps the bounds: "repeat": [3] is 1-3, not 3. All 5 uses
+     in data are [1], so it's harmless today, but the Inspector must not treat [n] as n there.) chance is always an int. Keys by count: place_items 4279, place_loot 3342,
      place_nested 2269, place_monster 1794, place_vehicles 1504, place_monsters 1293, set 1024,
      place_item 953, then signs/npcs/terrain/furniture/... The Inspector needs per-type fields
      (place_monster: group or monster, pack_size, one_or_none; place_monsters: density; place_loot: group
@@ -472,10 +477,68 @@ Development stages (each ends with a headless-testable acceptance check):
      - Manifest paths are not trusted: push refuses absolute paths, "..", backslashes, ":" and empty parts.
    - Not done / open: object-level merge; a pushed file isn't checked with json_formatter again (it was
      formatted when saved, and push copies bytes); the window doesn't watch the disk (press Refresh).
+ Checked after Stage 3b (2026-09-27, against BN 39f4883093 source and core + mod data; reviews Stages 4-7):
+   - Stages 4-7 had no acceptance checks. Proposed ones are listed under each stage below.
+   - Palettes (Stage 4):
+     - The resolver reads palettes from DataIndex.Definition.data, parsed once with Godot's JSON at load.
+       An edited palette must be read from the live BnJson object in EditSession's JsonFile instead, and
+       every open map that uses it (directly, through an include, or as any option of a distribution) must
+       be re-resolved and redrawn. Undo for a palette edit belongs to the palette, not to a map.
+     - "Which maps use a palette" needs a reverse index. Resolving every map to find out takes ~3 s, but
+       DataIndex already sees each mapgen object while loading, so recording the ids in "palettes" (every
+       option) there is nearly free. Includes (5 palettes use them) are followed at query time.
+     - Palette contents beyond terrain/furniture are common: items 89 of 201 palettes, toilets 84,
+       nested 29, vendingmachines 27, liquids 14, plus monster, vehicles, computers, sealed_item, ...,
+       and "mapping" in 8. BN's loader (mapgen_palette::load_internal) reads exactly the per-symbol kinds
+       the resolver already knows, "parameters" and "palettes"; palettes never hold place_* lists. MVP:
+       edit terrain/furniture per key and the includes; show the other kinds read-only (as the legend
+       does) until Stage 5's field editors can be reused.
+     - Confirmed: a palette distribution/param in "palettes" makes BN add EVERY option, each constrained
+       to its choice (mapgen_palette::add), so the "key must be free in every palette of the map" check
+       has to look at every option too, not only the one the resolver displays.
+   - Placements (Stage 5), from the placement classes in mapgen.cpp:
+     - chance, repeat, amount and pack_size are jmapgen_int, so each can be a [min, max] range (none are
+       in data yet, but the Inspector must keep one if it's there). place_items' "item" goes through
+       load_item_group, so it may be an inline group rather than an id (no uses yet).
+     - place_monster "monster" is a weighted list of ids in 89 entries. place_vehicles: 30 entries rely
+       on the default chance of 1 (%), and 79 give "rotation" as a list (one is picked).
+     - place_item chance: exactly 100 gives exactly one (times amount); anything else is an expected count
+       in percent, scaled by the item spawn rate, so chance > 100 can give several (1 use in data). A
+       label like "I 150%" is still right; don't clamp it to 100.
+     - Symbol mappings also place items/monsters/vehicles/nested (e.g. 89 palettes carry "items"). The
+       Items/Monsters layers should mark those cells as well, read-only (edited through the symbol).
+   - Nested chunks (Stage 6):
+     - Editing a chunk's rows already works (Stage 3 opens nested_mapgen_id entries at their mapgensize).
+       What's missing: creating a new chunk (New map only makes om_terrain maps; it needs
+       nested_mapgen_id + mapgensize, no fill_ter, no overmap_terrain), and the overlay on parents.
+     - Rotation: a chunk's own "rotation" member (656 chunks set it) is read but never used by BN. Only
+       the placing entry's "rotation" (place_nested, or a "nested" symbol mapping) turns the chunk, around
+       its mapgensize (mapgen_function_json_nested::nest). The overlay should use the placing rotation and
+       ignore the chunk's own; validation can point out that the chunk's rotation does nothing.
+     - 174 of 1599 nested chunks place nested chunks themselves, so the overlay recurses (and needs a
+       loop guard). "null" is a common chunk id (590 entries): "place nothing", not an unknown id.
+     - 938 chunks use palettes, so drawing a chunk on its parent resolves the chunk's own palettes, not
+       the parent's.
+   - Validation (Stage 7): place_vehicles ids must be checked against vehicle groups AND vehicle
+     prototypes (91 of 158 ids used are prototypes; veh_type.cpp makes an implicit group for each).
+     Unknown-id checks must accept "null" chunks and t_null/f_null. Some basic checks already exist in
+     MapDocument.problems() (undefined symbols, unknown terrain/furniture, missing overmap_terrain).
  Stage 4 - Palette editor window (MVP item 5).
+   - Proposed acceptance: edit a key in a palette defined inside a mapgen file (one of the 46) while a map
+     from that file is open. The diff against BN touches only that palette's entry; the open map and
+     every other open map using the palette redraw with the change; the warning names the affected maps
+     (checked against a brute-force resolve of every map); undo restores both.
  Stage 5 - Item/monster placement layers (MVP item 6).
+   - Proposed acceptance: every place_* entry in core loads into the placement model and writes back
+     byte-identically when untouched; moving/resizing a range in a multi-tile map never crosses a 24x24
+     boundary; the 209 dropped "set" entries (and place_* anchors outside the map) are reported.
  Stage 6 - Nested chunks (MVP item 7).
+   - Proposed acceptance: create a new chunk and place it in a map; every place_nested / "nested" mapping
+     in core draws on its parent without errors, with the overhang past its OMT marked.
  Stage 7 - Validation panel (MVP item 9). Basic checks can start earlier.
+   - Proposed acceptance: all core json mapgens validate with a known, listed set of findings (e.g. the
+     dropped "set" entries and ignored chunk rotations), and seeded errors (unknown item/monster/vehicle
+     id, undefined symbol, out-of-range coordinate) are each caught.
  Then the "Later milestones" list.
 
 Explicitly out of scope until the later milestones: tilesets, preview rolls, z-level linking, update_mapgen,
