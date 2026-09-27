@@ -378,6 +378,56 @@ Development stages (each ends with a headless-testable acceptance check):
      supported. Stroke end re-resolves the map (opening the 16x8 nuclear plant, file read included, takes ~30 ms)
      but skips the full redraw unless symbols changed (that was 130 ms there); painting itself
      updates only the touched cells and their wall neighbours.
+ Checked before Stage 3b (2026-09-27, against BN 39f4883093 source and core + mod data):
+   - Sync, line endings: BN's .gitattributes forces `* text=auto eol=lf`, and no data file has CRLF, so
+     byte comparison and sha256 bases also hold on Windows checkouts.
+   - Sync, object summary: "type + id / om_terrain / nested_mapgen_id" is NOT a unique key. In 248
+     files, objects share it: 898 mapgens (weighted variants of one om_terrain, several chunks under one
+     nested id), plus speech/snippet/recipe/dream objects with no id at all. The summary (and a later
+     object-level merge) must pair objects by key AND occurrence order (the 2nd "house_01" mapgen with
+     the 2nd), falling back to position; objects with no key get a position-only label.
+   - Sync, after a push: the workspace copy still shadows BN in the index. If BN later changes that
+     file (git pull), the editor keeps showing the stale workspace copy and a later push reports a
+     conflict for a file the user never touched again. "Refresh ... if the workspace copy was never
+     edited" also can't be decided from the manifest alone: a copy only exists because it was saved.
+     DECIDED (2026-09-27): after a successful push, the workspace copy and its manifest entry are
+     deleted, so BN is the source again and nothing can go stale. Why: the alternative (also recording
+     the pushed sha256 so Refresh can update untouched copies) keeps a working set but adds bookkeeping
+     for little gain. Refresh then only matters for copies not pushed yet: when BN changed since the
+     base, it is a conflict (offer overwrite / skip / later merge), never a silent update. Also: BN
+     deleting or renaming a file since the base is a conflict of its own.
+   - Palettes (Stage 4): 46 of 200 palettes are defined outside data/json/mapgen_palettes, often inside
+     a mapgen file, so palette edits can touch a file that also holds open maps; the palette editor must
+     go through EditSession's shared JsonFile, never a second copy. One palette is replaced by a mod
+     (stream_palette in innawoods): editing the core one while that mod is loaded changes nothing
+     visible, so warn and name the overriding definition. "Which maps use a palette" must count every
+     option of a palette distribution/param (only 2 maps and 1 palette choose palettes that way; the
+     resolver only follows the first option). Parameter scopes in use: omt (17) and nest (7).
+   - Placements (Stage 5): x/y (and repeat) are an int, [min, max], or a one-element [n] (60 uses); BN
+     reads [n] as n. chance is always an int. Keys by count: place_items 4279, place_loot 3342,
+     place_nested 2269, place_monster 1794, place_vehicles 1504, place_monsters 1293, set 1024,
+     place_item 953, then signs/npcs/terrain/furniture/... The Inspector needs per-type fields
+     (place_monster: group or monster, pack_size, one_or_none; place_monsters: density; place_loot: group
+     or item, ammo, magazine; place_vehicles: rotation, status, fuel).
+   - Placements: BN loads the whole placement list once per OMT, subtracts that OMT's offset, and keeps
+     an entry only if its (min x, min y) is inside that OMT. So an entry whose min lies outside the whole
+     map is silently dropped (no error). Validation should report it.
+   - "set" is different (mapgen.cpp setup_setmap / generate): its coordinates never get the OMT offset.
+     In a multi-tile map a "set" entry with coordinates 0..23 runs in EVERY OMT of the building, and one
+     with any coordinate > 23 is silently dropped in all of them. 209 entries in 58 multi-tile maps are
+     dropped this way today. The editor must draw BN's behaviour (repeat each set entry in every OMT,
+     mark the dropped ones), not the documented one. "set" line/square also check x2/y2 the same way.
+   - Nested chunks (Stage 6): mapgensize ranges from 1x1 to 24x24 (5x5, 1x1, 3x3 most common).
+     place_nested "chunks" entries are ids or [id, weight] pairs; also else_chunks, neighbors (north/
+     east/south/west, and "above" 3 times), joins, connections, rotation. 165 maps place chunks through a
+     "nested" symbol mapping rather than place_nested. In 325 place_nested entries the chunk runs past
+     the edge of its OMT. The anchor rule still holds, but the overhang isn't clipped per OMT in the
+     source: map::ter_set/furn_set write through the global mapbuffer by absolute position and only
+     reject points outside the pocket dimension, so the overhang may land in the neighbouring OMT.
+     Unverified in game; the overlay should draw the overhang and mark it until that's checked.
+   - Validation (Stage 7): DataIndex only indexes item groups and monster groups. Checking place_item /
+     place_loot item ids, place_monster monster ids, vehicles, traps, fields, npc templates and "set" ids
+     needs those types indexed too (items come in many "type"s: GENERIC, TOOL, ARMOR, COMESTIBLE, ...).
  Stage 3b - Sync window (push / refresh / conflict detection).
    - Accept: push into a temp copy of BN, and a conflict is detected when the BN file changed after the base
      was recorded.
