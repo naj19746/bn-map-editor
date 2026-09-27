@@ -17,10 +17,10 @@ signal index_loaded
 
 enum Menu {
 	OPEN_BN, MODS, RELOAD, CLOSE_TAB, QUIT,
-	SHOW_FURNITURE, SHOW_KEYS, FIT, TOGGLE_DRAWER, FIND,
+	SHOW_FURNITURE, SHOW_KEYS, SHOW_CHUNKS, FIT, TOGGLE_DRAWER, FIND,
 	SPRING, SUMMER, AUTUMN, WINTER,
-	NEW_MAP, SAVE, SAVE_ALL, WORKSPACE,
-	UNDO, REDO, NEW_SYMBOL, ADD_OVERMAP, PALETTES,
+	NEW_MAP, NEW_CHUNK, SAVE, SAVE_ALL, WORKSPACE,
+	UNDO, REDO, NEW_SYMBOL, ADD_OVERMAP, PALETTES, CHUNK_PARENTS,
 	SYNC,
 }
 
@@ -60,6 +60,8 @@ var placement_tool := PlacementTool.new()
 var maps: Array[OpenMap] = []
 var show_furniture := true
 var show_keys := false
+## Draw the nested chunks each map places over its cells.
+var show_chunks := true
 var season := 0
 ## Placement layers shown (bit 1 << Placement.Layer).
 var layer_mask := (1 << Placement.LAYER_NAMES.size()) - 1
@@ -70,6 +72,7 @@ var _view_menu: PopupMenu
 var _season_menu: PopupMenu
 var _furniture_button: Button
 var _keys_button: Button
+var _chunks_button: Button
 var _tool_buttons: Array[Button] = []
 var _brush_label: Label
 var _tabs: TabBar
@@ -223,10 +226,12 @@ func _add_tab(doc: MapDocument) -> OpenMap:
 	var m := OpenMap.new()
 	m.ref = doc.ref
 	m.doc = doc
-	m.ascii = AsciiMap.build(index, doc.resolved, season, show_furniture)
+	m.ascii = AsciiMap.build(index, doc.resolved, season, show_furniture,
+			doc.chunk_overlay() if show_chunks else null)
 	m.canvas = MapCanvas.new()
 	m.canvas.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	m.canvas.ascii = m.ascii
+	m.canvas.chunks = doc.chunk_overlay()
 	m.canvas.show_keys = show_keys
 	m.canvas.placements = doc.placements()
 	m.canvas.layer_mask = layer_mask
@@ -236,6 +241,7 @@ func _add_tab(doc: MapDocument) -> OpenMap:
 	m.canvas.cell_released.connect(_on_cell_released.bind(m))
 	doc.cells_changed.connect(_on_doc_cells_changed.bind(m))
 	doc.changed.connect(_on_doc_changed.bind(m))
+	doc.overlay_changed.connect(_on_overlay_changed.bind(m))
 	_canvas_area.add_child(m.canvas)
 	maps.append(m)
 	_tabs.add_tab("")
@@ -363,7 +369,7 @@ func _on_doc_cells_changed(cells: Array[Vector2i], m: OpenMap) -> void:
 ## (cells_changed); a [param full] change redraws every cell.
 func _on_doc_changed(full: bool, m: OpenMap) -> void:
 	m.ascii.resolved = m.doc.resolved
-	if full:
+	if _update_overlay(m) or full:
 		m.ascii.refresh()
 	m.canvas.placements = m.doc.placements()
 	m.canvas.queue_redraw()
@@ -375,6 +381,44 @@ func _on_doc_changed(full: bool, m: OpenMap) -> void:
 		_legend.show_map(m.ascii)
 		_update_problems()
 		_update_brush_label()
+
+
+## Gives [param m]'s view the map's current chunk overlay. True when the
+## chunks now leave different cells, so every cell must be redrawn.
+func _update_overlay(m: OpenMap) -> bool:
+	var overlay := m.doc.chunk_overlay()
+	m.canvas.chunks = overlay
+	var shown := overlay if show_chunks else null
+	var same := shown == m.ascii.overlay or (shown != null and shown.same_cells(m.ascii.overlay))
+	m.ascii.overlay = shown
+	return not same
+
+
+## A chunk (or a palette of one) this map draws changed elsewhere.
+func _on_overlay_changed(m: OpenMap) -> void:
+	if _update_overlay(m):
+		m.ascii.refresh()
+	m.canvas.queue_redraw()
+	if m == current_map():
+		_placements_panel.refresh()
+		_update_problems()
+
+
+## Lists the maps placing the current chunk (directly, through a palette's
+## "nested" mapping they use, or through other chunks).
+func show_chunk_parents() -> void:
+	var m := current_map()
+	if m == null:
+		return
+	var id := m.doc.chunk_id()
+	if id.is_empty():
+		_status.text = "%s isn't a nested chunk." % m.ref.title()
+		return
+	var lines := PackedStringArray()
+	for a in session.chunk_parents(m.ref):
+		lines.append("%s (%s #%d)%s" % [a.ref.title(), a.ref.source.path, a.ref.source.index,
+				"" if a.via == id else "  via " + a.via])
+	_show_report("Maps placing %s (%d)" % [id, lines.size()], lines)
 
 
 # --- Placements ----------------------------------------------------------------
@@ -579,10 +623,18 @@ func set_season(s: int) -> void:
 	_refresh_maps()
 
 
+func set_show_chunks(on: bool) -> void:
+	show_chunks = on
+	_chunks_button.set_pressed_no_signal(on)
+	_view_menu.set_item_checked(_view_menu.get_item_index(Menu.SHOW_CHUNKS), on)
+	_refresh_maps()
+
+
 func _refresh_maps() -> void:
 	for m in maps:
 		m.ascii.season = season
 		m.ascii.show_furniture = show_furniture
+		_update_overlay(m)
 		m.ascii.refresh()
 		m.canvas.queue_redraw()
 	var cur := current_map()
@@ -611,6 +663,8 @@ func _on_tab_changed(i: int) -> void:
 		var r := m.ascii.resolved
 		_status.text = "%s   %dx%d   %s   palettes: %s" % [m.ref.source.path, r.size.x, r.size.y,
 				MapBrowser.entry_text(m.ref)[1], ", ".join(r.palettes) if r.palettes.size() else "none"]
+		if m.doc.chunk_id():
+			_status.text += "   (a nested chunk: Edit > Maps placing this chunk)"
 	_update_problems()
 	_update_brush_label()
 
@@ -623,6 +677,10 @@ func _on_cell_hovered(cell: Vector2i, m: OpenMap) -> void:
 	for p in m.doc.placements_at(cell):
 		if layer_mask & (1 << p.layer()):
 			here.append("%s %s %s" % [p.title(), p.label(), p.what()])
+	if layer_mask & (1 << Placement.Layer.NESTED):
+		for st in m.doc.chunk_overlay().stamps_at(cell):
+			if st.depth == 0:
+				here.append("%s: %s" % [st.path, st.describe()])
 	if not here.is_empty():
 		text += "   |   " + ";  ".join(here)
 	_status.text = text
@@ -694,6 +752,9 @@ func _on_menu(id: int) -> void:
 		Menu.NEW_MAP:
 			if session:
 				_new_map_dialog.open(session)
+		Menu.NEW_CHUNK:
+			if session:
+				_new_map_dialog.open(session, NewMapDialog.Kind.CHUNK)
 		Menu.SAVE:
 			save_current()
 		Menu.SAVE_ALL:
@@ -713,6 +774,8 @@ func _on_menu(id: int) -> void:
 			add_missing_overmap_terrain()
 		Menu.PALETTES:
 			open_palette_editor()
+		Menu.CHUNK_PARENTS:
+			show_chunk_parents()
 		Menu.SYNC:
 			if session:
 				_sync_dialog.open(session)
@@ -720,6 +783,8 @@ func _on_menu(id: int) -> void:
 			set_show_furniture(not show_furniture)
 		Menu.SHOW_KEYS:
 			set_show_keys(not show_keys)
+		Menu.SHOW_CHUNKS:
+			set_show_chunks(not show_chunks)
 		Menu.FIT:
 			if current_map():
 				current_map().canvas.fit()
@@ -744,6 +809,8 @@ func _update_edit_menu() -> void:
 	_edit_menu.set_item_disabled(_edit_menu.get_item_index(Menu.NEW_SYMBOL), m == null)
 	_edit_menu.set_item_disabled(_edit_menu.get_item_index(Menu.ADD_OVERMAP),
 			m == null or m.doc.missing_overmap_terrain().is_empty())
+	_edit_menu.set_item_disabled(_edit_menu.get_item_index(Menu.CHUNK_PARENTS),
+			m == null or m.doc.chunk_id().is_empty())
 
 
 ## The Sync window pushed or discarded files. A push leaves the loaded data
@@ -802,6 +869,7 @@ func _build_ui() -> void:
 	top.add_child(menu_bar)
 	_file_menu = _menu(menu_bar, "File", [
 		["New map...", Menu.NEW_MAP, KEY_MASK_CTRL | KEY_N],
+		["New nested chunk...", Menu.NEW_CHUNK, KEY_MASK_CTRL | KEY_MASK_SHIFT | KEY_N],
 		["Save", Menu.SAVE, KEY_MASK_CTRL | KEY_S],
 		["Save all", Menu.SAVE_ALL, KEY_MASK_CTRL | KEY_MASK_SHIFT | KEY_S],
 		[],
@@ -821,6 +889,7 @@ func _build_ui() -> void:
 		["Add missing overmap_terrain", Menu.ADD_OVERMAP, 0],
 		[],
 		["Palette editor...", Menu.PALETTES, KEY_MASK_CTRL | KEY_MASK_SHIFT | KEY_E],
+		["Maps placing this chunk...", Menu.CHUNK_PARENTS, 0],
 	])
 	_edit_menu.about_to_popup.connect(_update_edit_menu)
 	_view_menu = _menu(menu_bar, "View", [
@@ -830,8 +899,10 @@ func _build_ui() -> void:
 		[],
 		["Show furniture", Menu.SHOW_FURNITURE, KEY_MASK_CTRL | KEY_U, true],
 		["Show row symbols", Menu.SHOW_KEYS, KEY_MASK_CTRL | KEY_K, true],
+		["Show nested chunks", Menu.SHOW_CHUNKS, KEY_MASK_CTRL | KEY_J, true],
 	])
 	_view_menu.set_item_checked(_view_menu.get_item_index(Menu.SHOW_FURNITURE), true)
+	_view_menu.set_item_checked(_view_menu.get_item_index(Menu.SHOW_CHUNKS), true)
 	_menu(menu_bar, "Sync", [
 		["Sync with BN...", Menu.SYNC, KEY_MASK_CTRL | KEY_MASK_SHIFT | KEY_P],
 	])
@@ -871,6 +942,9 @@ func _build_ui() -> void:
 	top.add_child(_furniture_button)
 	_keys_button = _toggle("Row symbols", false, "Draw the characters from \"rows\" (Ctrl+K)", set_show_keys)
 	top.add_child(_keys_button)
+	_chunks_button = _toggle("Chunks", true, "Draw the nested chunks the map places over its cells (Ctrl+J)",
+			set_show_chunks)
+	top.add_child(_chunks_button)
 	var fit := Button.new()
 	fit.text = "Fit"
 	fit.flat = true
@@ -926,6 +1000,7 @@ func _build_ui() -> void:
 	_placements_panel.add_requested.connect(arm_placement)
 	_placements_panel.focus_requested.connect(_focus_placement)
 	_placements_panel.message.connect(func(msg: String) -> void: _status.text = msg)
+	_placements_panel.open_chunk_requested.connect(func(ref: DataIndex.MapgenRef) -> void: open_ref(ref))
 	_drawer.add_child(_placements_panel)
 
 	var status_bar := PanelContainer.new()

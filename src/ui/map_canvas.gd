@@ -4,7 +4,10 @@ extends Control
 ## and the 24x24 overmap-tile boundaries, and the map's placements on top:
 ## a box for a point, a dashed outline for a range, with labels like "I 50%".
 ## Placements BN drops or reads oddly are drawn in red, where BN puts them.
-## Cells whose symbol itself places items, monsters, ... get a corner mark. Wheel zooms around the cursor;
+## Cells whose symbol itself places items, monsters, ... get a corner mark.
+## With the Nested layer shown, each placed chunk's footprint is outlined
+## (dotted for chunks placed by chunks), and the part reaching past its
+## overmap tile is shaded red. Wheel zooms around the cursor;
 ## middle or right drag (or space + left drag) pans. A left drag is reported
 ## as cell_pressed / cell_dragged / cell_released for the drawing tools.
 
@@ -37,6 +40,7 @@ const LAYER_COLORS := [Color(1.0, 0.85, 0.3), Color(1.0, 0.45, 0.45), Color(0.4,
 		Color(0.8, 0.55, 1.0), Color(0.5, 1.0, 0.55)]
 const PLACEMENT_PROBLEM := Color(1.0, 0.15, 0.25)
 const LABEL_BG := Color(0, 0, 0, 0.65)
+const OVERHANG := Color(1.0, 0.15, 0.25, 0.22)
 
 ## Line characters drawn as lines, so walls join whatever the font:
 ## sides as [N, E, S, W].
@@ -78,6 +82,11 @@ var placements: Array[Placement] = []:
 var layer_mask := (1 << Placement.LAYER_NAMES.size()) - 1:
 	set(v):
 		layer_mask = v
+		queue_redraw()
+## The map's nested chunks, for their footprints (null for none).
+var chunks: ChunkOverlay:
+	set(v):
+		chunks = v
 		queue_redraw()
 ## The selected placement ("" for none).
 var selected_member := ""
@@ -315,6 +324,10 @@ func _draw_placements() -> void:
 	var view := Rect2i(Vector2i(((Vector2(RULER, RULER) - origin) / cs).floor()) - Vector2i.ONE,
 			Vector2i((size / cs).ceil()) + Vector2i(2, 2))
 	var fs := clampi(int(cs * 0.6), 9, 14)
+	if chunks and layer_mask & (1 << Placement.Layer.NESTED):
+		for st in chunks.stamps:
+			if view.intersects(st.footprint):
+				_draw_footprint(st, fs)
 	var selected: Placement = null
 	for p in placements:
 		if not layer_mask & (1 << p.layer()):
@@ -358,6 +371,51 @@ func _draw_placement(p: Placement, view: Rect2i, fs: int, is_selected: bool) -> 
 			draw_rect(Rect2(at, ts + Vector2(2, 0)), LABEL_BG)
 			draw_string(_font, at + Vector2(1, _font.get_ascent(fs)), label, HORIZONTAL_ALIGNMENT_LEFT,
 					-1, fs, color)
+
+
+## A chunk's footprint: solid for the map's own placements, dotted for
+## chunks placed by chunks, with the part past its tile shaded.
+func _draw_footprint(st: ChunkOverlay.Stamp, fs: int) -> void:
+	var cs := cell_size
+	var color: Color = LAYER_COLORS[Placement.Layer.NESTED]
+	var is_selected := st.depth == 0 and st.member == selected_member and st.index == selected_index \
+			and selected_member == "place_nested"
+	var r := Rect2(origin + Vector2(st.footprint.position) * cs, Vector2(st.footprint.size) * cs)
+	if st.overhangs():
+		var inside := st.footprint.intersection(st.tile)
+		for part in _outside(st.footprint, inside):
+			draw_rect(Rect2(origin + Vector2(part.position) * cs, Vector2(part.size) * cs), OVERHANG)
+	if st.depth == 0:
+		draw_rect(r.grow(-1.0), Color(color, 0.9 if is_selected else 0.55), false, 2.0 if is_selected else 1.0)
+	else:
+		var corners := [r.position, Vector2(r.end.x, r.position.y), r.end, Vector2(r.position.x, r.end.y)]
+		for k in 4:
+			draw_dashed_line(corners[k], corners[(k + 1) % 4], Color(color, 0.4), 1.0, maxf(2.0, cs * 0.2))
+		return
+	if cs >= 8.0 and st.footprint.size.y >= 2:
+		var label := st.label()
+		var tint := PLACEMENT_PROBLEM if not st.problems.is_empty() or st.overhangs() else color
+		var ts := _font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs)
+		var at := Vector2(r.position.x + 2, r.end.y - ts.y - 1)
+		draw_rect(Rect2(at, ts + Vector2(2, 0)), LABEL_BG)
+		draw_string(_font, at + Vector2(1, _font.get_ascent(fs)), label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, tint)
+
+
+## [param whole] minus [param inside] (a rect inside it), as up to four rects.
+static func _outside(whole: Rect2i, inside: Rect2i) -> Array[Rect2i]:
+	var out: Array[Rect2i] = []
+	if not inside.has_area():
+		out.append(whole)
+		return out
+	if inside.position.y > whole.position.y:
+		out.append(Rect2i(whole.position.x, whole.position.y, whole.size.x, inside.position.y - whole.position.y))
+	if inside.end.y < whole.end.y:
+		out.append(Rect2i(whole.position.x, inside.end.y, whole.size.x, whole.end.y - inside.end.y))
+	if inside.position.x > whole.position.x:
+		out.append(Rect2i(whole.position.x, inside.position.y, inside.position.x - whole.position.x, inside.size.y))
+	if inside.end.x < whole.end.x:
+		out.append(Rect2i(inside.end.x, inside.position.y, whole.end.x - inside.end.x, inside.size.y))
+	return out
 
 
 func _draw_line_glyph(rect: Rect2, sides: Array, color: Color) -> void:

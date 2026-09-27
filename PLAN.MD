@@ -96,6 +96,17 @@ Later milestones:
    when it's built, moving a block should offer to carry the placements anchored in it.
  - A preview roll can take each kind's chance meaning and default from Placement.KINDS, and must
    scale by BN's spawn-rate options the way each placement class does (see the field hints).
+ - Conditional nested pieces (neighbors/joins/connections; noted after Stage 6): the overlay always
+   draws "chunks", but 259 pieces in core + mods are conditional (nearly all "neighbors"; 2 joins,
+   4 connections), and 236 of them have no else_chunks, so they often place nothing (120 are in
+   multi-tile maps, 110 in 1x1 maps, 29 inside chunks, checked against the parent's tile). Ideas:
+   mark conditional placements on the canvas (dashed footprint, "if" in the label) and list their
+   conditions in the inspector; a "Conditions: met / not met" view toggle that switches every
+   conditional piece between chunks and else_chunks; with the preview roll, per-direction "assume
+   neighbour X" inputs, and working out neighbours inside a multi-tile building (BN matches rotated
+   oter ids, so this needs the rotation model). joins/connections need overmap_special and road
+   data (z-level linking). Stage 7 can check that neighbour oter and connection ids exist, as BN's
+   check() does.
 
 
 JSON formatting (decided: use BN's own formatter):
@@ -787,14 +798,85 @@ Development stages (each ends with a headless-testable acceptance check):
      - Found in BN while doing Stage 5: a "set" entry with an unknown terrain/furniture/trap id makes
        setup_setmap return, so every LATER "set" entry of that map is dropped too. Worth its own
        finding once ids are indexed.
- Stage 6 - Nested chunks (MVP item 7).
-   - Proposed acceptance: create a new chunk (nested_mapgen_id + mapgensize) and place it in a map
+ Stage 6 - Nested chunks (MVP item 7).  [DONE 2026-09-27]
+   - Accept: create a new chunk (nested_mapgen_id + mapgensize) and place it in a map
      with the Place tool and a chunk picker. Every place_nested / "nested" mapping in core draws its
      chunk's footprint on its parent without errors: "null" places nothing, recursion has a loop
      guard, the placing rotation is applied (a non-square chunk's footprint swaps), chunks draw in
      BN's order over the parent's cells, and the overhang past the anchor's tile is marked. Editing a
      chunk, or a palette it uses, redraws the open parents that place it (directly or through a
      "nested" mapping in one of their palettes), and the palette warning names those parents.
+   - Result: tools/run_tests.sh passes 104 tests (~60 s). tests/test_nested_bn.gd lays out every core
+     json mapgen's chunks (~7 s): 21691 top-level placements (place_nested entries and "nested"
+     mapping cells), 284 reaching past their tile, 2 rotated non-square chunks, the same as an
+     independent Python pass over data/json; 2888 chunks placed by chunks; 0 problems (no unknown
+     ids, no loops); every written cell lies inside its placement's footprint. Changing
+     standard_domestic_palette 'h' names 66 maps "via" a chunk, exactly the maps a brute-force
+     closure of every map's chunks (all options, all variants) finds. tests/test_nested.gd (fake BN)
+     covers draw order (mappings, then place_nested, later over earlier), WALL terrain removing
+     furniture, undefined cells, the heaviest variant, rotation, inner anchors, overhang, unknown
+     ids, loops, palette mappings, a multi-tile anchor's tile, unsaved chunk edits and palette edits
+     reaching open parents, discard, the new-chunk path and a main-scene run (New chunk dialog, Add
+     place_nested, chunk picker, drag by the chunk's body, the Chunks toggle, save). Breaking the
+     rotation swap or the mappings-first order fails them.
+   - Code: src/data/chunk_overlay.gd (ChunkOverlay: stamps, per-cell terrain/furniture a chunk
+     leaves, drawn ids and palettes), mapgen_objects.gd (MapgenObjects: a MapgenRef's object from an
+     open file or a cached parse of the file). DataIndex: MapgenRef.chunks, chunk_options(),
+     nested_mappings(), weighted_ids(), maps_placing(). MapDocument: chunk_overlay() (lazy, dropped
+     on every change), refresh_overlay(), overlay_uses(), chunk_id(). EditSession: objects,
+     chunk_parents(), NewMapgen.chunk_size. PaletteImpact.add_parents + Affected.via. AsciiMap.overlay,
+     MapCanvas.chunks, PlacementsPanel chunk picker, NewMapDialog "Nested chunk" kind, main.gd
+     Chunks toggle (Ctrl+J), File > New nested chunk (Ctrl+Shift+N), Edit > Maps placing this chunk.
+   - How it works: ChunkOverlay walks the map one overmap tile at a time (a chunk is one "tile"):
+     "nested" mapping pieces at each cell in row order (the map's own and its palettes'), then its
+     place_nested entries anchored in that tile (dropped/crossing ones skipped). Each piece draws
+     the heaviest non-"null" id of "chunks" (first on ties) and that id's heaviest mapgen, at the
+     anchor range's low corner, turned by the piece's rotation (point::rotate around mapgensize).
+     A chunk cell with terrain sets it (a WALL also removes the furniture, as jmapgen_terrain does),
+     then its furniture; undefined keys write nothing. Then the chunk's own pieces, recursively
+     (chain loop guard, depth 12). Each placement keeps its footprint (anchor range + turned size),
+     its tile, a path ("place_nested #3 > outer > 'N' nested") and problems. AsciiMap draws a
+     written cell from the map's own look with the chunk's terrain/furniture over it (walls join per
+     cell); the canvas outlines footprints (dotted for inner chunks), shades the overhang red and
+     labels them ("roof_16x16_help +2 !"); hover lists the chunk and cell source; the Placements
+     tab shows what a place_nested entry draws plus a picker (search nested ids with sizes, weight,
+     Add chunk, Open). The Place tool also grabs a place_nested entry by its chunk's body. Maps read
+     chunks through EditSession.objects, so unsaved chunk edits show; when a chunk document changes,
+     or a palette, EditSession tells each open map whose built overlay drew that chunk or used that
+     palette (overlay_changed), and main redraws every cell only if the chunks' cells differ.
+   - Decisions and checks (against BN 39f4883093 mapgen.cpp, core data):
+     - Found: an inner chunk's anchor turns with the outer chunk (jmapgen_place::edit) but the inner
+       chunk is nested with only its own piece's rotation (jmapgen_nested::apply passes
+       rotation.get() to nest()), so it isn't turned with its parent. Drawn that way.
+     - Confirmed: nest()'s rotation parameter shadows the chunk's own "rotation" member, which is
+       never read. Of the 649 core chunks that set it, 567 write [0, 3] expecting random turns and
+       7 a fixed turn (Stage 7 note).
+     - Confirmed: pieces are stable-sorted by phase, so all "nested" mapping cells (row order) run
+       before place_nested; within a chunk, "set" then terrain, furniture, nested. The overlay draws
+       rows only (no "set"/place_terrain), like the map view.
+     - Corrected: 34 non-square chunk IDS (81 chunks), not 34 chunks. The "325 overhanging
+       place_nested" count was a different measure; the drawn one (heaviest chunk, low corner,
+       mappings included) is 284 of 21691. 23 place_nested entries have only else_chunks and 124
+       placements draw nothing ("null" or empty picks).
+     - A lazy overlay only depends on what it drew: a map whose overlay isn't built yet isn't told
+       about changes (it'll be built fresh). Transitive parents are covered because drawn_ids and
+       palette_ids include inner chunks.
+     - Stroke end rebuilds the overlay (worst core map ~70 ms, resolving every chunk once per
+       build); the full redraw is skipped when the chunks leave the same cells.
+     - Palette warnings: add_parents follows DataIndex.maps_placing (a superset through palette
+       mappings) and keeps a map only if ChunkOverlay.placed_ids (place_nested options plus the
+       mappings of the symbols its rows use) has the chunk; ~1.2 s for standard_domestic_palette
+       (was ~1.0 s).
+     - A new chunk: {"mapgensize", "rows" of spaces, "palettes"?}, no fill_ter (BN ignores it), no
+       overmap_terrain; default file data/json/mapgen/nested/<id>.json. An existing id gets a
+       variant. A new place_nested gets {"chunks": []}; the picker adds a plain id at weight 100,
+       else [id, weight].
+   - Not done / open: neighbors/joins/connections aren't evaluated (always "chunks"); no way to
+     show else_chunks or another option/variant/rotation (a preview roll later); the chunk's own
+     place_*/"set" entries and items aren't drawn on the parent; ERASE_ALL_BEFORE_PLACING_TERRAIN
+     isn't modelled; "nested" symbol mappings are edited only as JSON (no picker in the palette
+     editor or for a map's own symbols); the Place tool preview shows the anchor, not the whole
+     chunk; the overhang is still unverified in game.
  Stage 7 - Validation panel (MVP item 9). Basic checks exist since Stage 5.
    - Proposed acceptance: all core json mapgens validate with exactly the core counts under "Checked
      after Stage 5", sorted into error/warning/note, and seeded errors are each caught: unknown item,

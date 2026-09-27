@@ -1,8 +1,8 @@
 class_name PlacementTool
 extends RefCounted
 ## The Place tool, driven by press/move/release on map cells like MapTool.
-## A click selects the smallest visible placement under the cursor and a drag
-## moves it; dragging the selected one's bottom-right cell (or any of its
+## A click selects the smallest visible placement under the cursor (or the
+## place_nested entry whose chunk is drawn there) and a drag moves it; dragging the selected one's bottom-right cell (or any of its
 ## cells with Shift) resizes it; with a kind armed (Add), a drag adds a new
 ## entry there. Every result stays inside one overmap tile
 ## (Placement.clamp_move / clamp_span), so no range crosses a tile boundary.
@@ -72,6 +72,13 @@ func press(doc: MapDocument, cell: Vector2i, shift := false) -> void:
 			select(p.member, p.index)
 			_grab(p, cell, shift)
 			return
+	if layer_mask & (1 << Placement.Layer.NESTED):
+		for st in doc.chunk_overlay().stamps_at(cell):
+			var p := doc.placement(st.member, st.index) if st.depth == 0 else null
+			if p:
+				select(p.member, p.index)
+				_grab(p, cell, false)
+				return
 	select("", -1)
 	_doc = null
 
@@ -141,6 +148,15 @@ func _grab(p: Placement, cell: Vector2i, shift: bool) -> bool:
 			mode = Mode.RESIZE if shift or (cell == corner and r.size != Vector2i.ONE) else Mode.MOVE
 			preview = r
 			return true
+	# A place_nested entry can also be dragged by its chunk.
+	var st := _doc.chunk_overlay().stamp_for(p.index) if p.member == "place_nested" else null
+	if st and st.footprint.has_point(cell) and not rects.is_empty():
+		_instance = 0
+		_orig = rects[0]
+		_tile = _geometry().tile_of(_orig.position)
+		mode = Mode.MOVE
+		preview = _orig
+		return true
 	return false
 
 

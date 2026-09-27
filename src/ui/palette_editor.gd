@@ -429,10 +429,10 @@ func _try(c: PaletteDocument.Change) -> void:
 func _ask(affected: Array[PaletteImpact.Affected], then: Callable) -> void:
 	var lines := PackedStringArray()
 	for a in affected.slice(0, MAX_NAMED):
-		lines.append("  %s (%s): %s" % [a.ref.title(), a.ref.source.path, " ".join(a.keys)])
+		lines.append("  %s (%s): %s" % [a.ref.title(), a.ref.source.path, a.what()])
 	if affected.size() > MAX_NAMED:
 		lines.append("  ... and %d more" % (affected.size() - MAX_NAMED))
-	confirm.dialog_text = "This changes %s (the symbols listed):\n%s" % [_count_text(affected), "\n".join(lines)]
+	confirm.dialog_text = "This changes %s (the symbols listed, or via a nested chunk they place):\n%s" % [_count_text(affected), "\n".join(lines)]
 	_pending = then
 	_popup(confirm)
 

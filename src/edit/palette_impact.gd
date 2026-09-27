@@ -2,7 +2,10 @@ class_name PaletteImpact
 extends RefCounted
 ## Which maps a palette edit changes: every map using the palette (see
 ## DataIndex.maps_using) is resolved before and after the edit, and a map
-## counts as changed when a symbol its rows use places something else.
+## counts as changed when a symbol its rows use places something else. A
+## changed nested chunk also changes every map placing it (directly, through
+## a palette's "nested" mapping its rows use, or through another chunk);
+## those are named "via" the chunk.
 ##
 ## Every palette option of a distribution/param is resolved (BN adds all of
 ## them), so an edit to the second option counts too. Symbols a map defines
@@ -10,18 +13,24 @@ extends RefCounted
 ## (unsaved edits included), other maps from their files.
 
 
-## A map the edit changes, and the symbols in its rows that change.
+## A map the edit changes, and the symbols in its rows that change (or the
+## chunk it places that changes).
 class Affected:
 	var ref: DataIndex.MapgenRef
 	var keys := PackedStringArray()
+	## For a map changed through a chunk it places: "chunk_a", or
+	## "chunk_b > chunk_a" when chunk_b places chunk_a.
+	var via := ""
+
+	## What changes: the symbols, or "via chunk ...".
+	func what() -> String:
+		return "via chunk " + via if via else " ".join(keys)
 
 	func _to_string() -> String:
-		return "%s (%s#%d): %s" % [ref.title(), ref.source.path, ref.source.index, " ".join(keys)]
+		return "%s (%s#%d): %s" % [ref.title(), ref.source.path, ref.source.index, what()]
 
 
 var session: EditSession
-## Parsed files (Godot JSON) read during this measurement, by rel path.
-var _files := {}
 
 
 func _init(p_session: EditSession) -> void:
@@ -46,7 +55,42 @@ static func measure(p_session: EditSession, palette_id: String, apply: Callable,
 	apply.call()
 	var after := impact.capture(refs)
 	revert.call()
-	return diff(refs, before, after)
+	var out := diff(refs, before, after)
+	impact.add_parents(out)
+	return out
+
+
+## Appends the maps placing a chunk in [param affected] (and the maps placing
+## those, and so on), each once, named via the chunk.
+func add_parents(affected: Array[Affected]) -> void:
+	var index := session.index
+	var seen := {}
+	var queue: Array = []
+	for a in affected:
+		seen[a.ref] = true
+		if a.ref.kind == DataIndex.MapgenRef.NESTED:
+			queue.append([a.ref.ids[0], a.ref.ids[0]])
+	var done := {}
+	while not queue.is_empty():
+		var next: Array = queue.pop_front()
+		var id: String = next[0]
+		if done.has(id):
+			continue
+		done[id] = true
+		for ref in index.maps_placing(id):
+			if seen.has(ref):
+				continue
+			var o := mapgen_object(ref)
+			if not o.get("object") is Dictionary \
+					or not ChunkOverlay.placed_ids(o, MapgenResolver.resolve(index, o)).has(id):
+				continue
+			seen[ref] = true
+			var a := Affected.new()
+			a.ref = ref
+			a.via = next[1]
+			affected.append(a)
+			if ref.kind == DataIndex.MapgenRef.NESTED:
+				queue.append([ref.ids[0], "%s > %s" % [ref.ids[0], next[1]]])
 
 
 ## For each of [param refs]: key -> what it places (every palette option),
@@ -87,23 +131,7 @@ static func diff(refs: Array[DataIndex.MapgenRef], before: Array[Dictionary],
 	return out
 
 
-## The mapgen object behind [param ref]: an open map's live object, else the
-## object in an open file, else read from disk (each file parsed once).
+## The mapgen object behind [param ref]: an open map's live object, else
+## the object in an open file, else read from disk (each file parsed once).
 func mapgen_object(ref: DataIndex.MapgenRef) -> Dictionary:
-	for d in session.docs:
-		if d.ref == ref:
-			return d.mapgen()
-	var rel := ref.source.path
-	var objects: Variant
-	if session.files.has(rel):
-		objects = session.files[rel].objects
-	else:
-		if not _files.has(rel):
-			var json := JSON.new()
-			json.parse(FileAccess.get_file_as_string(session.index.file_path(rel)))
-			_files[rel] = [json.data] if json.data is Dictionary else json.data
-		objects = _files[rel]
-	var i := ref.source.index
-	if objects is Array and i < objects.size() and objects[i] is Dictionary:
-		return objects[i]
-	return {}
+	return session.objects.object_for(ref)

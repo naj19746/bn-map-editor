@@ -21,7 +21,9 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   copy-from, palettes, groups, mapgen refs by id), `MapgenResolver` -> `ResolvedMapgen` (a map's cells
   and what each symbol means, with sources), `CellText` (rows -> cells, BN's wcwidth rule),
   `Placement` (one place_*/"set" entry read BN's way: first-value anchor, dropped/crossing/reversed
-  ranges, "set" in every OMT; `IntRange` keeps how a jmapgen_int is written).
+  ranges, "set" in every OMT; `IntRange` keeps how a jmapgen_int is written), `ChunkOverlay` (the
+  nested chunks a map places, laid over its cells in BN's order, rotation and recursion; footprints,
+  overhang), `MapgenObjects` (a MapgenRef's object: open file live, else a cached parse).
 - `src/edit/`: editing, no nodes. `EditSession` (open files/maps, save, new mapgen, overmap_terrain
   stubs), `MapDocument` (one mapgen: paint, new symbol, placements, undo/redo, writes straight
   into the BnJson object), `JsonFile` (a parsed file; untouched top-level objects are written back as their
@@ -29,7 +31,8 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   (workspace vs BN status, object summary, push into BN), `MapTool`
   (Paint/Line/Rect/Fill/Pick on press/move/release), `PlacementTool` (Place: select/move/resize/add
   placements, kept inside one OMT), `Shapes`, `PaletteDocument` (one palette: a
-  key's terrain/furniture, includes, its own undo), `PaletteImpact` (which maps an edit changes),
+  key's terrain/furniture, includes, its own undo), `PaletteImpact` (which maps an edit changes,
+  including maps placing a changed chunk, "via" it),
   `ObjectMembers` (member snapshots for undo).
 - `src/app/app_settings.gd` (`AppSettings`): settings in user://settings.cfg.
 - `src/view/`: display logic without nodes, testable headless. `AsciiMap` (what each cell looks like,
@@ -63,6 +66,12 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   `push_error` on purpose will fail.
 - Tests run inside `SceneTree._initialize`, before the root enters the tree: `_ready` doesn't fire
   and awaited frames never come. UI tests call `_ready()` directly (see `tests/test_viewer.gd`).
+- `_draw` never runs in tests, nor under `--headless` at all, so canvas drawing code is untested.
+  After changing it, run a scratch `-s` script without `--headless` that adds main.tscn to `root`,
+  opens a map, waits a few frames in `_process` and saves `root.get_texture().get_image()`.
+- A MapDocument's chunk overlay is built lazily and dropped on every change; EditSession only
+  notifies maps whose built overlay drew the changed chunk or palette. Call `chunk_overlay()` in a
+  test before expecting `overlay_changed`.
 - Inner classes can't call their outer class's static functions unqualified; use
   `BnJson.encode_string(...)`.
 - Godot's `JSON.stringify` sorts keys unless its third argument is false; TempTree writes values with

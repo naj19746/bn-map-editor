@@ -5,7 +5,8 @@ extends VBoxContainer
 ## edited as text: ids as typed, the rest as JSON ("[1, 3]" or "1-3" for a
 ## range). What "chance" means is shown per kind, since it differs (percent,
 ## one in N, a plain int for place_loot). Entries BN drops or reads oddly
-## are listed in red with the reason.
+## are listed in red with the reason. A place_nested entry also shows the
+## chunk it draws and a chunk picker.
 
 ## An entry was selected in the list ("" for none).
 signal placement_selected(member: String, index: int)
@@ -15,8 +16,12 @@ signal add_requested(member: String)
 signal focus_requested(member: String, index: int)
 ## Something to tell the user (an edit was refused, ...).
 signal message(text: String)
+## "Open chunk" was pressed: open that chunk's mapgen.
+signal open_chunk_requested(ref: DataIndex.MapgenRef)
 
 const PROBLEM_COLOR := Color(1, 0.45, 0.45)
+## Suggestions listed at most in the chunk picker.
+const MAX_SUGGESTIONS := 60
 
 var doc: MapDocument
 ## The selected entry ("" and -1 for none).
@@ -27,11 +32,18 @@ var list: Tree
 var kind_picker: OptionButton
 ## key -> the LineEdit editing that field of the selected entry.
 var editors := {}
+## The chunk picker (place_nested only): an id, its weight, and matching ids.
+var chunk_edit: LineEdit
+var chunk_weight: SpinBox
+var chunk_list: ItemList
 
 var _filter: LineEdit
 var _header: Label
 var _fields: GridContainer
 var _problems: Label
+var _chunk_box: VBoxContainer
+var _chunk_info: Label
+var _open_chunk_button: Button
 var _delete_button: Button
 var _duplicate_button: Button
 var _add_button: Button
@@ -110,7 +122,100 @@ func _init() -> void:
 	_problems.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_problems.add_theme_color_override("font_color", PROBLEM_COLOR)
 	inner.add_child(_problems)
+	_build_chunk_picker(inner)
 	_update_buttons()
+
+
+func _build_chunk_picker(parent: Control) -> void:
+	_chunk_box = VBoxContainer.new()
+	_chunk_box.visible = false
+	parent.add_child(_chunk_box)
+	_chunk_box.add_child(HSeparator.new())
+	_chunk_info = Label.new()
+	_chunk_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_chunk_box.add_child(_chunk_info)
+	var row := HBoxContainer.new()
+	_chunk_box.add_child(row)
+	chunk_edit = LineEdit.new()
+	chunk_edit.placeholder_text = "nested chunk id"
+	chunk_edit.clear_button_enabled = true
+	chunk_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	chunk_edit.text_changed.connect(func(_t: String) -> void: _suggest_chunks())
+	chunk_edit.text_submitted.connect(func(_t: String) -> void: _on_add_chunk())
+	row.add_child(chunk_edit)
+	chunk_weight = SpinBox.new()
+	chunk_weight.min_value = 1
+	chunk_weight.max_value = 100000
+	chunk_weight.value = 100
+	chunk_weight.tooltip_text = "Weight among the entry's chunks (BN's default is 100)"
+	row.add_child(chunk_weight)
+	var add := _button(row, "Add chunk", _on_add_chunk)
+	add.tooltip_text = "Add it to the entry's \"chunks\""
+	_open_chunk_button = _button(row, "Open", func() -> void:
+		var st := _stamp()
+		if st and st.ref:
+			open_chunk_requested.emit(st.ref))
+	_open_chunk_button.tooltip_text = "Open the chunk drawn for this entry"
+	chunk_list = ItemList.new()
+	chunk_list.custom_minimum_size = Vector2(0, 120)
+	chunk_list.item_selected.connect(func(i: int) -> void:
+		chunk_edit.text = chunk_list.get_item_metadata(i))
+	chunk_list.item_activated.connect(func(i: int) -> void:
+		chunk_edit.text = chunk_list.get_item_metadata(i)
+		_on_add_chunk())
+	_chunk_box.add_child(chunk_list)
+
+
+## Adds chunk [param id] to the selected place_nested entry's "chunks": a
+## plain id at BN's default weight 100, else [id, weight]. Returns an error,
+## or "".
+func add_chunk(id: String, weight := 100) -> String:
+	var p := doc.placement(member, index) if doc and member else null
+	if p == null or p.member != "place_nested":
+		return "Select a place_nested entry first."
+	if id.is_empty():
+		return "Enter a nested chunk id."
+	if id != "null" and not doc.index.nested.has(id):
+		return "There's no nested chunk \"%s\"." % id
+	var chunks: Array = p.entry.get("chunks").duplicate(true) if p.entry.get("chunks") is Array else []
+	chunks.append(id if weight == 100 else [id, weight])
+	return doc.set_placement_fields(member, index, {"chunks": chunks}, "Add chunk %s to %s" % [id, p.title()])
+
+
+func _on_add_chunk() -> void:
+	var err := add_chunk(chunk_edit.text.strip_edges(), int(chunk_weight.value))
+	if err:
+		message.emit(err)
+		_problems.text = err
+	else:
+		chunk_edit.text = ""
+
+
+## The selected place_nested entry's chunk as the map draws it, or null.
+func _stamp() -> ChunkOverlay.Stamp:
+	if doc == null or member != "place_nested":
+		return null
+	return doc.chunk_overlay().stamp_for(index)
+
+
+## Lists nested chunk ids containing the picker's text, with their sizes.
+func _suggest_chunks() -> void:
+	chunk_list.clear()
+	if doc == null:
+		return
+	var text := chunk_edit.text.strip_edges().to_lower()
+	var ids: Array = doc.index.nested.keys().filter(func(id: String) -> bool:
+		return text.is_empty() or id.to_lower().contains(text))
+	ids.sort()
+	for id: String in ids.slice(0, MAX_SUGGESTIONS):
+		var refs: Array = doc.index.nested[id]
+		var ref: DataIndex.MapgenRef = ChunkOverlay.heaviest(refs)
+		var extra := " (%d mapgens)" % refs.size() if refs.size() > 1 else ""
+		var i := chunk_list.add_item("%s  %dx%d%s" % [id, ref.chunk_size.x, ref.chunk_size.y, extra])
+		chunk_list.set_item_metadata(i, id)
+	if ids.size() > MAX_SUGGESTIONS:
+		chunk_list.add_item("... %d more; type to narrow" % (ids.size() - MAX_SUGGESTIONS))
+		chunk_list.set_item_disabled(chunk_list.item_count - 1, true)
 
 
 ## Shows [param p_doc]'s placements (null for no map).
@@ -118,6 +223,7 @@ func show_map(p_doc: MapDocument) -> void:
 	if p_doc != doc:
 		member = ""
 		index = -1
+		chunk_list.clear()
 	doc = p_doc
 	refresh()
 
@@ -313,6 +419,7 @@ func _rebuild_inspector() -> void:
 	_problems.text = ""
 	if p == null:
 		_header.text = "Select a placement in the list or on the map (Place tool, P)." if doc else ""
+		_chunk_box.visible = false
 		_building = false
 		_update_buttons()
 		return
@@ -325,8 +432,20 @@ func _rebuild_inspector() -> void:
 		if not keys.has(key):
 			_add_field(p, key, "json", "")
 	_problems.text = "\n".join(p.problems)
+	_show_chunk(p)
 	_building = false
 	_update_buttons()
+
+
+func _show_chunk(p: Placement) -> void:
+	_chunk_box.visible = p != null and p.member == "place_nested"
+	if not _chunk_box.visible:
+		return
+	var st := _stamp()
+	_chunk_info.text = "Draws: " + (st.describe() if st else "nothing (BN drops this entry)")
+	_open_chunk_button.disabled = st == null or st.ref == null
+	if chunk_list.item_count == 0:
+		_suggest_chunks()
 
 
 func _add_field(p: Placement, key: String, type: String, help: String) -> void:

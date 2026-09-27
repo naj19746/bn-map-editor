@@ -18,6 +18,9 @@ signal cells_changed(cells: Array[Vector2i])
 ## cells_changed already reported every changed cell (none for a placement
 ## edit, which only changes [method placements]).
 signal changed(full: bool)
+## Something outside this map that its nested chunks draw from changed (a
+## chunk or a palette of one), so chunk_overlay() is new.
+signal overlay_changed
 
 ## Where a missing object member goes, relative to the others.
 const MEMBER_ORDER := ["mapgensize", "fill_ter", "rows", "palettes", "terrain", "furniture"]
@@ -51,6 +54,9 @@ var file: JsonFile
 var object_index := 0
 var ref: DataIndex.MapgenRef
 var resolved: ResolvedMapgen
+## Where chunk_overlay() reads chunks from; EditSession sets one that sees
+## files open for editing.
+var objects: MapgenObjects
 
 var _undo: Array[Change] = []
 var _redo: Array[Change] = []
@@ -59,6 +65,8 @@ var _placements: Array[Placement] = []
 ## key -> where it's defined, for keys only another option of a palette
 ## distribution/param defines (BN adds every option, so they're taken too).
 var _option_keys := {}
+## Built on first use after each change.
+var _overlay: ChunkOverlay
 
 
 ## Returns null if objects[[param i]] isn't a mapgen with an "object".
@@ -380,7 +388,9 @@ func _apply(c: Change, forward: bool) -> void:
 func _resolve() -> void:
 	resolved = MapgenResolver.resolve(index, mapgen())
 	_placements = Placement.read_all(mapgen(), resolved.size)
+	_overlay = null
 	ref.palettes = DataIndex.palette_options(object())
+	ref.chunks = DataIndex.chunk_options(object())
 	_option_keys.clear()
 	if resolved.choice_options.is_empty():
 		return
@@ -401,6 +411,36 @@ func refresh() -> void:
 ## palette, or any option of a distribution/param.
 func uses_palette(id: String) -> bool:
 	return index.palette_closure(DataIndex.palette_options(object())).has(id)
+
+
+# --- Nested chunks -------------------------------------------------------------
+
+## The nested chunks this map places, laid over its cells (see ChunkOverlay).
+func chunk_overlay() -> ChunkOverlay:
+	if _overlay == null:
+		if objects == null:
+			objects = MapgenObjects.new(index)
+		_overlay = ChunkOverlay.build(index, mapgen(), resolved, objects.object_for)
+	return _overlay
+
+
+## Lays the chunks out again after a chunk or palette they use changed.
+func refresh_overlay() -> void:
+	_overlay = null
+	overlay_changed.emit()
+
+
+## True when the current overlay draws chunk [param chunk_id], or a chunk
+## using palette [param palette_id] (false before it's first built).
+func overlay_uses(chunk_id := "", palette_id := "") -> bool:
+	if _overlay == null:
+		return false
+	return (chunk_id and _overlay.drawn_ids.has(chunk_id)) or (palette_id and _overlay.palette_ids.has(palette_id))
+
+
+## This chunk's nested id, or "" for other maps.
+func chunk_id() -> String:
+	return ref.ids[0] if ref.kind == DataIndex.MapgenRef.NESTED and not ref.ids.is_empty() else ""
 
 
 # --- Palettes list -------------------------------------------------------------
@@ -675,6 +715,7 @@ func problems() -> PackedStringArray:
 	var out := resolved.problems.duplicate()
 	for p in _placements:
 		out.append_array(p.problems)
+	out.append_array(chunk_overlay().problems())
 	for id in missing_overmap_terrain():
 		out.append("om_terrain \"%s\" has no overmap_terrain, so BN never generates this map (Edit > Add missing overmap_terrain)" % id)
 	return out

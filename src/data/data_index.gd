@@ -118,6 +118,10 @@ class MapgenRef:
 	## The palettes the map lists itself, every option of a distribution or
 	## param included (not the ones those palettes include).
 	var palettes := PackedStringArray()
+	## The nested chunk ids the map places itself (place_nested "chunks" and
+	## "else_chunks", and its own "nested" symbol mappings), not the ones its
+	## palettes' mappings place.
+	var chunks := PackedStringArray()
 
 	## The id to show for this entry: the first id, top-left for a grid.
 	func title() -> String:
@@ -492,6 +496,7 @@ func add_mapgen(o: Dictionary, src: Source) -> MapgenRef:
 	var obj: Variant = o.get("object")
 	if obj is Dictionary:
 		ref.palettes = palette_options(obj)
+		ref.chunks = chunk_options(obj)
 	var table: Dictionary
 	if o.has("om_terrain"):
 		ref.kind = MapgenRef.OM_TERRAIN
@@ -614,6 +619,86 @@ func maps_using(id: String) -> Array[MapgenRef]:
 					break
 	var out: Array[MapgenRef] = []
 	for ref in mapgens:
+		for p in ref.palettes:
+			if reaching.has(p):
+				out.append(ref)
+				break
+	return out
+
+
+## Every nested chunk id [param data] (a map's "object" or a palette) can
+## place itself: its place_nested entries' "chunks" and "else_chunks", and its
+## "nested" symbol mappings (also inside "mapping"). "null" and "" place
+## nothing and are left out.
+static func chunk_options(data: Dictionary) -> PackedStringArray:
+	var out := PackedStringArray()
+	var pieces: Array = []
+	var list: Variant = data.get("place_nested")
+	if list is Array:
+		pieces.append_array(list)
+	for v in nested_mappings(data):
+		pieces.append_array(v if v is Array else [v])
+	for piece: Variant in pieces:
+		if not piece is Dictionary:
+			continue
+		for member in ["chunks", "else_chunks"]:
+			for option in weighted_ids(piece.get(member)):
+				if option[0] and option[0] != "null" and not out.has(option[0]):
+					out.append(option[0])
+	return out
+
+
+## The values of [param data]'s "nested" symbol mappings (each an object or
+## a list of them), "mapping" entries first as BN reads them.
+static func nested_mappings(data: Dictionary) -> Array:
+	var out := []
+	var mapping: Variant = data.get("mapping")
+	if mapping is Dictionary:
+		for key: String in mapping:
+			if mapping[key] is Dictionary and mapping[key].has("nested"):
+				out.append(mapping[key].nested)
+	var nested: Variant = data.get("nested")
+	if nested is Dictionary:
+		out.append_array(nested.values())
+	return out
+
+
+## A weighted list as BN's load_weighted_list reads it: plain ids (weight
+## 100) or [id, weight] pairs, as [[id, weight], ...]. Anything else is left
+## out.
+static func weighted_ids(list: Variant) -> Array:
+	var out := []
+	if not list is Array:
+		return out
+	for e: Variant in list:
+		if e is String:
+			out.append([e, 100])
+		elif e is Array and e.size() == 2 and e[0] is String and (e[1] is int or e[1] is float):
+			out.append([e[0], int(e[1])])
+	return out
+
+
+## Mapgen entries that place chunk [param id] themselves, or may through a
+## "nested" mapping of a palette they use (directly, by include, or as any
+## option). The palette case is a superset: the map may not use the symbol.
+func maps_placing(id: String) -> Array[MapgenRef]:
+	var direct := {}
+	for pid: String in palettes:
+		var def := palette(pid)
+		if def and chunk_options(def.data).has(id):
+			direct[pid] = true
+	var reaching := {}
+	if not direct.is_empty():
+		for pid: String in palettes:
+			for p in palette_closure(PackedStringArray([pid])):
+				if direct.has(p):
+					reaching[pid] = true
+					break
+	var out: Array[MapgenRef] = []
+	for ref in mapgens:
+		if ref.chunks.has(id):
+			out.append(ref)
+			continue
 		for p in ref.palettes:
 			if reaching.has(p):
 				out.append(ref)

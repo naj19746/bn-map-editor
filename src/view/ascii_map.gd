@@ -9,6 +9,9 @@ extends RefCounted
 ##
 ## Distributions, params and switches show their first possible id (see
 ## ResolvedMapgen.Binding.id()).
+##
+## With an [member overlay], cells a nested chunk writes show what the chunk
+## leaves there (ChunkOverlay): its terrain and/or furniture over the map's.
 
 enum State {
 	OK,
@@ -52,6 +55,9 @@ var size := Vector2i.ZERO
 var season := 0
 ## When false, furniture is hidden and terrain always shows.
 var show_furniture := true
+## The map's nested chunks, drawn over its cells; null to show the map alone.
+## Call refresh() after changing it.
+var overlay: ChunkOverlay
 
 ## Per cell, row-major (y * size.x + x).
 var chars := PackedStringArray()
@@ -61,15 +67,20 @@ var states := PackedByteArray()
 
 ## key -> Look, for the keys in use (and "" for cells with no key).
 var looks := {}
+## Per cell, the Look drawn there (a key's, or a chunk's over it).
+var _cell_looks: Array[Look] = []
+## key + terrain + furniture -> Look, for cells a chunk writes.
+var _chunk_looks := {}
 
 
 static func build(p_index: DataIndex, p_resolved: ResolvedMapgen, p_season := 0,
-		p_show_furniture := true) -> AsciiMap:
+		p_show_furniture := true, p_overlay: ChunkOverlay = null) -> AsciiMap:
 	var m := AsciiMap.new()
 	m.index = p_index
 	m.resolved = p_resolved
 	m.season = p_season
 	m.show_furniture = p_show_furniture
+	m.overlay = p_overlay
 	m.refresh()
 	return m
 
@@ -78,15 +89,18 @@ static func build(p_index: DataIndex, p_resolved: ResolvedMapgen, p_season := 0,
 func refresh() -> void:
 	size = resolved.size
 	looks.clear()
+	_chunk_looks.clear()
+	if overlay and overlay.size != size:
+		overlay = null
 	var n := size.x * size.y
 	chars.resize(n)
 	fg.resize(n)
 	bg.resize(n)
 	states.resize(n)
+	_cell_looks.resize(n)
 	for y in size.y:
-		var row := resolved.cells[y]
 		for x in size.x:
-			_set_look(x, y, look_for(row[x]))
+			_set_look(x, y, look_at(x, y))
 	_join_walls()
 
 
@@ -95,18 +109,19 @@ func refresh() -> void:
 func update_cells(points: Array[Vector2i]) -> void:
 	var rejoin := {}
 	for p in points:
-		_set_look(p.x, p.y, look_for(resolved.cells[p.y][p.x]))
+		_set_look(p.x, p.y, look_at(p.x, p.y))
 		for d: Vector2i in [Vector2i.ZERO, Vector2i.UP, Vector2i.DOWN, Vector2i.LEFT, Vector2i.RIGHT]:
 			var q := p + d
 			if q.x >= 0 and q.y >= 0 and q.x < size.x and q.y < size.y:
 				rejoin[q] = true
 	for q: Vector2i in rejoin:
-		chars[q.y * size.x + q.x] = looks[resolved.cells[q.y][q.x]].ch
+		chars[q.y * size.x + q.x] = _cell_looks[q.y * size.x + q.x].ch
 		_join_wall(q.x, q.y)
 
 
 func _set_look(x: int, y: int, look: Look) -> void:
 	var i := y * size.x + x
+	_cell_looks[i] = look
 	chars[i] = look.ch
 	fg[i] = look.colors.fg
 	bg[i] = look.colors.bg
@@ -149,6 +164,15 @@ func describe_cell(x: int, y: int) -> String:
 		parts.append(" + ".join(ids))
 	if info and not info.extras.is_empty():
 		parts.append("[%s]" % ", ".join(PackedStringArray(info.extras.keys())))
+	var stamp := overlay.stamp_at(Vector2i(x, y)) if overlay else null
+	if stamp:
+		var i := y * size.x + x
+		var drawn := PackedStringArray()
+		if overlay.ter[i]:
+			drawn.append(overlay.ter[i])
+		if overlay.furn[i]:
+			drawn.append("no furniture" if overlay.furn[i] == "f_null" else overlay.furn[i])
+		parts.append("chunk %s '%s': %s ‹%s›" % [stamp.chunk_id, overlay.chunk_keys[i], " + ".join(drawn), stamp.path])
 	match state_at(x, y):
 		State.UNDEFINED: parts.append("UNDEFINED SYMBOL")
 		State.UNKNOWN_ID: parts.append("UNKNOWN ID")
@@ -164,6 +188,23 @@ static func _describe_binding(b: ResolvedMapgen.Binding) -> String:
 	if b.ids.size() > 1:
 		id += " (1 of %d)" % b.ids.size()
 	return "%s ‹%s›" % [id, b.source_label()]
+
+
+## What cell ([param x], [param y]) looks like: its key's Look, or with an
+## overlay, what a chunk leaves there.
+func look_at(x: int, y: int) -> Look:
+	var key := resolved.cells[y][x]
+	if overlay == null:
+		return look_for(key)
+	var i := y * size.x + x
+	if overlay.owner[i] < 0:
+		return look_for(key)
+	var id := "%s\u0001%s\u0001%s" % [key, overlay.ter[i], overlay.furn[i]]
+	var look: Look = _chunk_looks.get(id)
+	if look == null:
+		look = _make_chunk_look(look_for(key), overlay.ter[i], overlay.furn[i])
+		_chunk_looks[id] = look
+	return look
 
 
 func look_for(key: String) -> Look:
@@ -194,18 +235,45 @@ func _make_look(key: String) -> Look:
 		look.state = State.EMPTY if resolved.draws_over or not resolved.predecessor_mapgen.is_empty() \
 				else State.NO_TERRAIN
 
+	_finish_look(look, key)
+	return look
+
+
+## [param base] (the map's own Look for the cell) with a chunk's terrain
+## [param ter] and furniture [param furn] over it ("" keeps the map's,
+## "f_null" removes the furniture).
+func _make_chunk_look(base: Look, ter: String, furn: String) -> Look:
+	var look := Look.new()
+	look.layers = base.layers
+	look.terrain = index.terrain.get(ter) if ter else base.terrain
+	look.furniture = base.furniture
+	if furn:
+		look.furniture = index.furniture.get(furn) if furn != "f_null" else null
+	if (ter and look.terrain == null) or (furn and furn != "f_null" and look.furniture == null):
+		look.state = State.UNKNOWN_ID
+	elif base.state == State.UNDEFINED or base.state == State.UNKNOWN_ID:
+		# The map's own problem is still there.
+		look.state = base.state
+	elif look.terrain == null:
+		look.state = base.state
+	_finish_look(look, ter if ter else furn)
+	return look
+
+
+## Sets [param look]'s glyph and colors from its terrain/furniture
+## ([param key] is shown when neither is known).
+func _finish_look(look: Look, key: String) -> void:
 	var shown: DataIndex.TileDef = look.furniture if show_furniture and look.furniture else look.terrain
 	if shown == null:
 		# Nothing known to draw: show the key itself.
 		look.ch = key if key else " "
 		look.colors = BnColors.Pair.new(BnColors.GRAY, BnColors.BLACK)
-		return look
+		return
 	look.ch = shown.ascii(season)
 	var color := shown.color[season] if season < shown.color.size() else ""
 	look.colors = BnColors.parse_bg(color) if shown.bgcolor else BnColors.parse(color)
 	look.auto_wall = shown == look.terrain and shown.has_flag(AUTO_WALL) \
 			and not shown.connect_group.is_empty()
-	return look
 
 
 func _join_walls() -> void:
@@ -215,7 +283,7 @@ func _join_walls() -> void:
 
 
 func _join_wall(x: int, y: int) -> void:
-	var look: Look = looks[resolved.cells[y][x]]
+	var look := _cell_looks[y * size.x + x]
 	if not look.auto_wall:
 		return
 	var group := look.terrain.connect_group
@@ -235,5 +303,5 @@ func _join_wall(x: int, y: int) -> void:
 func _connects(x: int, y: int, group: String) -> bool:
 	if x < 0 or y < 0 or x >= size.x or y >= size.y:
 		return false
-	var t: DataIndex.TileDef = looks[resolved.cells[y][x]].terrain
+	var t: DataIndex.TileDef = _cell_looks[y * size.x + x].terrain
 	return t != null and t.connect_group == group
