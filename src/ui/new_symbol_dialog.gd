@@ -16,9 +16,14 @@ class IdPicker:
 	signal changed
 
 	const MAX_SHOWN := 300
+	## selected() when the "keep" entry is chosen.
+	const KEEP := "\u0001keep"
 
 	var table: Dictionary
 	var allow_none := true
+	## When set, the list starts with "(keep: <keep_text>)": leave the value
+	## as it is (e.g. a distribution the list can't show).
+	var keep_text := ""
 	var search: LineEdit
 	var list: ItemList
 
@@ -37,7 +42,7 @@ class IdPicker:
 		list.item_selected.connect(func(_i: int) -> void: changed.emit())
 		add_child(list)
 
-	## The chosen id, "" for none.
+	## The chosen id, "" for none (or nothing chosen), KEEP for "(keep)".
 	func selected() -> String:
 		var items := list.get_selected_items()
 		return list.get_item_metadata(items[0]) if not items.is_empty() else ""
@@ -45,18 +50,31 @@ class IdPicker:
 	func select_id(id: String) -> void:
 		search.text = ""
 		refresh()
+		if not _select(id) and table.has(id):
+			# Not among the first MAX_SHOWN: search for it instead.
+			search.text = id
+			refresh()
+			_select(id)
+		if list.get_selected_items().is_empty():
+			_select_default()
+
+	func _select(id: String) -> bool:
+		list.deselect_all()
 		for i in list.item_count:
 			if list.get_item_metadata(i) == id:
 				list.select(i)
 				list.ensure_current_is_visible()
-				return
+				return true
+		return false
 
 	func refresh() -> void:
+		var had := not list.get_selected_items().is_empty()
 		var keep := selected()
 		list.clear()
+		if keep_text:
+			list.set_item_metadata(list.add_item("(keep: %s)" % keep_text), KEEP)
 		if allow_none:
-			list.add_item("(none)")
-			list.set_item_metadata(0, "")
+			list.set_item_metadata(list.add_item("(none)"), "")
 		var q := search.text.strip_edges().to_lower()
 		var ids: Array = table.keys()
 		ids.sort()
@@ -72,9 +90,15 @@ class IdPicker:
 			shown += 1
 			var i := list.add_item("%s  %s   %s" % [def.ascii(), id, def.name])
 			list.set_item_metadata(i, id)
-			if id == keep:
+		for i in list.item_count:
+			if had and list.get_item_metadata(i) == keep:
 				list.select(i)
-		if list.get_selected_items().is_empty() and allow_none and keep.is_empty():
+		if list.get_selected_items().is_empty() and not had:
+			_select_default()
+
+	## "(keep)" if listed, else "(none)" if listed.
+	func _select_default() -> void:
+		if list.item_count > 0 and (keep_text or allow_none):
 			list.select(0)
 
 

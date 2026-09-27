@@ -40,6 +40,9 @@ class Look:
 	var colors: BnColors.Pair
 	## True when the terrain shows and joins walls.
 	var auto_wall := false
+	## Placement.Layer bits for what the symbol's own mappings place
+	## (items, monsters, ...), which the canvas marks.
+	var layers := 0
 
 
 var index: DataIndex
@@ -176,6 +179,7 @@ func _make_look(key: String) -> Look:
 	var info: ResolvedMapgen.SymbolInfo = resolved.symbols.get(key)
 	var ter: ResolvedMapgen.Binding = info.terrain if info and info.terrain else resolved.fill_binding()
 	var furn: ResolvedMapgen.Binding = info.furniture if info else null
+	look.layers = Placement.mapping_layers(info)
 	var ter_id := ter.id() if ter else ""
 	var furn_id := furn.id() if furn else ""
 	look.terrain = index.terrain.get(ter_id)

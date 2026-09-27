@@ -2,9 +2,11 @@ extends Control
 ## Application root: the ASCII map editor.
 ##
 ## Layout: menu bar and toolbar on top; map tabs with the canvas on the left;
-## a side drawer (Browser, Legend) on the right; a status bar at the bottom.
+## a side drawer (Browser, Legend, Placements) on the right; a layer bar
+## under the map; a status bar at the bottom.
 ## Maps are edited through an EditSession and saved to the workspace; the
-## Sync window pushes workspace files into BN.
+## Palette editor window edits palettes in the same session, and the Sync
+## window pushes workspace files into BN.
 ##
 ## Command line (after "--"): --bn <path> overrides the BN checkout,
 ## --workspace <path> the workspace folder, and --open <id> opens a mapgen by
@@ -18,19 +20,20 @@ enum Menu {
 	SHOW_FURNITURE, SHOW_KEYS, FIT, TOGGLE_DRAWER, FIND,
 	SPRING, SUMMER, AUTUMN, WINTER,
 	NEW_MAP, SAVE, SAVE_ALL, WORKSPACE,
-	UNDO, REDO, NEW_SYMBOL, ADD_OVERMAP,
+	UNDO, REDO, NEW_SYMBOL, ADD_OVERMAP, PALETTES,
 	SYNC,
 }
 
 const SEASONS := ["Spring", "Summer", "Autumn", "Winter"]
 ## Tool button hotkeys, by MapTool.Kind.
-const TOOL_KEYS := [KEY_B, KEY_L, KEY_R, KEY_F, KEY_I]
+const TOOL_KEYS := [KEY_B, KEY_L, KEY_R, KEY_F, KEY_I, KEY_P]
 const TOOL_TIPS := [
 	"Paint: drag to draw with the brush symbol",
 	"Line: drag a straight line",
 	"Rect: drag a rectangle outline; hold Shift to fill it",
 	"Fill: fill the connected area of one symbol",
 	"Pick: click a cell to use its symbol as the brush (Alt+click works with any tool)",
+	"Place: click a placement to select it, drag to move it, drag its corner (or Shift+drag) to resize",
 ]
 
 
@@ -42,6 +45,9 @@ class OpenMap:
 	var canvas: MapCanvas
 	## This map's brush symbol ("" for none); symbols differ per map.
 	var brush := ""
+	## The selected placement ("" for none).
+	var sel_member := ""
+	var sel_index := -1
 
 
 ## False to skip loading on _ready (tests call load_index themselves).
@@ -50,10 +56,13 @@ var settings: AppSettings
 var index: DataIndex
 var session: EditSession
 var tool := MapTool.new()
+var placement_tool := PlacementTool.new()
 var maps: Array[OpenMap] = []
 var show_furniture := true
 var show_keys := false
 var season := 0
+## Placement layers shown (bit 1 << Placement.Layer).
+var layer_mask := (1 << Placement.LAYER_NAMES.size()) - 1
 
 var _file_menu: PopupMenu
 var _edit_menu: PopupMenu
@@ -70,6 +79,8 @@ var _split: HSplitContainer
 var _drawer: TabContainer
 var _browser: MapBrowser
 var _legend: LegendPanel
+var _placements_panel: PlacementsPanel
+var _layer_buttons: Array[Button] = []
 var _status: Label
 var _problems_button: Button
 var _errors_button: Button
@@ -81,6 +92,7 @@ var _workspace_dialog: FileDialog
 var _new_symbol_dialog: NewSymbolDialog
 var _new_map_dialog: NewMapDialog
 var _sync_dialog: SyncDialog
+var _palette_editor: PaletteEditor
 var _unsaved_dialog: ConfirmationDialog
 var _unsaved_files := PackedStringArray()
 var _after_unsaved := Callable()
@@ -94,6 +106,8 @@ func _ready() -> void:
 	_parse_args()
 	_build_ui()
 	tool.picked.connect(_on_picked)
+	placement_tool.selection_changed.connect(_on_placement_selected)
+	placement_tool.failed.connect(func(msg: String) -> void: _status.text = msg)
 	if is_inside_tree():
 		# Closing the window asks about unsaved changes first.
 		get_tree().auto_accept_quit = false
@@ -168,6 +182,7 @@ func load_index(path: String) -> void:
 	var ws_problem := Workspace.check_root(ws, path)
 	index = DataIndex.load_bn(path, settings.mods, null, "" if ws_problem else ws)
 	session = EditSession.new(index, Workspace.open(ws, path))
+	_palette_editor.setup(session)
 	_browser.set_index(index)
 	_status.text = "Loaded %d files from %s (%s) in %d ms. Workspace: %s. Pick a map in the Browser." % [
 		index.file_count, path, ", ".join(index.mods), Time.get_ticks_msec() - t,
@@ -213,6 +228,8 @@ func _add_tab(doc: MapDocument) -> OpenMap:
 	m.canvas.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	m.canvas.ascii = m.ascii
 	m.canvas.show_keys = show_keys
+	m.canvas.placements = doc.placements()
+	m.canvas.layer_mask = layer_mask
 	m.canvas.cell_hovered.connect(_on_cell_hovered.bind(m))
 	m.canvas.cell_pressed.connect(_on_cell_pressed.bind(m))
 	m.canvas.cell_dragged.connect(_on_cell_dragged.bind(m))
@@ -242,7 +259,8 @@ func close_tab(i: int, force := false) -> void:
 		return
 	var m := maps[i]
 	var rel := m.doc.file.rel_path
-	if not force and session.docs_for(rel).size() == 1 and session.is_dirty(rel):
+	# A palette open in the palette editor keeps its file (and its changes) open.
+	if not force and session.open_count(rel) == 1 and session.is_dirty(rel):
 		_confirm_unsaved(PackedStringArray([rel]), func() -> void: close_tab(maps.find(m), true))
 		return
 	tool.cancel()
@@ -275,6 +293,9 @@ func set_brush(key: String) -> void:
 
 func set_tool(kind: MapTool.Kind) -> void:
 	tool.cancel()
+	placement_tool.cancel()
+	if kind != MapTool.Kind.PLACE:
+		placement_tool.armed = ""
 	tool.kind = kind
 	for i in _tool_buttons.size():
 		_tool_buttons[i].set_pressed_no_signal(i == kind)
@@ -295,6 +316,10 @@ func _update_brush_label() -> void:
 
 
 func _on_cell_pressed(cell: Vector2i, alt: bool, shift: bool, m: OpenMap) -> void:
+	if tool.kind == MapTool.Kind.PLACE and not alt:
+		placement_tool.press(m.doc, cell, shift)
+		m.canvas.placement_preview = placement_tool.preview
+		return
 	if not tool.press(m.doc, cell, alt, shift):
 		_status.text = "Choose a brush first: a symbol in the Legend, or Alt+click a cell."
 	m.canvas.preview_key = tool.key
@@ -302,11 +327,19 @@ func _on_cell_pressed(cell: Vector2i, alt: bool, shift: bool, m: OpenMap) -> voi
 
 
 func _on_cell_dragged(cell: Vector2i, shift: bool, m: OpenMap) -> void:
+	if placement_tool.is_active():
+		placement_tool.move(cell)
+		m.canvas.placement_preview = placement_tool.preview
+		return
 	tool.move(cell, shift)
 	m.canvas.preview = tool.preview
 
 
 func _on_cell_released(cell: Vector2i, shift: bool, m: OpenMap) -> void:
+	if placement_tool.is_active():
+		placement_tool.release(cell)
+		m.canvas.placement_preview = placement_tool.preview
+		return
 	tool.release(cell, shift)
 	m.canvas.preview = tool.preview
 
@@ -332,12 +365,61 @@ func _on_doc_changed(full: bool, m: OpenMap) -> void:
 	m.ascii.resolved = m.doc.resolved
 	if full:
 		m.ascii.refresh()
+	m.canvas.placements = m.doc.placements()
 	m.canvas.queue_redraw()
 	_update_tab_titles()
 	if m == current_map():
+		if m.sel_member and m.doc.placement(m.sel_member, m.sel_index) == null:
+			placement_tool.select("", -1)
+		_placements_panel.refresh()
 		_legend.show_map(m.ascii)
 		_update_problems()
 		_update_brush_label()
+
+
+# --- Placements ----------------------------------------------------------------
+
+## Selects placement [param member] #[param index] of the current map ("" for
+## none), on the canvas and in the Placements panel.
+func select_placement(member: String, index: int) -> void:
+	placement_tool.select(member, index)
+
+
+func _on_placement_selected(member: String, index: int) -> void:
+	var m := current_map()
+	if m == null:
+		return
+	m.sel_member = member
+	m.sel_index = index
+	m.canvas.select_placement(member, index)
+	_placements_panel.select(member, index)
+	var p := m.doc.placement(member, index) if member else null
+	if p:
+		_drawer.current_tab = _placements_panel.get_index()
+		_status.text = "%s: %s   %s" % [p.title(), p.label(), p.what()]
+
+
+## "Add" in the Placements panel: the next drag on the map places it.
+func arm_placement(member: String) -> void:
+	set_tool(MapTool.Kind.PLACE)
+	placement_tool.armed = member
+	_status.text = "Drag on the map where the new %s goes (Esc cancels)." % member
+
+
+func set_layer_visible(layer: int, on: bool) -> void:
+	layer_mask = layer_mask | (1 << layer) if on else layer_mask & ~(1 << layer)
+	placement_tool.layer_mask = layer_mask
+	_layer_buttons[layer].set_pressed_no_signal(on)
+	for m in maps:
+		m.canvas.layer_mask = layer_mask
+
+
+func _focus_placement(member: String, index: int) -> void:
+	var m := current_map()
+	var p := m.doc.placement(member, index) if m else null
+	if p:
+		select_placement(member, index)
+		m.canvas.center_on(p.instances()[0])
 
 
 func undo() -> void:
@@ -390,6 +472,26 @@ func _save_files(rels: PackedStringArray) -> String:
 		lines.append_array(notes)
 		_show_report("Saved with changes", lines)
 	return ""
+
+
+## Opens the palette editor at palette [param id], else the current map's
+## last palette (the one that wins), else as it was.
+func open_palette_editor(id := "") -> void:
+	if session == null:
+		return
+	var m := current_map()
+	if id.is_empty() and m and not m.doc.resolved.palettes.is_empty():
+		id = m.doc.resolved.palettes[-1]
+	_palette_editor.set_map(m.doc if m else null)
+	_palette_editor.open(session, id)
+
+
+## The palette editor changed or saved files (open maps that use an edited
+## palette were already redrawn through their documents).
+func _on_palette_files_changed() -> void:
+	_update_tab_titles()
+	_update_problems()
+	_browser.refresh()
 
 
 func add_missing_overmap_terrain() -> void:
@@ -493,6 +595,12 @@ func _on_tab_changed(i: int) -> void:
 	for j in maps.size():
 		maps[j].canvas.visible = j == i
 	var m := current_map()
+	placement_tool.cancel()
+	placement_tool.armed = ""
+	_palette_editor.set_map(m.doc if m else null)
+	_placements_panel.show_map(m.doc if m else null)
+	if m:
+		placement_tool.select(m.sel_member, m.sel_index)
 	_empty_label.visible = m == null
 	_legend.show_map(m.ascii if m else null)
 	tool.key = m.brush if m else ""
@@ -510,7 +618,14 @@ func _on_tab_changed(i: int) -> void:
 func _on_cell_hovered(cell: Vector2i, m: OpenMap) -> void:
 	if cell.x < 0:
 		return
-	_status.text = m.ascii.describe_cell(cell.x, cell.y)
+	var text := m.ascii.describe_cell(cell.x, cell.y)
+	var here := PackedStringArray()
+	for p in m.doc.placements_at(cell):
+		if layer_mask & (1 << p.layer()):
+			here.append("%s %s %s" % [p.title(), p.label(), p.what()])
+	if not here.is_empty():
+		text += "   |   " + ";  ".join(here)
+	_status.text = text
 
 
 func _on_key_selected(key: String) -> void:
@@ -526,7 +641,8 @@ func _on_key_selected(key: String) -> void:
 func _show_report(title: String, lines: PackedStringArray) -> void:
 	_report.title = title
 	_report_text.text = "\n".join(lines) if lines.size() else "Nothing to report."
-	_report.popup_centered_ratio(0.5)
+	if is_inside_tree():
+		_report.popup_centered_ratio(0.5)
 
 
 func _on_problems_pressed() -> void:
@@ -545,10 +661,16 @@ func _unhandled_input(event: InputEvent) -> void:
 	var k := event as InputEventKey
 	if k == null or not k.pressed:
 		return
-	if k.keycode == KEY_ESCAPE and tool.is_active():
+	if k.keycode == KEY_ESCAPE and (tool.is_active() or placement_tool.is_active() or placement_tool.armed):
 		tool.cancel()
+		placement_tool.cancel()
+		placement_tool.armed = ""
 		if current_map():
 			current_map().canvas.preview = tool.preview
+			current_map().canvas.placement_preview = placement_tool.preview
+		accept_event()
+	elif k.keycode == KEY_DELETE and tool.kind == MapTool.Kind.PLACE and current_map():
+		_placements_panel.delete_selected()
 		accept_event()
 	elif k.keycode == KEY_Z and k.ctrl_pressed and k.shift_pressed:
 		redo()
@@ -589,6 +711,8 @@ func _on_menu(id: int) -> void:
 				_new_symbol_dialog.open(current_map().doc)
 		Menu.ADD_OVERMAP:
 			add_missing_overmap_terrain()
+		Menu.PALETTES:
+			open_palette_editor()
 		Menu.SYNC:
 			if session:
 				_sync_dialog.open(session)
@@ -695,6 +819,8 @@ func _build_ui() -> void:
 		[],
 		["New symbol...", Menu.NEW_SYMBOL, KEY_MASK_CTRL | KEY_E],
 		["Add missing overmap_terrain", Menu.ADD_OVERMAP, 0],
+		[],
+		["Palette editor...", Menu.PALETTES, KEY_MASK_CTRL | KEY_MASK_SHIFT | KEY_E],
 	])
 	_edit_menu.about_to_popup.connect(_update_edit_menu)
 	_view_menu = _menu(menu_bar, "View", [
@@ -773,6 +899,16 @@ func _build_ui() -> void:
 	_empty_label.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	_empty_label.grow_vertical = Control.GROW_DIRECTION_BOTH
 	_canvas_area.add_child(_empty_label)
+	var layer_bar := HBoxContainer.new()
+	left.add_child(layer_bar)
+	layer_bar.add_child(_label(" Placements:"))
+	for layer in Placement.LAYER_NAMES.size():
+		var b := _toggle(Placement.LAYER_NAMES[layer], true,
+				"Show %s placements (and mark cells whose symbol places them)" % Placement.LAYER_NAMES[layer].to_lower(),
+				set_layer_visible.bind(layer))
+		b.add_theme_color_override("font_pressed_color", MapCanvas.LAYER_COLORS[layer])
+		layer_bar.add_child(b)
+		_layer_buttons.append(b)
 
 	_drawer = TabContainer.new()
 	_drawer.custom_minimum_size = Vector2(380, 0)
@@ -783,7 +919,14 @@ func _build_ui() -> void:
 	_legend = LegendPanel.new()
 	_legend.key_selected.connect(_on_key_selected)
 	_legend.new_symbol_requested.connect(_on_menu.bind(Menu.NEW_SYMBOL))
+	_legend.palette_requested.connect(open_palette_editor)
 	_drawer.add_child(_legend)
+	_placements_panel = PlacementsPanel.new()
+	_placements_panel.placement_selected.connect(select_placement)
+	_placements_panel.add_requested.connect(arm_placement)
+	_placements_panel.focus_requested.connect(_focus_placement)
+	_placements_panel.message.connect(func(msg: String) -> void: _status.text = msg)
+	_drawer.add_child(_placements_panel)
 
 	var status_bar := PanelContainer.new()
 	root.add_child(status_bar)
@@ -829,6 +972,10 @@ func _build_ui() -> void:
 		_add_tab(doc)
 		_browser.refresh())
 	add_child(_new_map_dialog)
+	_palette_editor = PaletteEditor.new()
+	_palette_editor.files_changed.connect(_on_palette_files_changed)
+	_palette_editor.open_map_requested.connect(func(ref: DataIndex.MapgenRef) -> void: open_ref(ref))
+	add_child(_palette_editor)
 	_sync_dialog = SyncDialog.new()
 	_sync_dialog.files_changed.connect(_on_sync_files_changed)
 	add_child(_sync_dialog)

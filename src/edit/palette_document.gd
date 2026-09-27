@@ -1,0 +1,263 @@
+class_name PaletteDocument
+extends RefCounted
+## One palette definition opened for editing: the terrain/furniture of its
+## keys and its included palettes, with an undo history of its own. Every
+## change goes straight into the BnJson object in [member file], which is
+## also the DataIndex definition's data while the palette is open, so maps
+## resolved afterwards see the edit.
+##
+## Other per-key kinds (items, toilets, nested, ...) are shown but not edited
+## here; they stay as written.
+
+## The palette changed (an edit, undo or redo).
+signal changed
+
+## Where a missing member goes, relative to the others.
+const MEMBER_ORDER := ["type", "id", "parameters", "palettes", "mapping", "terrain", "furniture"]
+## The members an edit can touch; each change snapshots all of them.
+const EDITED := ["palettes", "mapping", "terrain", "furniture"]
+const TILE_KINDS := ["terrain", "furniture"]
+
+
+## One undoable edit: the edited members before and after.
+class Change:
+	var name := ""
+	## member -> ObjectMembers snapshot.
+	var before := {}
+	var after := {}
+	## The palette's member order before and after.
+	var order_before := []
+	var order_after := []
+
+
+var index: DataIndex
+var file: JsonFile
+## Position of the palette in [member file].
+var object_index := 0
+var def: DataIndex.Definition
+var id := ""
+
+var _undo: Array[Change] = []
+var _redo: Array[Change] = []
+
+
+## Returns null if objects[[param i]] isn't the palette [param p_def] names.
+static func open(p_index: DataIndex, p_file: JsonFile, i: int, p_def: DataIndex.Definition) -> PaletteDocument:
+	if i >= p_file.objects.size() or not p_file.objects[i] is Dictionary:
+		return null
+	var o: Dictionary = p_file.objects[i]
+	if o.get("type") != "palette" or str(o.get("id", "")) != p_def.id:
+		return null
+	var doc := PaletteDocument.new()
+	doc.index = p_index
+	doc.file = p_file
+	doc.object_index = i
+	doc.def = p_def
+	doc.id = p_def.id
+	return doc
+
+
+func palette() -> Dictionary:
+	return file.objects[object_index]
+
+
+## The definition BN uses for this id, when it isn't this one (a later
+## definition, e.g. from a mod, replaces it), else null.
+func overridden_by() -> DataIndex.Definition:
+	var in_effect := index.palette(id)
+	return in_effect if in_effect != def else null
+
+
+## What each key means, read as if the palette were a map: the palette's own
+## definitions have source SOURCE_MAP, included ones their palette's id.
+func view() -> ResolvedMapgen:
+	return MapgenResolver.resolve(index, {"nested_mapgen_id": id, "object": palette()})
+
+
+## Keys this palette defines itself, in any kind (sorted).
+func own_keys() -> PackedStringArray:
+	var out := PackedStringArray()
+	var p := palette()
+	for kind: String in MapgenResolver.MAPPING_KINDS:
+		var defs: Variant = p.get(kind)
+		if defs is Dictionary:
+			for key: String in defs:
+				if not out.has(key):
+					out.append(key)
+	var mapping: Variant = p.get("mapping")
+	if mapping is Dictionary:
+		for key: String in mapping:
+			if not out.has(key):
+				out.append(key)
+	out.sort()
+	return out
+
+
+## The palette's own [param kind] ("terrain"/"furniture") value for
+## [param key] as written, or null. A plain member entry wins over "mapping",
+## as in BN (it's read later).
+func tile_value(key: String, kind: String) -> Variant:
+	var p := palette()
+	var defs: Variant = p.get(kind)
+	if defs is Dictionary and defs.has(key):
+		return defs[key]
+	var mapping: Variant = p.get("mapping")
+	if mapping is Dictionary and mapping.get(key) is Dictionary and mapping[key].has(kind):
+		return mapping[key][kind]
+	return null
+
+
+## The included palettes as written (ids, or distribution/param objects).
+func includes() -> Array:
+	var v: Variant = palette().get("palettes")
+	return v if v is Array else []
+
+
+# --- Edits -----------------------------------------------------------------------
+
+## Why [param key] can't be set to these ids, or "". Each of
+## [param terrain] and [param furniture] is null (keep), "" (remove), an id,
+## or any other mapgen value (a distribution, ...), which is taken as is.
+func check_tiles(key: String, terrain: Variant, furniture: Variant) -> String:
+	var shape := MapDocument.check_key_shape(key)
+	if shape:
+		return shape
+	for pair: Array in [[terrain, index.terrain, "terrain"], [furniture, index.furniture, "furniture"]]:
+		if pair[0] is String and pair[0] != "" and not pair[1].has(pair[0]):
+			return "Unknown %s \"%s\"." % [pair[2], pair[0]]
+	var p := palette()
+	for member: String in TILE_KINDS + ["mapping"]:
+		if p.has(member) and not p[member] is Dictionary:
+			return "The palette's \"%s\" isn't an object." % member
+	return ""
+
+
+## A change setting [param key]'s terrain and furniture: null keeps one, ""
+## removes it, anything else sets it (see check_tiles). An entry is replaced where it's written (the
+## plain member, else "mapping"); a new one goes in the plain member.
+## Returns null when it would change nothing or check_tiles fails.
+func build_set_tiles(key: String, terrain: Variant, furniture: Variant, name := "") -> Change:
+	if check_tiles(key, terrain, furniture):
+		return null
+	var label := name if name else "Set '%s'" % key
+	return _build(label, func(p: Dictionary) -> void:
+		for pair: Array in [["terrain", terrain], ["furniture", furniture]]:
+			if pair[1] != null:
+				_set_tile(p, key, pair[0], pair[1]))
+
+
+## A change removing [param key]'s terrain and furniture from this palette.
+func build_remove_key(key: String) -> Change:
+	return build_set_tiles(key, "", "", "Remove '%s'" % key)
+
+
+## A change replacing the included palettes (the member goes when empty).
+func build_set_includes(list: Array, name := "Includes") -> Change:
+	var copy := list.duplicate(true)
+	return _build(name, func(p: Dictionary) -> void:
+		if copy.is_empty():
+			p.erase("palettes")
+		else:
+			ObjectMembers.set_member(p, "palettes", copy, MEMBER_ORDER))
+
+
+## Applies [param c] and records it for undo.
+func commit(c: Change) -> void:
+	if c == null:
+		return
+	apply(c, true)
+	_undo.append(c)
+	_redo.clear()
+	changed.emit()
+
+
+## Puts [param c]'s after (or before) state in place, without touching the
+## history or emitting changed (previews use this).
+func apply(c: Change, forward: bool) -> void:
+	file.touch(object_index)
+	var snaps: Dictionary = c.after if forward else c.before
+	for member: String in snaps:
+		ObjectMembers.restore(palette(), member, snaps[member], MEMBER_ORDER)
+	ObjectMembers.reorder(palette(), c.order_after if forward else c.order_before)
+
+
+func _set_tile(p: Dictionary, key: String, kind: String, value: Variant) -> void:
+	var defs: Variant = p.get(kind)
+	var mapping: Variant = p.get("mapping")
+	var in_mapping: bool = mapping is Dictionary and mapping.get(key) is Dictionary and mapping[key].has(kind)
+	if value is String and value.is_empty():
+		if defs is Dictionary:
+			defs.erase(key)
+			if defs.is_empty():
+				p.erase(kind)
+		if in_mapping:
+			mapping[key].erase(kind)
+			if mapping[key].is_empty():
+				mapping.erase(key)
+			if mapping.is_empty():
+				p.erase("mapping")
+		return
+	var copy: Variant = value.duplicate(true) if value is Dictionary or value is Array else value
+	if in_mapping and not (defs is Dictionary and defs.has(key)):
+		mapping[key][kind] = copy
+		return
+	if not defs is Dictionary:
+		defs = {}
+		ObjectMembers.set_member(p, kind, defs, MEMBER_ORDER)
+	defs[key] = copy
+
+
+## Runs [param edit] on the palette to record the after state, then puts the
+## before state back. null if nothing changed.
+func _build(name: String, edit: Callable) -> Change:
+	file.touch(object_index)
+	var p := palette()
+	var c := Change.new()
+	c.name = name
+	c.order_before = p.keys()
+	for member: String in EDITED:
+		c.before[member] = ObjectMembers.snapshot(p, member)
+	edit.call(p)
+	c.order_after = p.keys()
+	for member: String in EDITED:
+		c.after[member] = ObjectMembers.snapshot(p, member)
+	apply(c, false)
+	if JSON.stringify(c.before) == JSON.stringify(c.after) and c.order_before == c.order_after:
+		return null
+	return c
+
+
+# --- Undo ----------------------------------------------------------------------
+
+func can_undo() -> bool:
+	return not _undo.is_empty()
+
+
+func can_redo() -> bool:
+	return not _redo.is_empty()
+
+
+func undo_name() -> String:
+	return _undo[-1].name if can_undo() else ""
+
+
+func redo_name() -> String:
+	return _redo[-1].name if can_redo() else ""
+
+
+func undo() -> void:
+	if not can_undo():
+		return
+	var c: Change = _undo.pop_back()
+	apply(c, false)
+	_redo.append(c)
+	changed.emit()
+
+
+func redo() -> void:
+	if not can_redo():
+		return
+	var c: Change = _redo.pop_back()
+	apply(c, true)
+	_undo.append(c)
+	changed.emit()

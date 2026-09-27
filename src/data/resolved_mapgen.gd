@@ -71,6 +71,9 @@ var palettes := PackedStringArray()
 var parameters := {}
 ## Where a random choice was made for display (e.g. a palette distribution).
 var choices := PackedStringArray()
+## For each "palettes" entry with several possible palettes, in the order
+## met: its options. MapgenResolver.resolve's picks index into these.
+var choice_options: Array[PackedStringArray] = []
 var problems := PackedStringArray()
 
 var _fill: Binding
@@ -101,6 +104,37 @@ func fill_binding() -> Binding:
 		_fill.ids = PackedStringArray([fill_ter])
 		_fill.source = SOURCE_FILL
 	return _fill
+
+
+## What [param key] places, as text: equal texts mean the same terrain,
+## furniture and extras, wherever they are defined. For comparing a map
+## before and after an edit. Numbers compare by value, so a value read with
+## Godot's JSON (floats) matches the same value read with BnJson.
+func key_signature(key: String) -> String:
+	var info: SymbolInfo = symbols.get(key)
+	if info == null:
+		return "undefined"
+	var extras := {}
+	var kinds: Array = info.extras.keys()
+	kinds.sort()
+	for kind: String in kinds:
+		extras[kind] = info.extras[kind].map(func(b: Binding) -> Variant: return b.value)
+	return JSON.stringify(_numbers_as_floats([
+		info.terrain.value if info.terrain else null, info.null_terrain,
+		info.furniture.value if info.furniture else null, extras]))
+
+
+static func _numbers_as_floats(v: Variant) -> Variant:
+	if v is int:
+		return float(v)
+	if v is Array:
+		return v.map(_numbers_as_floats)
+	if v is Dictionary:
+		var out := {}
+		for k: Variant in v:
+			out[k] = _numbers_as_floats(v[k])
+		return out
+	return v
 
 
 ## The distinct keys used in the rows, in first-seen order.

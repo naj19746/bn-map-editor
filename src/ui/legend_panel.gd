@@ -9,6 +9,9 @@ extends VBoxContainer
 signal key_selected(key: String)
 ## The "New symbol..." button was pressed.
 signal new_symbol_requested
+## "Palette..." was pressed: open the palette editor at [param id] (the
+## selected symbol's palette), or "" for no particular one.
+signal palette_requested(id: String)
 
 const MAX_VALUE_TEXT := 90
 
@@ -39,6 +42,11 @@ func _init() -> void:
 	_new_button.disabled = true
 	_new_button.pressed.connect(func() -> void: new_symbol_requested.emit())
 	top.add_child(_new_button)
+	var palette_button := Button.new()
+	palette_button.text = "Palette..."
+	palette_button.tooltip_text = "Edit the palette that defines the selected symbol (Ctrl+Shift+E)"
+	palette_button.pressed.connect(func() -> void: palette_requested.emit(selected_palette()))
+	top.add_child(palette_button)
 	_tree = Tree.new()
 	_tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_tree.hide_root = true
@@ -73,6 +81,23 @@ func select_key(key: String) -> void:
 	item.select(0)
 	_tree.scroll_to_item(item)
 	_selecting = false
+
+
+## The palette defining the selected symbol's terrain (else furniture, else
+## anything), or "".
+func selected_palette() -> String:
+	if not _selected is String or _ascii == null:
+		return ""
+	var info: ResolvedMapgen.SymbolInfo = _ascii.resolved.symbols.get(_selected)
+	if info == null:
+		return ""
+	var bindings: Array = [info.terrain, info.furniture]
+	for kind: String in info.extras:
+		bindings.append_array(info.extras[kind])
+	for b: ResolvedMapgen.Binding in bindings:
+		if b and b.from_palette():
+			return b.source
+	return ""
 
 
 func _on_selected() -> void:

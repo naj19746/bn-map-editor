@@ -7,9 +7,11 @@ extends RefCounted
 ## The Pick tool (or Alt+click) chose the symbol at a cell.
 signal picked(key: String)
 
-enum Kind { PAINT, LINE, RECT, FILL, PICK }
+## PLACE selects and drags placements; main hands its drags to a
+## PlacementTool instead.
+enum Kind { PAINT, LINE, RECT, FILL, PICK, PLACE }
 
-const NAMES := ["Paint", "Line", "Rect", "Fill", "Pick"]
+const NAMES := ["Paint", "Line", "Rect", "Fill", "Pick", "Place"]
 
 var kind := Kind.PAINT
 ## The symbol drawn, "" for none.
@@ -34,6 +36,8 @@ func press(doc: MapDocument, cell: Vector2i, pick := false, filled := false) -> 
 	if kind == Kind.PICK or pick:
 		if cell.y < doc.resolved.cells.size() and cell.x < doc.resolved.cells[cell.y].size():
 			picked.emit(doc.resolved.cells[cell.y][cell.x])
+		return true
+	if kind == Kind.PLACE:
 		return true
 	if key.is_empty():
 		return false

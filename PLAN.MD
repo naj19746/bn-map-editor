@@ -32,16 +32,20 @@ Mapgen format (what the editor models):
        nested, etc.
      - Coordinate-based placement. x/y are an int or an inclusive [min, max] range, which must not
        cross a 24x24 block boundary:
-         - place_items / items : item GROUP, "chance" is a percentage (default 1).
+         - place_items / items : item GROUP (or an item id: 4 uses), "chance" is a percentage (default 1),
+                                 which must be 1..100 or BN places nothing (map::place_items).
          - place_item / item   : a specific item id, "amount", "repeat", "chance" (a percentage, default 100;
                                  BN's mapgen.md wrongly says one-in-N for "item").
-         - place_loot          : a specific item or a group, "chance" a percentage (default 100).
+         - place_loot          : a specific item or a group, "chance" a percentage (default 100), a plain
+                                 int (no range); scaled by the item spawn rate unless it is 100.
          - place_monster       : ONE monster (a specific id, one pick from a weighted list of ids, or one
                                  pick from a "group"), with chance (a percentage scaled by spawn density,
                                  default 100), repeat, pack_size.
          - place_vehicles      : a vehicle GROUP id (every vehicle prototype is also a group of its own
                                  id), "chance" a percentage scaled by the vehicle spawn rate, DEFAULT 1.
-         - place_monsters      : spawns the ENTIRE monster group, with chance (one-in-N, default 1), repeat, density.
+         - place_monsters      : spawns a monster GROUP (about density x 10-50 picks from it over the
+                                 area, map::place_spawns, not the "entire" group), with chance (one-in-N,
+                                 default 1), repeat, density (default: the map's monster density).
          - place_nested / nested : place nested chunks, optionally conditional on neighbors or joins.
          - set, place_vehicles, place_signs, place_npcs, computers, ... (see the reference doc)
      - "rotation", "parameters", "predecessor_mapgen", "flags".
@@ -298,6 +302,12 @@ Development stages (each ends with a headless-testable acceptance check):
    - Coordinate ranges: confirmed. A multi-tile map is loaded as one function per OMT, and each placement
      belongs to the OMT containing its (min x, min y). If its max leaves that OMT, BN throws "coordinate
      range cannot cross grid boundaries". A nested chunk checks against its mapgensize instead.
+     (Corrected after Stage 4: the anchor is the FIRST value of each range, not the minimum, and only
+     the second value is checked against the OMT's far edge. A reversed range such as [31, 16] passes
+     and, since rng swaps its bounds, spans back into the previous OMT: 103 reversed ranges in core +
+     mods, 54 spanning an OMT boundary, mostly place_vehicles and place_items. Also, a nested chunk's
+     place_* entries are checked against 24x24, not its mapgensize: jmapgen_objects copies the size
+     before mapgensize is read. Only "set" uses the real mapgensize. 8 chunks rely on this.)
    - "chance" means different things per placement type (see the corrected list under "Mapgen format").
      The Inspector must label it per type, and BN's doc can't be trusted for "item".
    - DECIDED: new symbols go into the map itself, and palettes are edited in the palette editor
@@ -416,10 +426,11 @@ Development stages (each ends with a headless-testable acceptance check):
      or item, ammo, magazine; place_vehicles: rotation, status, fuel).
    - Placements: BN loads the whole placement list once per OMT, subtracts that OMT's offset, and keeps
      an entry only if its (min x, min y) is inside that OMT. So an entry whose min lies outside the whole
-     map is silently dropped (no error). Validation should report it.
+     map is silently dropped (no error). Validation should report it. (After Stage 4: "min" is the first
+     value, see the correction above; 24 entries in core + mods are dropped this way.)
    - "set" is different (mapgen.cpp setup_setmap / generate): its coordinates never get the OMT offset.
      In a multi-tile map a "set" entry with coordinates 0..23 runs in EVERY OMT of the building, and one
-     with any coordinate > 23 is silently dropped in all of them. 209 entries in 58 multi-tile maps are
+     with any coordinate > 23 is silently dropped in all of them. 209 entries in 44 multi-tile mapgens are
      dropped this way today. The editor must draw BN's behaviour (repeat each set entry in every OMT,
      mark the dropped ones), not the documented one. "set" line/square also check x2/y2 the same way.
    - Nested chunks (Stage 6): mapgensize ranges from 1x1 to 24x24 (5x5, 1x1, 3x3 most common).
@@ -498,7 +509,9 @@ Development stages (each ends with a headless-testable acceptance check):
        has to look at every option too, not only the one the resolver displays.
    - Placements (Stage 5), from the placement classes in mapgen.cpp:
      - chance, repeat, amount and pack_size are jmapgen_int, so each can be a [min, max] range (none are
-       in data yet, but the Inspector must keep one if it's there). place_items' "item" goes through
+       in data yet, but the Inspector must keep one if it's there). (Corrected after Stage 4: ranges are
+       in data: place_item "amount" 320 times, place_monster "pack_size" 46, set "amount" 211. None for
+       chance. place_loot's chance is a plain int.) place_items' "item" goes through
        load_item_group, so it may be an inline group rather than an id (no uses yet).
      - place_monster "monster" is a weighted list of ids in 89 entries. place_vehicles: 30 entries rely
        on the default chance of 1 (%), and 79 give "rotation" as a list (one is picked).
@@ -523,22 +536,203 @@ Development stages (each ends with a headless-testable acceptance check):
      prototypes (91 of 158 ids used are prototypes; veh_type.cpp makes an implicit group for each).
      Unknown-id checks must accept "null" chunks and t_null/f_null. Some basic checks already exist in
      MapDocument.problems() (undefined symbols, unknown terrain/furniture, missing overmap_terrain).
- Stage 4 - Palette editor window (MVP item 5).
-   - Proposed acceptance: edit a key in a palette defined inside a mapgen file (one of the 46) while a map
-     from that file is open. The diff against BN touches only that palette's entry; the open map and
-     every other open map using the palette redraw with the change; the warning names the affected maps
-     (checked against a brute-force resolve of every map); undo restores both.
- Stage 5 - Item/monster placement layers (MVP item 6).
-   - Proposed acceptance: every place_* entry in core loads into the placement model and writes back
-     byte-identically when untouched; moving/resizing a range in a multi-tile map never crosses a 24x24
-     boundary; the 209 dropped "set" entries (and place_* anchors outside the map) are reported.
+ Stage 4 - Palette editor window (MVP item 5).  [DONE 2026-09-27]
+   - Accept: edit a key in a palette defined inside a mapgen file (one of the 46) while a map from that
+     file is open. The diff against BN touches only that palette's entry; the open map and every other
+     open map using the palette redraw with the change; the warning names the affected maps (checked
+     against a brute-force resolve of every map); undo restores both.
+   - Result: tools/run_tests.sh passes 81 tests (~43 s). tests/test_palette_bn.gd opens three school
+     maps and house_01, edits school_palette 'i' (defined in school_1.json): the warning lists exactly
+     the 3 maps a brute-force resolve of all 4615 json mapgens finds changed, the three open schools
+     redraw and house_01 doesn't, the saved file differs from BN in one line inside the palette, and
+     undo gives BN's text back. A second edit (car_theater 'b') is only reached through an include and
+     as the second option of a palette distribution, and also matches the brute force. Fake-BN tests
+     cover the reverse index, variants, byte-identical undo, "mapping" entries, discard, impact,
+     moving a symbol, a map's palette list, new palettes, a mod-replaced palette and the window.
+   - Code: src/edit/palette_document.gd (PaletteDocument: set/remove a key's terrain/furniture, includes,
+     its own undo), palette_impact.gd (PaletteImpact: which maps an edit changes), object_members.gd
+     (ObjectMembers: member snapshots shared with MapDocument), src/ui/palette_editor.gd (PaletteEditor,
+     Edit > Palette editor..., Ctrl+Shift+E, or the Legend's "Palette..." button for the selected
+     symbol's palette). DataIndex: MapgenRef.palettes, palette_options(), palette_closure(),
+     maps_using(), add/remove_palette(). MapgenResolver.resolve(..., picks) and resolve_variants().
+     MapDocument: refresh(), uses_palette(), set/add/remove_palette(), own_keys(), remove_own_symbol().
+     EditSession: open/close/create_palette, impact_of, move_symbol(_impact), open_count.
+   - How it works: opening a palette points its DataIndex definition's data at the live BnJson object
+     in the shared JsonFile, so every map resolved afterwards sees the edit; open maps that use the
+     palette (directly, by include, or as any option) re-resolve and redraw when it changes. When the
+     last map/palette of a file closes with its changes discarded, palette data and maps' palette lists
+     are read back from the file on disk. The window lists every definition (a mod-replaced one is
+     marked and says editing it changes nothing in game), the palette's keys with their source (own or
+     "from <include>"), pickers for terrain/furniture ("keep" for a distribution etc.), includes
+     (add/remove/reorder, loops refused), the maps using it, "Use in <map>" (adds it last to the
+     current map's palettes) and "Move into this palette" for the current map's own symbols. Switching
+     palettes closes the previous one unless its file has unsaved changes; save/quit/sync treat palette
+     files like map files.
+   - Decisions and checks:
+     - Impact = resolve each candidate map (maps_using) before and after the edit, once per palette
+       option (resolve_variants), and compare what each symbol USED IN ITS ROWS places (terrain,
+       furniture, extras by value; numbers compared by value so floats from Godot's JSON match ints
+       from BnJson). Where a definition comes from doesn't count, nor do symbols a map defines but
+       never uses. Cost: ~25 ms for school_palette, ~1.0 s for standard_domestic_palette (443 users),
+       ~0.6 s for roof_palette, so it runs when Apply is pressed, not on every picker click.
+     - The warning comes before the edit: if maps other than the current one change, a dialog names
+       them (first 25) with the symbols that change, and the edit waits for "Apply anyway".
+     - Moving a map symbol into a palette only moves the kinds the map defines (the palette keeps its
+       other kind for that key, which the map may already get from it). It needs the palette to be
+       listed unconditionally by the map and not replaced by a mod. It is two undo steps, one in the
+       palette and one in the map, not one linked step: each document only ever changes its own object,
+       so each history stays valid on its own. The impact check covers the move (the map itself
+       should come out unchanged).
+     - Found in Stage 3 code: MapDocument.check_new_key only looked at the displayed palette option,
+       so a key defined only by another option of a palette distribution (cabin, drive-in theater)
+       could be handed out as new. It now rejects those too.
+     - Undo records member order: removing a member (e.g. the last furniture) and putting it back
+       would otherwise move it, breaking byte-identical undo.
+     - A palette key edit replaces the entry where it's written: the plain member, else "mapping".
+       New entries go in the plain "terrain"/"furniture"; members added go after type/id/parameters/
+       palettes. Keys in palettes may be " " or "." (palettes define those; school_palette does).
+     - New palettes: an id no loaded palette has (a second definition would replace the first), in a
+       file inside a loaded mod's data folder; default path data/json/mapgen_palettes/<id>.json, or
+       <mod>/mapgen_palettes/<id>.json when the current map is in a mod.
+   - Not done / open: editing the other per-key kinds (items, toilets, nested, ...; Stage 5's field
+     editors can be reused), editing distributions/params in place (they can only be kept or replaced
+     by one id), palette "parameters", renaming or deleting keys and palettes, reordering a map's
+     palettes list or choosing a palette distribution for it in the UI (the model's set_palettes can),
+     and palette parameter scopes. A move is two undo steps (see above).
+ Checked after Stage 4 (2026-09-27, against BN 39f4883093 source and core + mod data; reviews Stages 5-7):
+   - Corrections, marked where the claims were made above: the anchor of a range is its FIRST value
+     (reversed ranges slip past the boundary check); a chunk's place_* entries are bounded by 24x24,
+     not mapgensize; amount/pack_size ranges ARE in data; place_items may name an item id and needs
+     chance 1..100; place_loot's chance is a plain int; place_monsters doesn't spawn the entire group;
+     the 209 dropped "set" entries are in 44 mapgens, not 58. The other Stage 5-7 counts were recounted
+     and hold (they are core + mods): 1599 chunks, 656 with an ignored own rotation, 174 nesting, 938
+     with palettes, 165 maps with a "nested" mapping, 89 monster lists, 30 vehicles on the default
+     chance, 79 rotation lists, 91 of 158 vehicle ids are prototypes, 60 one-element x/y.
+   - Confirmed: the chunk's own "rotation" is never used (nest() takes the placing entry's); BN never
+     reads fill_ter for chunks; nested placement doesn't clip the overhang (jmapgen_objects::apply
+     only offsets), so "overhang may land in the neighbour" is still unverified in game. place_nested
+     picks its position at random within its x/y range (x.get()), like the other placements.
+   - Placements (Stage 5):
+     - Keep every range in the order written, and treat the first value as the anchor (which OMT owns
+       the entry, and whether it's dropped). Drag/resize keeps both values inside the anchor's OMT;
+       an existing reversed range is drawn with the span BN really uses (min..max) and marked when it
+       crosses into another OMT.
+     - Per-type fields, from the classes in mapgen.cpp: place_item (item, amount range, chance 100,
+       repeat, active); place_items (item group or id, chance 1..100 default 1, repeat); place_loot
+       (group XOR item, chance plain int, ammo, magazine, repeat); place_monster (monster id or weighted
+       list, or group; chance 100 scaled by spawn density with a cap; pack_size range; one_or_none,
+       whose default is true only without repeat and pack_size; friendly, name, target,
+       use_pack_size); place_monsters (group, chance one-in-N, density, target); place_vehicles
+       (vehicle, chance 1, rotation int or list, fuel, status, locked, place_beyond_bounds).
+     - Reuse from Stage 4: MapDocument's member-snapshot undo (with member order) covers place_*
+       members; PaletteImpact already compares extras, so editing a palette's items etc. later only
+       needs the field editors in the palette window.
+     - "Byte-identical when untouched" is already guaranteed by JsonFile (untouched objects are
+       copied as text), so it isn't a useful acceptance check. What needs testing is that the
+       placement model reproduces each entry exactly, and that editing one entry changes only its lines.
+   - Nested chunks (Stage 6):
+     - New chunks need their own path in EditSession.create_mapgen (nested_mapgen_id + mapgensize, no
+       fill_ter, no overmap_terrain check); today it only makes om_terrain maps.
+     - A reverse index "which maps place chunk X" (place_nested chunks/else_chunks and "nested"
+       mappings, also from palettes), like DataIndex.maps_using, for warnings when editing a chunk.
+     - Stage 4's refresh and warnings stop at the map level: a palette edit that changes a chunk
+       also changes every parent that places it, but PaletteImpact lists only the chunk, and
+       EditSession only refreshes maps that use the palette themselves. With overlays, open parents
+       must also redraw when a chunk they place, or a palette that chunk uses, changes, and the
+       warning should name them ("via chunk X").
+   - Validation (Stage 7): besides the indexes already listed (item types come in 17 "type"s:
+     GENERIC, ARMOR, COMESTIBLE, TOOL, GUN, AMMO, MAGAZINE, BOOK, GUNMOD, TOOL_ARMOR, BIONIC_ITEM,
+     CONTAINER, WHEEL, ENGINE, PET_ARMOR, TOOLMOD, BATTERY), the known findings in core + mods today:
+     209 dropped "set" entries, 24 place_* entries anchored outside their map, 54 reversed ranges
+     spanning an OMT boundary, 8 chunks with place_* ranges past their mapgensize, 656 ignored chunk
+     rotations. A range whose second value leaves the anchor's OMT is a BN load error, so the editor
+     should refuse to save it rather than just list it. (After Stage 5: 19 anchors in core, 20 in all
+     of data/, not 24; saving already refuses a crossing range, see Stage 5.)
+ Stage 5 - Item/monster placement layers (MVP item 6).  [DONE 2026-09-27]
+   - Accept: every place_* entry in core + mods converts into the placement model and back to an equal
+     value (BnJson.stringify), with ranges kept in the order written. Editing one entry of a real
+     multi-tile map and saving changes only that entry's lines (diff against BN). Moving/resizing a
+     range never lets it leave its anchor's OMT. The display follows BN's rules for the counted cases:
+     the 209 dropped "set" entries and 24 dropped anchors are marked, "set" entries repeat in every OMT,
+     and the 54 boundary-spanning reversed ranges are drawn with their real span.
+   - Result: tools/run_tests.sh passes 95 tests (~50 s). tests/test_placements_bn.gd reads all 15286
+     placement entries of core's json mapgens (BnJson, ~2.8 s): every x/y/x2/y2/repeat/chance/amount/
+     pack_size comes back exactly as written, and placing each entry where it already is changes none
+     of its values. The editor counts 19 dropped anchors, 54 reversed ranges reaching back into the
+     previous tile, 209 dropped "set" entries in 44 mapgens and 0 crossing ranges, the same as an
+     independent Python pass over data/json. Editing apartments_mod_tower's NE place_monsters (resize +
+     chance) and dragging mall_a_1's first place_loot into the next tile with the Place tool each save
+     with exactly one line changed in the diff against BN: the entry's. 300 random drags/resizes on a
+     2x2 map leave every entry inside one tile and every other entry byte-identical. Breaking the tile
+     clamp, or anchoring at the minimum instead of the first value, fails these tests.
+   - Code: src/data/placement.gd (Placement: IntRange = jmapgen_int as written, Geometry, per-kind
+     table and fields, BN's anchor/drop/cross rules, labels, values_for, clamping),
+     src/edit/placement_tool.gd (PlacementTool: select/move/resize/create), src/ui/placements_panel.gd
+     (PlacementsPanel: list + inspector). MapDocument: placements(), placement(), placements_at(),
+     check_placement(), add/remove_placement(), set_placement_fields(), place_at(), save_problems().
+     MapCanvas draws the overlay, AsciiMap.Look.layers marks symbols that place things themselves,
+     EditSession.save refuses crossing ranges, main.gd has the Place tool (P), the layer bar under the
+     map and the Placements tab.
+   - How it works: the model is a view over the live JSON entry (Placement.entry), rebuilt after every
+     change, so nothing is converted until a field is edited and untouched fields keep their exact
+     form. Edits snapshot the whole list member (MapDocument's member-snapshot undo, member order
+     included), so undo gives back the exact object and the file is written as its original text again.
+     A new list goes last in the object; an emptied one is removed. New fields go in a per-kind order
+     (what it places, x, y, then the rest); unknown keys are appended. The canvas draws a box for a
+     point and a dashed outline for a range, colored by layer (Items, Monsters, Vehicles, Nested,
+     Other) with labels like "I 50%", "M 1/10", "V 1% x2-3"; entries BN drops or reads oddly are red
+     with "!", where BN puts them (dropped ones where they're written, even outside the map), and
+     "set" entries are drawn in every tile. Cells whose symbol itself places items/monsters/... get a
+     corner mark in that layer's color (read-only; edited through the symbol). Place tool: click picks
+     the smallest visible entry under the cursor, drag moves it, dragging the selected one's
+     bottom-right cell (or Shift+drag) resizes it; Add (Placements tab) arms a kind and the next drag
+     creates it. Moves keep the size and the tile of the new top-left; resizes and new entries are cut
+     at the anchor's tile edge; "set" entries stay in their own tile (tile coordinates). A click without
+     a drag changes nothing, so an oddly written entry isn't normalized by selecting it. The inspector
+     edits every field as text (ids plain, the rest JSON; "1-3" also works for ranges), parsed with
+     BnJson so ints stay ints; an empty field is removed; hints give each kind's default and what its
+     chance means. Hover lists the placements under the cursor in the status bar; Delete removes the
+     selected one with the Place tool active.
+   - Decisions and checks (against BN 39f4883093 mapgen.cpp):
+     - Recounted for core only (the proposed acceptance used core + mods): 19 dropped anchors, not 24
+       (20 over every folder in data/, so the 24 was a miscount); 54 spanning reversed ranges, 209
+       dropped "set" in 44 maps, as stated. 13 place_* entries in 12 chunk/update mapgens reach past
+       mapgensize (the "8 chunks" in Stage 7's list needs rechecking there).
+     - A chunk's place_* bound is 24x24 (jmapgen_objects keeps the default size), so those 13 load and
+       are marked, not dropped; drags in a chunk are kept inside its mapgensize (stricter than BN).
+     - "set" chance is one in N (default 1: `chance != 1 && !one_in(chance)`); its x/y ranges pick a
+       random cell per repeat; a bad id makes BN skip every later "set" entry of the map (not modelled).
+       place_liquids' chance is one in N too. "add" (24 uses) is the old name of place_item and is read.
+     - Refused as BN would refuse or drop them: an edit or drag whose range leaves its tile, or whose
+       anchor is outside the map. An entry BN already drops can still be edited in place (its chance,
+       ...), as long as it isn't moved to another dropped position. Saving refuses a crossing range
+       even if it was in the file already (BN wouldn't load it); none exist in data.
+     - The Inspector and Placements tabs of the UI sketch are one "Placements" tab (list above,
+       fields below): selecting in the list and editing below is one step, not a tab switch. The layer
+       bar sits under the map as sketched; Terrain/Furniture stay the toolbar's Furniture toggle.
+     - Field checks (not id lookups): place_items chance outside 1-100, place_loot with both or neither
+       of item/group or a ranged chance, place_monster without monster/group. They're listed with the
+       map's problems; ids are Stage 7 (item/vehicle ids aren't indexed yet).
+     - Test fixture pitfall: Godot's JSON.stringify sorts keys by default (TempTree uses it), so a
+       fixture whose key order matters must be written as text (JSON.stringify(v, " ", false)).
+   - Not done / open: id pickers/autocomplete and id validation (Stage 7); a "set" line is drawn as its
+     bounding box, and resizing a line/square sets x/y and x2/y2 to single cells; stacked entries pick
+     the smallest (others via the list; no click-cycling); dropped entries outside the map are only
+     selectable from the list; labels can overlap on dense maps; no multi-select; "set" and
+     place_computers/zones/... can be edited and moved but not added from the panel; place_nested only
+     shows its rectangle (the chunk itself is Stage 6); palette per-key items/monsters are still
+     read-only in the palette editor (the panel's field text parsing can be reused there).
  Stage 6 - Nested chunks (MVP item 7).
-   - Proposed acceptance: create a new chunk and place it in a map; every place_nested / "nested" mapping
-     in core draws on its parent without errors, with the overhang past its OMT marked.
+   - Proposed acceptance: create a new chunk (nested_mapgen_id + mapgensize) and place it in a map.
+     Every place_nested / "nested" mapping in core draws on its parent without errors: "null" places
+     nothing, recursion has a loop guard, the placing rotation is applied, and the overhang is marked.
+     Editing a chunk, or a palette it uses, redraws the open parents that place it, and the palette
+     warning names those parents.
  Stage 7 - Validation panel (MVP item 9). Basic checks can start earlier.
-   - Proposed acceptance: all core json mapgens validate with a known, listed set of findings (e.g. the
-     dropped "set" entries and ignored chunk rotations), and seeded errors (unknown item/monster/vehicle
-     id, undefined symbol, out-of-range coordinate) are each caught.
+   - Proposed acceptance: all core json mapgens validate with exactly the listed set of findings (the
+     counts under "Checked after Stage 4"), and seeded errors are each caught: unknown item, monster
+     or vehicle id; undefined symbol; out-of-range coordinate; crossing range; place_items chance
+     outside 1..100; place_loot with both or neither of item/group.
  Then the "Later milestones" list.
 
 Explicitly out of scope until the later milestones: tilesets, preview rolls, z-level linking, update_mapgen,

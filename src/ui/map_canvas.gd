@@ -1,7 +1,10 @@
 class_name MapCanvas
 extends Control
 ## Draws an AsciiMap as a grid of colored characters, with coordinate rulers
-## and the 24x24 overmap-tile boundaries. Wheel zooms around the cursor;
+## and the 24x24 overmap-tile boundaries, and the map's placements on top:
+## a box for a point, a dashed outline for a range, with labels like "I 50%".
+## Placements BN drops or reads oddly are drawn in red, where BN puts them.
+## Cells whose symbol itself places items, monsters, ... get a corner mark. Wheel zooms around the cursor;
 ## middle or right drag (or space + left drag) pans. A left drag is reported
 ## as cell_pressed / cell_dragged / cell_released for the drawing tools.
 
@@ -29,6 +32,11 @@ const HIGHLIGHT := Color8(120, 100, 20)
 const EMPTY_BG := Color8(34, 34, 40)
 const PROBLEM_BG := Color8(150, 0, 40)
 const PREVIEW_BG := Color(0.3, 0.6, 1.0, 0.45)
+## By Placement.Layer.
+const LAYER_COLORS := [Color(1.0, 0.85, 0.3), Color(1.0, 0.45, 0.45), Color(0.4, 0.85, 1.0),
+		Color(0.8, 0.55, 1.0), Color(0.5, 1.0, 0.55)]
+const PLACEMENT_PROBLEM := Color(1.0, 0.15, 0.25)
+const LABEL_BG := Color(0, 0, 0, 0.65)
 
 ## Line characters drawn as lines, so walls join whatever the font:
 ## sides as [N, E, S, W].
@@ -61,6 +69,24 @@ var preview: Array[Vector2i] = []:
 		preview = v
 		queue_redraw()
 var preview_key := ""
+## The map's placements (MapDocument.placements()).
+var placements: Array[Placement] = []:
+	set(v):
+		placements = v
+		queue_redraw()
+## Bit (1 << Placement.Layer) set for each layer drawn.
+var layer_mask := (1 << Placement.LAYER_NAMES.size()) - 1:
+	set(v):
+		layer_mask = v
+		queue_redraw()
+## The selected placement ("" for none).
+var selected_member := ""
+var selected_index := -1
+## Where a dragged placement would go, in cells (empty when idle).
+var placement_preview := Rect2i():
+	set(v):
+		placement_preview = v
+		queue_redraw()
 var cell_size := 18.0
 ## Screen position of cell (0, 0)'s top-left corner.
 var origin := Vector2(RULER + 8, RULER + 8)
@@ -97,6 +123,20 @@ func cell_at(pos: Vector2) -> Vector2i:
 func cell_at_clamped(pos: Vector2) -> Vector2i:
 	var c := Vector2i(((pos - origin) / cell_size).floor())
 	return c.clamp(Vector2i.ZERO, ascii.size - Vector2i.ONE)
+
+
+## Marks the placement [param member] #[param index] as selected.
+func select_placement(member: String, index: int) -> void:
+	selected_member = member
+	selected_index = index
+	queue_redraw()
+
+
+## Scrolls so [param rect] (cells) is in the middle of the view.
+func center_on(rect: Rect2i) -> void:
+	var mid := (Vector2(rect.position) + Vector2(rect.size) / 2.0) * cell_size
+	origin = (size + Vector2(RULER, RULER)) / 2.0 - mid
+	queue_redraw()
 
 
 ## Fits the whole map in view, capped at a readable size.
@@ -212,6 +252,10 @@ func _draw() -> void:
 				back = back.lerp(HIGHLIGHT, 0.6)
 			if back != BnColors.BLACK:
 				draw_rect(rect, back)
+			if layer_mask and cs >= 6.0:
+				var marks: int = ascii.look_for(row[x]).layers & layer_mask
+				if marks:
+					_draw_mark(rect, marks)
 			var ch := row[x] if show_keys else ascii.chars[i]
 			if not draw_text or ch == " " or ch.is_empty():
 				if not draw_text and ch != " " and not ch.is_empty():
@@ -228,6 +272,7 @@ func _draw() -> void:
 
 	_draw_preview(font_size, baseline, draw_text)
 	_draw_grid(x0, y0, x1, y1)
+	_draw_placements()
 	if hovered.x >= 0:
 		draw_rect(Rect2(origin + Vector2(hovered) * cs, Vector2(cs, cs)), HOVER, false, 2.0)
 	_draw_rulers(x0, y0, x1, y1)
@@ -251,6 +296,68 @@ func _draw_preview(font_size: int, baseline: float, draw_text: bool) -> void:
 				var tw := _font.get_string_size(look.ch, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
 				draw_string(_font, Vector2(p.x + (cs - tw) / 2.0, p.y + baseline), look.ch,
 						HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, look.colors.fg)
+
+
+## A corner triangle in the color of the first layer in [param marks]:
+## the cell's symbol itself places items, monsters, ...
+func _draw_mark(rect: Rect2, marks: int) -> void:
+	var layer := 0
+	while not marks & (1 << layer):
+		layer += 1
+	var s := rect.size.x * 0.3
+	var tr := Vector2(rect.end.x, rect.position.y)
+	draw_colored_polygon(PackedVector2Array([tr, tr - Vector2(s, 0), tr + Vector2(0, s)]), LAYER_COLORS[layer])
+
+
+func _draw_placements() -> void:
+	var cs := cell_size
+	# Visible cells, not cut to the map: dropped entries lie outside it.
+	var view := Rect2i(Vector2i(((Vector2(RULER, RULER) - origin) / cs).floor()) - Vector2i.ONE,
+			Vector2i((size / cs).ceil()) + Vector2i(2, 2))
+	var fs := clampi(int(cs * 0.6), 9, 14)
+	var selected: Placement = null
+	for p in placements:
+		if not layer_mask & (1 << p.layer()):
+			continue
+		if p.member == selected_member and p.index == selected_index:
+			selected = p
+			continue
+		_draw_placement(p, view, fs, false)
+	if selected:
+		_draw_placement(selected, view, fs, true)
+	if placement_preview.has_area():
+		var r := Rect2(origin + Vector2(placement_preview.position) * cs, Vector2(placement_preview.size) * cs)
+		draw_rect(r, PREVIEW_BG)
+		draw_rect(r, Color.WHITE, false, 2.0)
+
+
+func _draw_placement(p: Placement, view: Rect2i, fs: int, is_selected: bool) -> void:
+	var cs := cell_size
+	var ok := p.status == Placement.Status.OK
+	var color: Color = LAYER_COLORS[p.layer()] if ok else PLACEMENT_PROBLEM
+	var width := 2.5 if is_selected else 1.5
+	var label := p.label() if ok else p.label() + " !"
+	for cells in p.instances():
+		if not view.intersects(cells):
+			continue
+		var r := Rect2(origin + Vector2(cells.position) * cs, Vector2(cells.size) * cs)
+		if is_selected:
+			draw_rect(r, Color(color, 0.18))
+		if cells.size == Vector2i.ONE:
+			draw_rect(r.grow(-maxf(1.0, cs * 0.12)), color, false, width)
+		else:
+			var corners := [r.position, Vector2(r.end.x, r.position.y), r.end, Vector2(r.position.x, r.end.y)]
+			for k in 4:
+				draw_dashed_line(corners[k], corners[(k + 1) % 4], color, width, maxf(3.0, cs * 0.4))
+			if is_selected:
+				# The resize handle: the bottom-right cell.
+				draw_rect(Rect2(r.end - Vector2(cs, cs), Vector2(cs, cs)).grow(-cs * 0.3), color)
+		if cs >= 8.0:
+			var ts := _font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs)
+			var at := r.position + Vector2(2, 1)
+			draw_rect(Rect2(at, ts + Vector2(2, 0)), LABEL_BG)
+			draw_string(_font, at + Vector2(1, _font.get_ascent(fs)), label, HORIZONTAL_ALIGNMENT_LEFT,
+					-1, fs, color)
 
 
 func _draw_line_glyph(rect: Rect2, sides: Array, color: Color) -> void:

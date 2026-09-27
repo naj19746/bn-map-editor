@@ -2,9 +2,15 @@ class_name EditSession
 extends RefCounted
 ## The files and maps open for editing, and saving them to the workspace.
 ##
-## Maps from the same file share one JsonFile, so saving one keeps the
-## others' edits. Files are read from the workspace copy if there is one,
-## else from BN, and always saved to the workspace through json_formatter.
+## Maps and palettes from the same file share one JsonFile, so saving one
+## keeps the others' edits. Files are read from the workspace copy if there
+## is one, else from BN, and always saved to the workspace through
+## json_formatter.
+##
+## An open palette's DataIndex definition points at the live object, so
+## every map resolved afterwards sees its edits; open maps that use it are
+## refreshed when it changes. Discarding a file puts the index back as the
+## file on disk has it.
 
 ## Where a stub overmap_terrain copies from: an abstract city building in core.
 const OVERMAP_STUB_BASE := "generic_city_building"
@@ -16,6 +22,7 @@ var formatter: JsonFormatter
 ## rel path -> JsonFile, for files with open maps.
 var files := {}
 var docs: Array[MapDocument] = []
+var palette_docs: Array[PaletteDocument] = []
 ## Set when open(), create_mapgen() or save() fail.
 var last_error := ""
 ## What the last save re-encoded that wasn't canonical (see JsonFile).
@@ -25,6 +32,7 @@ var last_notes := PackedStringArray()
 ## but not saved yet, taken out again if the file is discarded.
 var _new_refs := {}
 var _new_overmap := {}
+var _new_palettes := {}
 
 
 func _init(p_index: DataIndex, p_workspace: Workspace, p_formatter: JsonFormatter = null) -> void:
@@ -86,12 +94,134 @@ static func _is_entry(f: JsonFile, ref: DataIndex.MapgenRef) -> bool:
 	return false
 
 
+## Opens the palette definition [param def] for editing, or returns its open
+## document.
+func open_palette(def: DataIndex.Definition) -> PaletteDocument:
+	for d in palette_docs:
+		if d.def == def:
+			return d
+	if def.source.path.is_empty():
+		last_error = "palette %s has no file" % def.id
+		return null
+	var had_file := files.has(def.source.path)
+	var f := get_file(def.source.path)
+	if f == null:
+		return null
+	var doc := PaletteDocument.open(index, f, def.source.index, def)
+	if doc == null:
+		last_error = "%s #%d is no longer palette %s; reload the data (F5)." % [
+			def.source.path, def.source.index, def.id]
+		if not had_file:
+			files.erase(def.source.path)
+		return null
+	def.data = doc.palette()
+	# Bound to the id, not the document: that would be a reference cycle.
+	doc.changed.connect(_on_palette_changed.bind(doc.id))
+	palette_docs.append(doc)
+	return doc
+
+
+## Closes [param doc]; like close(), the file goes with its last document.
+func close_palette(doc: PaletteDocument) -> void:
+	palette_docs.erase(doc)
+	doc.changed.disconnect(_on_palette_changed)
+	_release_file(doc.file.rel_path)
+
+
+## The open palette document for [param def], or null.
+func palette_doc_for(def: DataIndex.Definition) -> PaletteDocument:
+	for d in palette_docs:
+		if d.def == def:
+			return d
+	return null
+
+
+## The maps [param c] (an uncommitted change of [param doc]) would change.
+func impact_of(doc: PaletteDocument, c: PaletteDocument.Change) -> Array[PaletteImpact.Affected]:
+	if c == null:
+		return [] as Array[PaletteImpact.Affected]
+	return PaletteImpact.measure(self, doc.id, doc.apply.bind(c, true), doc.apply.bind(c, false))
+
+
+## Why [param map_doc]'s own symbol [param key] can't move into
+## [param pal_doc], or "".
+func check_move_symbol(map_doc: MapDocument, pal_doc: PaletteDocument, key: String) -> String:
+	if not map_doc.own_keys().has(key):
+		return "'%s' isn't defined in the map's own terrain/furniture." % key
+	if pal_doc.overridden_by():
+		return "Palette %s is replaced by the definition in %s, so the map wouldn't see it." % [
+			pal_doc.id, pal_doc.overridden_by().source]
+	if not map_doc.resolved.palettes.has(pal_doc.id):
+		return "The map doesn't use palette %s." % pal_doc.id
+	for options in map_doc.resolved.choice_options:
+		if options.has(pal_doc.id):
+			return "The map only uses palette %s as one option of a choice." % pal_doc.id
+	var ter: Variant = map_doc.own_value(key, "terrain")
+	var furn: Variant = map_doc.own_value(key, "furniture")
+	return pal_doc.check_tiles(key, ter if ter is String else null, furn if furn is String else null)
+
+
+## The two changes moving [param key]: [palette change or null, map change].
+func _move_changes(map_doc: MapDocument, pal_doc: PaletteDocument, key: String) -> Array:
+	var name := "Move '%s' from %s to %s" % [key, map_doc.ref.title(), pal_doc.id]
+	# Only the kinds the map defines move; the palette keeps its others,
+	# which the map may already get from it.
+	var pc := pal_doc.build_set_tiles(key, map_doc.own_value(key, "terrain"),
+			map_doc.own_value(key, "furniture"), name)
+	return [pc, map_doc.build_remove_own_symbol(key, name)]
+
+
+## The maps moving [param key] would change (ideally none: the moved map
+## should look the same).
+func move_symbol_impact(map_doc: MapDocument, pal_doc: PaletteDocument, key: String) -> Array[PaletteImpact.Affected]:
+	var cs := _move_changes(map_doc, pal_doc, key)
+	var apply := func() -> void:
+		if cs[0]:
+			pal_doc.apply(cs[0], true)
+		if cs[1]:
+			map_doc.apply_change(cs[1], true)
+	var revert := func() -> void:
+		if cs[1]:
+			map_doc.apply_change(cs[1], false)
+		if cs[0]:
+			pal_doc.apply(cs[0], false)
+	return PaletteImpact.measure(self, pal_doc.id, apply, revert)
+
+
+## Moves [param map_doc]'s own terrain/furniture for [param key] into
+## [param pal_doc]: one undo step in the palette and one in the map.
+## Returns an error, or "".
+func move_symbol(map_doc: MapDocument, pal_doc: PaletteDocument, key: String) -> String:
+	var problem := check_move_symbol(map_doc, pal_doc, key)
+	if problem:
+		return problem
+	var cs := _move_changes(map_doc, pal_doc, key)
+	pal_doc.commit(cs[0])
+	map_doc.commit(cs[1])
+	return ""
+
+
+func _on_palette_changed(id: String) -> void:
+	for d in docs:
+		if d.uses_palette(id):
+			d.refresh()
+
+
 func docs_for(rel: String) -> Array[MapDocument]:
 	var out: Array[MapDocument] = []
 	for d in docs:
 		if d.file.rel_path == rel:
 			out.append(d)
 	return out
+
+
+## Open maps plus open palettes of file [param rel].
+func open_count(rel: String) -> int:
+	var n := docs_for(rel).size()
+	for d in palette_docs:
+		if d.file.rel_path == rel:
+			n += 1
+	return n
 
 
 func is_dirty(rel: String) -> bool:
@@ -112,6 +242,10 @@ func save(rel: String) -> String:
 	var f: JsonFile = files.get(rel)
 	if f == null:
 		return _fail("%s isn't open" % rel)
+	for d in docs_for(rel):
+		var blocked := d.save_problems()
+		if not blocked.is_empty():
+			return _fail("%s: %s" % [d.ref.title(), blocked[0]])
 	if not formatter.is_available():
 		return _fail("can't save without json_formatter: %s isn't built (run tools/build_json_formatter.sh)" % formatter.executable)
 	var formatted := formatter.format(f.compose())
@@ -124,6 +258,7 @@ func save(rel: String) -> String:
 	f.mark_saved()
 	_new_refs.erase(rel)
 	_new_overmap.erase(rel)
+	_new_palettes.erase(rel)
 	return ""
 
 
@@ -145,20 +280,112 @@ func save_all() -> PackedStringArray:
 	return errors
 
 
-## Closes [param doc]. When it's the last open map of its file, the file is
-## dropped too, and with it any unsaved changes: ask first (is_dirty).
+## Closes [param doc]. When it's the last open map or palette of its file,
+## the file is dropped too, and with it any unsaved changes: ask first
+## (is_dirty).
 func close(doc: MapDocument) -> void:
 	docs.erase(doc)
-	var rel := doc.file.rel_path
-	if not docs_for(rel).is_empty():
+	_release_file(doc.file.rel_path)
+
+
+## Drops file [param rel] once nothing has it open. Unsaved changes are
+## thrown away, and the index is put back as the file on disk has it.
+func _release_file(rel: String) -> void:
+	if open_count(rel) > 0 or not files.has(rel):
 		return
+	var dirty: bool = files[rel].is_dirty()
 	for ref: DataIndex.MapgenRef in _new_refs.get(rel, []):
 		index.remove_mapgen(ref)
 	for id: String in _new_overmap.get(rel, []):
 		index.overmap_terrain.erase(id)
+	for def: DataIndex.Definition in _new_palettes.get(rel, []):
+		index.remove_palette(def)
 	_new_refs.erase(rel)
 	_new_overmap.erase(rel)
+	_new_palettes.erase(rel)
 	files.erase(rel)
+	if dirty:
+		_reindex_from_disk(rel)
+
+
+## Palette data and map palette lists of [param rel] as the file on disk has
+## them (the editor changed them in place).
+func _reindex_from_disk(rel: String) -> void:
+	var json := JSON.new()
+	var path := index.file_path(rel)
+	if not FileAccess.file_exists(path) or json.parse(FileAccess.get_file_as_string(path)) != OK:
+		return
+	var parsed: Variant = json.data
+	var objects: Array = [parsed] if parsed is Dictionary else (parsed if parsed is Array else [])
+	for id: String in index.palettes:
+		for def: DataIndex.Definition in index.palettes[id]:
+			if def.source.path == rel and def.source.index < objects.size() and objects[def.source.index] is Dictionary:
+				def.data = objects[def.source.index]
+	for ref in index.mapgens:
+		if ref.source.path == rel and ref.source.index < objects.size() and objects[ref.source.index] is Dictionary:
+			var obj: Variant = objects[ref.source.index].get("object")
+			ref.palettes = DataIndex.palette_options(obj) if obj is Dictionary else PackedStringArray()
+
+
+# --- New palette ---------------------------------------------------------------
+
+## Where a new palette [param id] goes by default: core's mapgen_palettes
+## folder, or that folder in the mod of [param near_rel] (e.g. the open map).
+func default_palette_path(id: String, near_rel := "") -> String:
+	var mod := index.mod_for_path(near_rel) if near_rel else ""
+	var dir := "data/json/mapgen_palettes"
+	if mod and not index.catalog.get_mod(mod).core:
+		dir = index.relative_path(index.catalog.get_mod(mod).path).path_join("mapgen_palettes")
+	return dir.path_join((id if id else "new_palette") + ".json")
+
+
+## Why a palette [param id] can't be created in [param rel], or "".
+func check_new_palette(rel: String, id: String) -> String:
+	var path_problem := _check_new_path(rel)
+	if path_problem:
+		return path_problem
+	if id.is_empty() or id.contains(" ") or id.contains("\"") or id.contains("\\"):
+		return "\"%s\" isn't a valid palette id." % id
+	var existing := index.palette(id)
+	if existing:
+		return "Palette %s already exists (%s); a second definition would replace it." % [id, existing.source]
+	if _file_exists(rel):
+		var f := get_file(rel)
+		if f == null:
+			return "Can't add to %s: %s" % [rel, last_error]
+	return ""
+
+
+## Adds an empty palette [param id] to [param rel] (created if new) and
+## opens it. null (see last_error) if check_new_palette fails.
+func create_palette(rel: String, id: String) -> PaletteDocument:
+	var problem := check_new_palette(rel, id)
+	if problem:
+		_fail(problem)
+		return null
+	var f := get_file(rel) if _file_exists(rel) else null
+	if f == null:
+		f = JsonFile.create(rel)
+		files[rel] = f
+	var o := {"type": "palette", "id": id}
+	var i := f.append(o)
+	var def := index.add_palette(o, DataIndex.Source.new(index.mod_for_path(rel), rel, i))
+	_remember(_new_palettes, rel, def)
+	return open_palette(def)
+
+
+## True when [param rel] exists: open, in the workspace, or in BN.
+func _file_exists(rel: String) -> bool:
+	return files.has(rel) or index.in_workspace(rel) or FileAccess.file_exists(index.bn_path.path_join(rel))
+
+
+## Why a new object can't go into [param rel], or "".
+func _check_new_path(rel: String) -> String:
+	if not rel.ends_with(".json") or rel.is_absolute_path() or rel.contains("..") or rel.contains("\\"):
+		return "The file must be a relative .json path, e.g. data/json/mapgen/my_map.json."
+	if index.mod_for_path(rel).is_empty():
+		return "%s isn't inside a loaded mod's data folder, so BN wouldn't load it." % rel
+	return ""
 
 
 # --- New mapgen ----------------------------------------------------------------
@@ -189,10 +416,9 @@ static func default_ids(base: String, w: int, h: int) -> Array[PackedStringArray
 ## Why [param spec] can't be created, or "".
 func check_new_mapgen(spec: NewMapgen) -> String:
 	var rel := spec.rel_path
-	if not rel.ends_with(".json") or rel.is_absolute_path() or rel.contains("..") or rel.contains("\\"):
-		return "The file must be a relative .json path, e.g. data/json/mapgen/my_map.json."
-	if index.mod_for_path(rel).is_empty():
-		return "%s isn't inside a loaded mod's data folder, so BN wouldn't load it." % rel
+	var path_problem := _check_new_path(rel)
+	if path_problem:
+		return path_problem
 	if spec.ids.is_empty() or spec.ids[0].is_empty():
 		return "Enter at least one om_terrain id."
 	var seen := {}
@@ -210,7 +436,7 @@ func check_new_mapgen(spec: NewMapgen) -> String:
 	for p in spec.palettes:
 		if index.palette(p) == null:
 			return "Unknown palette \"%s\"." % p
-	if files.has(rel) or index.in_workspace(rel) or FileAccess.file_exists(index.bn_path.path_join(rel)):
+	if _file_exists(rel):
 		var f := get_file(rel)
 		if f == null:
 			return "Can't add to %s: %s" % [rel, last_error]
@@ -225,8 +451,7 @@ func create_mapgen(spec: NewMapgen) -> MapDocument:
 		_fail(problem)
 		return null
 	var rel := spec.rel_path
-	var f := get_file(rel) if files.has(rel) or index.in_workspace(rel) \
-			or FileAccess.file_exists(index.bn_path.path_join(rel)) else null
+	var f := get_file(rel) if _file_exists(rel) else null
 	if f == null:
 		f = JsonFile.create(rel)
 		files[rel] = f

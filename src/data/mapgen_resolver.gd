@@ -24,15 +24,32 @@ const MAPPING_KINDS := [
 
 var _index: DataIndex
 var _result: ResolvedMapgen
+var _picks := {}
 
 
 ## [param mapgen] is a whole top-level mapgen object (with "object" inside).
-static func resolve(index: DataIndex, mapgen: Dictionary) -> ResolvedMapgen:
+## A "palettes" entry with several possible palettes (a distribution or
+## param) shows its first option, unless [param picks] maps the choice's
+## number (in [member ResolvedMapgen.choice_options] order) to another.
+static func resolve(index: DataIndex, mapgen: Dictionary, picks := {}) -> ResolvedMapgen:
 	var r := MapgenResolver.new()
 	r._index = index
+	r._picks = picks
 	r._result = ResolvedMapgen.new()
 	r._run(mapgen)
 	return r._result
+
+
+## Resolves [param mapgen] once per palette option: first as resolve() does,
+## then with each other option of each choice picked in turn (BN adds every
+## option, each applying only when chosen). One result when there's no choice.
+static func resolve_variants(index: DataIndex, mapgen: Dictionary) -> Array[ResolvedMapgen]:
+	var first := resolve(index, mapgen)
+	var out: Array[ResolvedMapgen] = [first]
+	for c in first.choice_options.size():
+		for j in range(1, first.choice_options[c].size()):
+			out.append(resolve(index, mapgen, {c: j}))
+	return out
 
 
 func _run(mapgen: Dictionary) -> void:
@@ -86,9 +103,12 @@ func _add_palette_value(value: Variant, chain: PackedStringArray) -> void:
 	if ids.is_empty():
 		_result.problems.append("can't work out a palette from %s" % JSON.stringify(value))
 		return
+	var pick := 0
 	if ids.size() > 1:
-		_result.choices.append("palette %s chosen from %s" % [ids[0], ", ".join(ids)])
-	_add_palette(ids[0], chain)
+		pick = clampi(_picks.get(_result.choice_options.size(), 0), 0, ids.size() - 1)
+		_result.choice_options.append(ids)
+		_result.choices.append("palette %s chosen from %s" % [ids[pick], ", ".join(ids)])
+	_add_palette(ids[pick], chain)
 
 
 func _add_palette(id: String, chain: PackedStringArray) -> void:

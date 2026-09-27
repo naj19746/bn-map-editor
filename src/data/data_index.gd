@@ -115,6 +115,9 @@ class MapgenRef:
 	var weight := 1000
 	## A nested/update chunk's "mapgensize" in cells, else (0, 0).
 	var chunk_size := Vector2i.ZERO
+	## The palettes the map lists itself, every option of a distribution or
+	## param included (not the ones those palettes include).
+	var palettes := PackedStringArray()
 
 	## The id to show for this entry: the first id, top-left for a grid.
 	func title() -> String:
@@ -486,6 +489,9 @@ func add_mapgen(o: Dictionary, src: Source) -> MapgenRef:
 	var w: Variant = o.get("weight")
 	if w is float or w is int:
 		ref.weight = int(w)
+	var obj: Variant = o.get("object")
+	if obj is Dictionary:
+		ref.palettes = palette_options(obj)
 	var table: Dictionary
 	if o.has("om_terrain"):
 		ref.kind = MapgenRef.OM_TERRAIN
@@ -554,6 +560,79 @@ static func _mapgensize(o: Dictionary) -> Vector2i:
 	if ms is Array and ms.size() == 2:
 		return Vector2i(int(ms[0]), int(ms[1]))
 	return Vector2i(24, 24)
+
+
+## Every palette [param data]'s "palettes" can add (a map's "object" or a
+## palette): each id, and every option of a distribution or param, since BN
+## adds all of them (mapgen_palette::add). Parameter defaults come from
+## [param data]'s own "parameters".
+static func palette_options(data: Dictionary) -> PackedStringArray:
+	var out := PackedStringArray()
+	var params: Variant = data.get("parameters")
+	var list: Variant = data.get("palettes")
+	if not list is Array:
+		return out
+	for v: Variant in list:
+		for id in MapgenResolver.possible_ids(v, "", params if params is Dictionary else {}):
+			if not out.has(id):
+				out.append(id)
+	return out
+
+
+## [param ids] and every palette they include, directly or not (every
+## option), from the definitions in effect.
+func palette_closure(ids: PackedStringArray) -> PackedStringArray:
+	var out := PackedStringArray()
+	var queue := ids.duplicate()
+	while not queue.is_empty():
+		var id: String = queue[0]
+		queue.remove_at(0)
+		if out.has(id):
+			continue
+		out.append(id)
+		var def := palette(id)
+		if def:
+			queue.append_array(palette_options(def.data))
+	return out
+
+
+## Mapgen entries whose palettes include [param id] directly, through an
+## included palette, or as any option of a distribution/param.
+func maps_using(id: String) -> Array[MapgenRef]:
+	# Palettes that reach id: id itself, then whatever includes one of them.
+	var reaching := {id: true}
+	var grew := true
+	while grew:
+		grew = false
+		for pid: String in palettes:
+			if reaching.has(pid) or palette(pid) == null:
+				continue
+			for inc in palette_options(palette(pid).data):
+				if reaching.has(inc):
+					reaching[pid] = true
+					grew = true
+					break
+	var out: Array[MapgenRef] = []
+	for ref in mapgens:
+		for p in ref.palettes:
+			if reaching.has(p):
+				out.append(ref)
+				break
+	return out
+
+
+## Adds a palette definition (one the editor creates) after the loaded ones.
+func add_palette(o: Dictionary, src: Source) -> Definition:
+	_add_definition(palettes, str(o.get("id", "")), src, o)
+	return palette(str(o.get("id", "")))
+
+
+## Undoes add_palette.
+func remove_palette(def: Definition) -> void:
+	var defs: Array = palettes.get(def.id, [])
+	defs.erase(def)
+	if defs.is_empty():
+		palettes.erase(def.id)
 
 
 ## The palette definition in effect for [param id], or null.

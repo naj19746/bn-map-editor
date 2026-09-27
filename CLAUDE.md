@@ -19,18 +19,24 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
 - `src/json/json_formatter.gd` (`JsonFormatter`): runs BN's json_formatter via a temp file.
 - `src/data/`: read-only BN index. `ModCatalog` (mods, load order), `DataIndex` (terrain/furniture with
   copy-from, palettes, groups, mapgen refs by id), `MapgenResolver` -> `ResolvedMapgen` (a map's cells
-  and what each symbol means, with sources), `CellText` (rows -> cells, BN's wcwidth rule).
+  and what each symbol means, with sources), `CellText` (rows -> cells, BN's wcwidth rule),
+  `Placement` (one place_*/"set" entry read BN's way: first-value anchor, dropped/crossing/reversed
+  ranges, "set" in every OMT; `IntRange` keeps how a jmapgen_int is written).
 - `src/edit/`: editing, no nodes. `EditSession` (open files/maps, save, new mapgen, overmap_terrain
-  stubs), `MapDocument` (one mapgen: paint, new symbol, undo/redo, writes straight into the BnJson
-  object), `JsonFile` (a parsed file; untouched top-level objects are written back as their
+  stubs), `MapDocument` (one mapgen: paint, new symbol, placements, undo/redo, writes straight
+  into the BnJson object), `JsonFile` (a parsed file; untouched top-level objects are written back as their
   original text), `Workspace` (workspace folder + manifest.json, never inside BN), `WorkspaceSync`
   (workspace vs BN status, object summary, push into BN), `MapTool`
-  (Paint/Line/Rect/Fill/Pick on press/move/release), `Shapes`.
+  (Paint/Line/Rect/Fill/Pick on press/move/release), `PlacementTool` (Place: select/move/resize/add
+  placements, kept inside one OMT), `Shapes`, `PaletteDocument` (one palette: a
+  key's terrain/furniture, includes, its own undo), `PaletteImpact` (which maps an edit changes),
+  `ObjectMembers` (member snapshots for undo).
 - `src/app/app_settings.gd` (`AppSettings`): settings in user://settings.cfg.
 - `src/view/`: display logic without nodes, testable headless. `AsciiMap` (what each cell looks like,
   wall joining, hover text), `BnColors` (BN color names -> RGB).
 - `src/ui/`: controls built in code (`MapCanvas`, `LegendPanel`, `MapBrowser`, `ModsDialog`,
-  `NewSymbolDialog`, `NewMapDialog`, `SyncDialog`). `main.gd` builds the window;
+  `NewSymbolDialog`, `NewMapDialog`, `SyncDialog`, `PaletteEditor`, `PlacementsPanel`). `main.gd`
+  builds the window;
   `godot --path . -- --open <id> [--bn <path>] [--workspace <path>]` opens a map at startup.
 - `tests/test_*.gd`: test files; every `test_*` method runs. They extend
   `tests/support/test_case.gd` (`check`, `check_eq`, `skip`). `tests/support/bn_env.gd` finds BN;
@@ -47,12 +53,18 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   The one exception is `WorkspaceSync.push`, run only when the user pushes from the Sync window;
   tests push into a temp BN tree. UI tests set `main._workspace_override` to a temp dir (the
   default is the user's real workspace).
-- Change a JsonFile object only through code that calls `touch(i)` first (MapDocument does);
-  otherwise the change is invisible to `compose()` and `is_dirty()`.
+- Change a JsonFile object only through code that calls `touch(i)` first (MapDocument and
+  PaletteDocument do); otherwise the change is invisible to `compose()` and `is_dirty()`.
+- An open palette's `DataIndex.Definition.data` IS the live object in its JsonFile, so resolving
+  anything sees unsaved palette edits. EditSession puts the index back from disk on discard.
+- Don't bind a document into a callable connected to its own signal (a reference cycle; the runner
+  then reports leaked objects). Bind an id or title instead.
 - A script error inside a test is a failure (the runner hooks `Logger`), so a test that hits
   `push_error` on purpose will fail.
 - Tests run inside `SceneTree._initialize`, before the root enters the tree: `_ready` doesn't fire
   and awaited frames never come. UI tests call `_ready()` directly (see `tests/test_viewer.gd`).
 - Inner classes can't call their outer class's static functions unqualified; use
   `BnJson.encode_string(...)`.
+- Godot's `JSON.stringify` sorts keys unless its third argument is false; TempTree writes values with
+  it, so pass a fixture as text when its key order matters.
 - Commit the `*.uid` and `*.import` files Godot generates next to scripts and assets.
