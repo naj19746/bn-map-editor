@@ -26,6 +26,15 @@ class Binding:
 	func from_palette() -> bool:
 		return source != SOURCE_MAP and source != SOURCE_FILL
 
+	## Where it's defined, for display: "map", "fill_ter", "palette p", or
+	## "palette inner (via outer)" for an included palette.
+	func source_label() -> String:
+		if not from_palette():
+			return source
+		if chain.size() > 1:
+			return "palette %s (via %s)" % [source, " > ".join(chain.slice(0, -1))]
+		return "palette " + source
+
 
 ## Everything a symbol maps to. BN treats any key that appears in a mapping
 ## as defined, even if all its pieces were dropped.

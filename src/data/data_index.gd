@@ -47,6 +47,12 @@ class TileDef:
 	var bgcolor := false
 	var looks_like := ""
 	var copy_from := ""
+	## Flag names, with copy-from's "extend"/"delete" applied.
+	var flags := PackedStringArray()
+	## The "connects_to" group ("WALL", "CHAINFENCE", ...) or "". Not
+	## inherited: BN recomputes it on every load, and for terrain the WALL and
+	## CONNECT_TO_WALL flags imply "WALL".
+	var connect_group := ""
 	var source: Source
 
 	func copy() -> TileDef:
@@ -58,6 +64,8 @@ class TileDef:
 		t.bgcolor = bgcolor
 		t.looks_like = looks_like
 		t.copy_from = copy_from
+		t.flags = flags.duplicate()
+		t.connect_group = connect_group
 		t.source = source
 		return t
 
@@ -70,6 +78,9 @@ class TileDef:
 			"LINE_XOXO": return "│"
 			"LINE_OXOX": return "─"
 		return s
+
+	func has_flag(flag: String) -> bool:
+		return flags.has(flag)
 
 
 ## One definition of a palette, item group or monster group.
@@ -97,6 +108,12 @@ class MapgenRef:
 	## empty (a plain list reuses the same 1x1 map for each id).
 	var grid: Array[PackedStringArray] = []
 	var weight := 1000
+	## A nested/update chunk's "mapgensize" in cells, else (0, 0).
+	var chunk_size := Vector2i.ZERO
+
+	## The id to show for this entry: the first id, top-left for a grid.
+	func title() -> String:
+		return ids[0] if not ids.is_empty() else "?"
 
 	## Size in overmap tiles; (1, 1) unless this is a multi-tile building.
 	func size_omt() -> Vector2i:
@@ -276,6 +293,7 @@ func _load_tile(kind: String, o: Dictionary, src: Source) -> bool:
 		def.color = PackedStringArray(["", "", "", ""])
 	def.source = src
 	_apply_tile_fields(def, o)
+	_apply_flags(kind, def, o)
 
 	if o.get("abstract") is String:
 		abstracts[o.abstract] = def
@@ -318,6 +336,35 @@ static func _apply_tile_fields(def: TileDef, o: Dictionary) -> void:
 	elif o.has("bgcolor"):
 		def.color = _seasons(o.bgcolor)
 		def.bgcolor = true
+
+
+## Like BN's assign() for a set: "flags" replaces, else "extend"/"delete"
+## modify the inherited flags. Then the connect group is worked out afresh.
+static func _apply_flags(kind: String, def: TileDef, o: Dictionary) -> void:
+	if o.has("flags"):
+		def.flags = _tags(o.flags)
+	else:
+		var add: Variant = o.get("extend")
+		if add is Dictionary and add.has("flags"):
+			for f in _tags(add.flags):
+				if not def.flags.has(f):
+					def.flags.append(f)
+		var del: Variant = o.get("delete")
+		if del is Dictionary and del.has("flags"):
+			for f in _tags(del.flags):
+				def.flags.erase(f)
+	def.connect_group = ""
+	if kind == TYPE_TERRAIN and (def.flags.has("WALL") or def.flags.has("CONNECT_TO_WALL")):
+		def.connect_group = "WALL"
+	if o.get("connects_to") is String:
+		def.connect_group = o.connects_to
+
+
+## A string or a list of strings.
+static func _tags(v: Variant) -> PackedStringArray:
+	if v is Array:
+		return PackedStringArray(v.map(func(e: Variant) -> String: return str(e)))
+	return PackedStringArray([str(v)])
 
 
 ## A string, or a list of 1 or 4 strings, as four seasonal values.
@@ -374,10 +421,12 @@ func _add_mapgen(o: Dictionary, src: Source) -> void:
 		ref.kind = MapgenRef.NESTED
 		table = nested
 		ref.ids.append(str(o.nested_mapgen_id))
+		ref.chunk_size = _mapgensize(o)
 	elif o.has("update_mapgen_id"):
 		ref.kind = MapgenRef.UPDATE
 		table = update
 		ref.ids.append(str(o.update_mapgen_id))
+		ref.chunk_size = _mapgensize(o)
 	else:
 		errors.append("mapgen without om_terrain, nested_mapgen_id or update_mapgen_id (%s)" % src)
 		return
@@ -390,6 +439,15 @@ func _add_mapgen(o: Dictionary, src: Source) -> void:
 		if not table.has(id):
 			table[id] = []
 		table[id].append(ref)
+
+
+## "mapgensize", defaulting to one overmap tile like BN.
+static func _mapgensize(o: Dictionary) -> Vector2i:
+	var obj: Variant = o.get("object")
+	var ms: Variant = obj.get("mapgensize") if obj is Dictionary else null
+	if ms is Array and ms.size() == 2:
+		return Vector2i(int(ms[0]), int(ms[1]))
+	return Vector2i(24, 24)
 
 
 ## The palette definition in effect for [param id], or null.

@@ -242,10 +242,45 @@ Development stages (each ends with a headless-testable acceptance check):
    - Open for later stages: the resolver reads objects with Godot's JSON (floats). Stage 3 must re-read the
      file with BnJson before editing. Monstergroup merge semantics and palette parameter "scope" aren't
      modelled. Mod conflicts are reported as errors, not blocked.
- Stage 2 - Read-only ASCII viewer
+ Stage 2 - Read-only ASCII viewer  [DONE 2026-09-27]
    - Open a mapgen, resolve palettes, and render the multi-OMT grid with 24x24 boundaries. Legend shows where
      each symbol is defined. Hover shows the resolved ids.
    - Accept: a 1x1 house and the 2x2 apartments_mod_tower render with no undefined chars.
+   - Result: tools/run_tests.sh passes 43 tests. house_01 (24x24) and apartments_mod_tower_NW..SE (48x48)
+     render with every cell drawn from a known terrain/furniture, no undefined symbols and no problems. All
+     4534 core json mapgens render with no undefined, unknown-id or missing-terrain cells, and every color
+     name on core terrain/furniture is one BN recognizes. A headless smoke test drives the main scene (open,
+     hover, click-to-highlight, toggles, close).
+   - Code: src/view/bn_colors.gd (BnColors: BN color names -> fg/bg RGB), ascii_map.gd (AsciiMap: per-cell
+     glyph, colors and state, wall joining, status-bar text), src/ui/map_canvas.gd (MapCanvas: zoom/pan,
+     culled drawing, rulers, OMT lines, hover/click), legend_panel.gd, map_browser.gd, mods_dialog.gd, and
+     main.gd (menus, tabs, side drawer, status bar). `godot --path . -- --open <id> [--bn <path>]` opens a
+     map at startup.
+   - What BN actually draws (checked against its source; the plan only said "symbol" and "color"):
+     - map::draw_maptile shows furniture's symbol and color if there is furniture, else terrain's.
+     - Terrain with the AUTO_WALL_SYMBOL flag is drawn as a line joined to its N/E/S/W neighbours whose
+       terrain has the same connect group (map::determine_wall_corner), so walls need "flags" and
+       "connects_to", not just "symbol". TileDef now keeps flags (copy-from "extend"/"delete" applied) and
+       connect_group. connect_group is NOT inherited: BN resets it on every load, then the WALL or
+       CONNECT_TO_WALL flag implies "WALL" for terrain, then the object's own "connects_to" wins.
+       Neighbours outside the map count as unconnected.
+     - Colors are curses pairs over 8 base colors: "c_<fg>[_<bg>]", "h_<fg>" (on blue), "i_<fg>" (black
+       on fg), with deprecated "lt"/"dk" spellings. Curses backgrounds are the dim colors, so a "white"
+       background is light gray and "yellow" is brown. RGB comes from data/raw/colors.json (hardcoded
+       defaults; a user's custom colors aren't read). "bgcolor": X means i_X.
+     - Seasonal symbols/colors: the viewer shows spring, with View > Season to switch.
+   - Display choices: box-drawing characters are drawn as lines rather than font glyphs, so walls join
+     whatever font is present. Other glyphs use a SystemFont (DejaVu Sans Mono, Noto Sans Mono, Consolas,
+     Menlo, ... fallbacks), so nothing is bundled yet; bundling an open font (e.g. DejaVu Sans Mono) may be
+     needed for consistent looks on Windows/macOS. Undefined symbols, unknown ids and cells with no terrain
+     get a red background; cells a nested/update chunk leaves alone get a dark gray one. "Row symbols"
+     shows the raw row characters in the resolved colors.
+   - Not done yet from the UI sketch: the tool buttons (Stage 3) and the Items/Monsters/Nested layers
+     (Stages 5-6); the layer bar has only Furniture and Row symbols toggles. The Inspector and Placements
+     tabs come with those stages.
+   - Test runner note: nodes added during SceneTree._initialize don't get _ready (the root isn't in the
+     tree yet), so UI tests call _ready() themselves and main.gd's `auto_start = false` skips the
+     deferred load.
  Stage 3 - Editing core + workspace
    - Paint terrain/furniture, pick symbols, undo/redo, save to the workspace through the formatter, create
      new mapgen (choose om_terrain grid size).
