@@ -97,7 +97,7 @@ Later milestones:
  - A preview roll can take each kind's chance meaning and default from Placement.KINDS, and must
    scale by BN's spawn-rate options the way each placement class does (see the field hints).
  - Conditional nested pieces (neighbors/joins/connections; noted after Stage 6): the overlay always
-   draws "chunks", but 259 pieces in core + mods are conditional (nearly all "neighbors"; 2 joins,
+   draws "chunks", but 259 pieces in core are conditional (nearly all "neighbors"; 2 joins,
    4 connections), and 236 of them have no else_chunks, so they often place nothing (120 are in
    multi-tile maps, 110 in 1x1 maps, 29 inside chunks, checked against the parent's tile). Ideas:
    mark conditional placements on the canvas (dashed footprint, "if" in the label) and list their
@@ -349,6 +349,10 @@ Development stages (each ends with a headless-testable acceptance check):
      writes a minimal overmap_terrain per missing id into the workspace (next to the map, or in an
      overmap_terrain file of the same mod). DataIndex indexes overmap_terrain ids (Stage 7 validation
      needs them anyway). Spawning (city_building / overmap_special) stays with z-level linking.
+     (Corrected after Stage 6: BN does check. mapgen_factory::check_consistency debugmsgs "Mapgen X
+     is not used by anything!" on every load for an om_terrain mapgen id that no overmap_terrain,
+     mapgen map_extra or Lua "on_make_mapgen_factory_list" hook uses. So the warning is really a
+     load-time error in BN, and the auto-fix is still right. See "Checked after Stage 6".)
    - Workspace layering needs DataIndex support: load the file list from BN, swap in workspace copies,
      and add new workspace files at their relative path, which decides the mod they belong to (a new file
      outside any mod's data folder won't load in BN). The Stage 1 read path (Godot JSON) stays for
@@ -395,6 +399,10 @@ Development stages (each ends with a headless-testable acceptance check):
        _north/... rotations), or a LINEAR overmap_terrain's id + _straight/_curved/_end/_tee/_four_way.
        With that rule only 18 of 5544 core om_terrain ids have none (lab_* used by hardcoded mapgen,
        FEMA_be, "null"), so the warning is meaningful and is listed with the map's problems.
+       (After Stage 6: the editor finds 8 such ids today, and BN reports none of them: the six lab_*
+       ids are registered by data/json/preload.lua's on_make_mapgen_factory_list hook, "null" is the
+       built-in null overmap terrain, and FEMA_be's mapgen has weight 0 so BN never loads it. All 8
+       are false positives; Stage 7 fixes the rule.)
      - The auto-fix appends one overmap_terrain with the missing ids to the map's own file: copy-from the
        core abstract generic_city_building, a name from the id, color light_gray. BN's strict loading
        rejects a value equal to the inherited one, so "sym" is inherited ("^") rather than restated.
@@ -877,13 +885,82 @@ Development stages (each ends with a headless-testable acceptance check):
      isn't modelled; "nested" symbol mappings are edited only as JSON (no picker in the palette
      editor or for a map's own symbols); the Place tool preview shows the anchor, not the whole
      chunk; the overhang is still unverified in game.
+ Checked after Stage 6 (2026-09-27, against BN 39f4883093 source and core data; reviews Stage 7):
+   - Severity, corrected. The table under "Checked after Stage 5" put unknown ids under "BN silently
+     does nothing" and unknown terrain under "refuses to load"; neither holds. BN reacts in four ways:
+     - Load fails (a JsonError while setting up the mapgen; nothing catches it around setup()): a
+       range crossing its tile; wrong row/column counts; a symbol with no terrain and no fill_ter;
+       place_loot with both or neither of item/group, or with an unknown group/item
+       (set_mapgen_defer); a "set" with an unknown terrain/furniture/trap id (set_mapgen_defer
+       too: the whole mapgen fails, not just the later "set" entries); place_signs/place_graffiti
+       with neither signage/snippet nor text/snippet; a chunk without mapgensize; a "set" without
+       point/line/square or with an unknown subfunction.
+     - Reported on every load (debugmsg from DynamicDataLoader::check_consistency, which always runs;
+       the game goes on): unknown ids read through mapgen_value (terrain, furniture, items,
+       monsters, vehicles, traps, fields, npcs, ...; every possible value of a param, distribution
+       or switch), place_items' group-or-item not found, unknown chunk ids, invalid neighbors oter
+       types or connections ids, furniture with the PLANT flag outside a "sealed_item", paint on
+       NO_PAINT terrain, undefined parameters and mismatched parameter scopes/types, invalid mapgen
+       "flags", an unknown gaspump fuel, a row symbol with no definition at all (string_error is
+       caught and turned into a debugmsg), an om_terrain mapgen nothing uses (see Stage 3's
+       correction), the deprecated "set": {"set": ...} form.
+     - Silent: dropped anchors and "set" entries, place_items chance outside 1-100, a mapgen with
+       "weight" <= 0 or "disabled": true (see below).
+     - Odd but defined: reversed spans, overhang (284), a chunk's own rotation, conditional nested
+       pieces (259).
+     Proposed: error = the first two, with the text saying which ("BN won't load this map" vs "BN
+     reports this on every load"); warning = silent; note = odd. BN's CI loads core with these
+     checks, so core should have NO errors: any error the editor finds in core is a false positive
+     to fix, which makes a strong acceptance check.
+   - Where BN checks: each palette on its own, every key whether any map uses it or not
+     (mapgen_palette::check_definitions); a map only for the keys its rows use (its pieces are built
+     per used cell) plus its place_* and "set" lists. So a bad id in a palette is ONE finding on the
+     palette, not one per map using it (standard_domestic_palette has 443 users), and selecting it
+     opens the palette editor at that key. A bad id in a map's own mapping for a key its rows never
+     use isn't reported by BN: a note at most.
+   - "weight" <= 0 or "disabled": true: load_mapgen_function returns nothing, so BN never loads or
+     checks the mapgen. 10 core mapgens (FEMA_*, weight 0), none with placements, so the Stage 5/6
+     counts hold. DataIndex should mark them: validation skips them with one note, they aren't
+     drawn as chunk variants or counted as an om_terrain's mapgens, and they get no
+     missing-overmap_terrain warning.
+   - Missing overmap_terrain: the rule needs BN's other users. Mapgen ids registered by Lua
+     on_make_mapgen_factory_list hooks (core: the six lab_* ids in data/json/preload.lua; scan the
+     loaded mods' preload.lua files for that hook's string ids), map_extra generators with
+     generator_method "mapgen" (none in core), and the built-in "null". Today's 8 core findings are
+     all false positives.
+   - Known ids: each kind has its own null id (t_null, f_null, tr_null, fd_null; "null" for chunks,
+     vehicle groups, npc templates and ter_furn_transforms; "" for item groups; see
+     src/string_id_null_ids.cpp and each type's JSON). Aliases count (29 terrain, 1 furniture, 2
+     MONSTER in core). Item "MIGRATION" (171 in core) does NOT make an old id valid in mapgen
+     (string_id<itype>::is_valid only looks at templates), so a migrated id is a real finding.
+   - Id kinds BN checks, beyond the earlier list: items (17 types; place_items takes a group or an
+     item), item groups (place_items, place_loot, vendingmachines, sealed_item), monsters (and
+     weighted lists) and monster groups, vehicle groups plus prototypes, traps, field types, npc
+     templates, liquids and gaspump fuel (items), terrain/furniture in place_terrain,
+     place_furniture, "set", translate_ter and place_rubble, ter_furn_transforms, zone types,
+     factions, snippet categories (signs, graffiti), overmap_terrain types and overmap connections
+     (neighbors/connections), mapgen flags, chunk ids. MVP: check the acceptance's kinds, and have
+     the panel say which kinds aren't checked rather than implying they're fine.
+   - Palette choices: BN checks every option of a palette distribution/param; the resolver only
+     resolves the displayed one, so id checks must also walk resolve_variants (or check palettes
+     on their own, as above, which covers it).
+   - Counts, corrected: 649 core chunks set their own "rotation", but 75 of them set [0, 0], which
+     does what BN does anyway. The note should count the 574 with a non-zero turn (567 [0, 3], 6
+     [3, 3], 1 [0, 2]).
+   - Mods: ids are known relative to the loaded mod set (mod_interactions folders included), so an
+     id from an unloaded mod is "unknown here". Say so in the finding.
  Stage 7 - Validation panel (MVP item 9). Basic checks exist since Stage 5.
-   - Proposed acceptance: all core json mapgens validate with exactly the core counts under "Checked
-     after Stage 5", sorted into error/warning/note, and seeded errors are each caught: unknown item,
-     monster, vehicle (group or prototype), trap or chunk id; undefined symbol; out-of-range
-     coordinate; crossing range; place_items chance outside 1..100; place_loot with both or neither of
-     item/group; a "set" with an unknown id (and the later "set" entries it drops). Selecting a finding
-     selects its cell, symbol or placement.
+   - Proposed acceptance (revised after Stage 6): every core json mapgen and palette validates with
+     NO errors (BN loads core cleanly), and the warnings and notes match independent core counts: 19
+     dropped anchors, 209 dropped "set" in 44 maps, 0 place_items chances outside 1-100 (warnings);
+     54 reversed spans, 13 place_* past a chunk's mapgensize, 574 chunk rotations that do nothing,
+     284 overhangs, 259 conditional nested pieces (notes); the 10 weight-0 mapgens skipped. Palette
+     findings are counted once per palette. Seeded problems are each caught at BN's severity:
+     unknown item, monster, vehicle (group or prototype), trap or chunk id (reported on load); an
+     unknown place_loot group or "set" id (load fails); undefined symbol; dropped anchor; crossing
+     range; place_items chance outside 1..100; place_loot with both or neither of item/group; a
+     bad id in a palette key no map uses (one palette finding). Selecting a finding selects its
+     cell, symbol, placement, or the palette key in the palette editor.
  Then the "Later milestones" list.
 
 Explicitly out of scope until the later milestones: tilesets, preview rolls, z-level linking, update_mapgen,
