@@ -24,7 +24,7 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
 ```
 
 - Read tools: search_maps, get_map, get_palette, validate_map, validate_palette, lookup_id,
-  list_mods, sync_status, get_building. Edit tools (in memory, one undo step per call): paint_cells/rect/line,
+  list_mods, sync_status, get_building, validate_building. Edit tools (in memory, one undo step per call): paint_cells/rect/line,
   fill, paint_rows, add_symbol, remove_symbol, undo, redo, add/update/remove_placement,
   set_map_palettes, set_symbol_mapping, create_mapgen (with "level": a building's new floor);
   save (workspace only; a map's file also saves its linked building file), discard, reload.
@@ -33,7 +33,11 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   create_palette, undo/redo with "palette".
 - The editor and the server may share a workspace: a save refuses when the file changed on disk
   since it was read (`EditSession.check_on_disk`), and manifest changes go through
-  `Workspace.set_entry`, which re-reads manifest.json first.
+  `Workspace.set_entry`, which re-reads manifest.json first. Both notice the other's saves
+  (`EditSession.external_changes`): the server before each tool call (reloads when clean, answering
+  "reloaded"; else a "disk_warning"), the editor every 3 s and on focus (`main.check_disk`: reloads
+  keeping the tabs, or a banner when there are unsaved edits). Writes the session makes itself
+  (save; Sync's push/discard via `accept_external`) don't count.
 - Only MCP messages may reach stdout: never `print()` in src/ (errors go to stderr).
 - A handler returns a Dictionary or an `McpTools.Failure`; tests call them via `call_tool`, which
   checks the arguments against the tool's schema. Output values must be JSON types
@@ -49,7 +53,9 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   copy-from, palettes, groups, mapgen refs by id), `MapgenResolver` -> `ResolvedMapgen` (a map's cells
   and what each symbol means, with sources), `DataIndex.buildings` (city_building / overmap_special
   z-stacks: `Building`, `BuildingTile`, `buildings_using(oter)`; `overmaps_source`, the definition
-  whose "overmaps" list is in effect), `BuildingLevels` (a map's places in buildings, each level's
+  whose "overmaps" list is in effect; `city_listed`, the region city lists naming a building;
+  `has_mapgen_for(oter)`, JSON or BN's builtin C++ mapgens), `BuildingLevels` (a map's places in
+  buildings, mutable specials using it, each level's
   tiles and mapgens, the step up/down; new level ids and fill suggestions), `Stairs` (cells that may
   hold stairs, elevator floor and elevator controls: every id choice, place_terrain/"set", every
   chunk pick; the Validator pairs stairs with the levels above/below as game::find_stairs does,
@@ -58,8 +64,9 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   ranges, "set" in every OMT; `IntRange` keeps how a jmapgen_int is written), `ChunkOverlay` (the
   nested chunks a map places, laid over its cells in BN's order, rotation and recursion; footprints,
   overhang; chunk consoles per stamp; `forced` picks and `replay()` for judging other picks), `MapgenObjects` (a MapgenRef's object: open file live, else a cached parse),
-  `Validator` (what BN would say about a map or palette: findings with severity, "won't load" vs
-  "reported on load", and a target to select; console reach, also for every chunk pick a map
+  `Validator` (what BN would say about a map, palette or building (`validate_building`): findings
+  with severity, "won't load" vs "reported on load", and a target to select; stair and elevator
+  findings carry the other levels' mapgens; console reach, also for every chunk pick a map
   can place), `Computer` (one computer's JSON:
   action/failure tables, presets, form-keeping setters, reach geometry).
 - `src/edit/`: editing, no nodes. `EditSession` (open files/maps, save, new mapgen, overmap_terrain
@@ -80,7 +87,7 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   map's level drawn around it, and the ghost level under it: each piece turned as placed, a
   turned multi-tile map split per tile; `placed()`, the map itself as placed, for View as placed), `ConsoleReachView` (what the canvas
   draws for a selected computer: stand cells, reach outline, doors reached; where a new door
-  console could go).
+  console could go), `RoofHints` (where a roof and the ghost level under it disagree).
 - `src/ui/`: controls built in code (`MapCanvas`, `LegendPanel`, `MapBrowser`, `ModsDialog`,
   `NewSymbolDialog`, `NewMapDialog`, `NewBuildingDialog`, `SyncDialog`, `PaletteEditor`, `PlacementsPanel`,
   `ProblemsPanel`, `ComputerEditor`, `ComputerDialog`, `IdCompleter`: an id dropdown under a
@@ -134,6 +141,10 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
 - A TabContainer outside the tree ignores `current_tab`. main.gd switches drawer tabs with
   `show_drawer_tab()`, which also sets `drawer_tab`; code and tests read that, not `current_tab`.
 - `MapDocument.begin_group()`/`end_group()` make several edits one undo step.
+- When an open map changes, EditSession tells the other open maps of its buildings
+  (`MapDocument.levels_changed`: their stair/elevator findings are forgotten) and emits `map_edited`;
+  main redraws the current tab's neighbour/ghost pieces from it once a frame (`flush_level_views`,
+  which tests call directly since `_process` never runs there).
 - `OS.execute` joins its arguments into one shell command, so a quoted `sh -c` script gets mangled;
   write a script file and run that (see `tests/test_mcp.gd::test_stdio`).
 - `main.settings_file` is where main saves settings (ghost level, Dim); UI tests set it to "" before

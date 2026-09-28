@@ -2258,6 +2258,100 @@ Stage 11 - Loose ends of the level work, and editor housekeeping (planned 2026-0
        - Mutable specials: the Level picker lists their pieces, but BuildingLevels.places
          leaves them out (no points), so choosing one only opens the piece's map; say so in the
          picker, no neighbours or ghost.
+   - 11c done (2026-09-28). Deviations and details:
+     - Other levels: EditSession binds each map's changed to (chunk id, ref) and cells_changed to the
+       ref. A completed edit (stroke end, undo/redo, a palette refresh, a chunk's overlay refresh)
+       tells every other open map sharing a building with it (BuildingLevels.places ids):
+       MapDocument.other_level_changed() forgets its findings and emits levels_changed. Every change,
+       and each painted cell mid-stroke, emits EditSession.map_edited(ref). _on_tab_changed no longer
+       forgets the findings itself.
+     - Redraws: main collects map_edited refs and, once a frame (_process ->
+       flush_level_views()), re-shapes the current tab's neighbour and ghost pieces drawn from them
+       (each map rendered once; ghost stair / elevator marks redone, main._draw_ghost) and refreshes
+       its Problems tab if its findings were forgotten. Deviation: only the current tab; other tabs
+       redraw when shown (_refresh_open_neighbors, as before), since they aren't visible meanwhile.
+     - The disk: EditSession.external_changes() / accept_external(): the open files' disk paths,
+       the workspace path of each open file (a copy appearing), manifest.json and every file it
+       lists, compared by sha256 (hashed again only when the modified time or size moved, or the
+       file was written in the last 2 s). The session's own saves restamp; main calls
+       accept_external after Sync's push / discard. The editor checks every 3 s (a Timer) and on
+       NOTIFICATION_APPLICATION_FOCUS_IN, skipped while one of its dialogs is open:
+       - nothing dirty: reload_from_disk() (load_index, ~1-3 s for core) reopens the tabs by file +
+         index + title (else the same title in that file), keeping the current tab, each tab's
+         building place, brush, zoom and pan; a tab whose map is gone is closed and named in the
+         status bar. The status bar names the files that changed.
+       - dirty: a banner over the map ("... changed on disk. You have unsaved edits in ...",
+         Reload (lose my edits) / Keep mine). Keep mine = accept_external (not asked again for
+         those changes); saving still refuses, as before.
+       - The Sync window, if open, is set up again on the same trigger.
+     - MCP: call_tool runs the same check before every tool but reload: nothing dirty, it reloads
+       and the answer gets "reloaded": [files]; else "disk_warning" (once per change). A Failure
+       gets either in its message. The reload tool's description says so.
+     - Result: tools/run_tests.sh passes 186 tests (before 11d). tests/test_fresh_views.gd: the
+       building's other open map told (not other_map, not mid-stroke, undo, closed maps), the
+       accept's stair finding on z 0 gone when z 1 paints stairs in its document, ghost and
+       neighbour redrawn (mid-stroke too); a second EditSession's new mapgen in a new workspace
+       file and its edit of the open map picked up by check_disk (tabs, brush, zoom kept), the
+       banner with unsaved edits (save refuses, Keep mine, Reload), a map gone from its file
+       dropped; the MCP answer after an editor save says "reloaded", then a disk_warning over
+       unsaved edits.
+     - Not done: a reload drops the undo history (only of saved maps: it reloads only when nothing
+       is dirty) and the palette editor starts over (PaletteEditor.setup).
+   - 11d done (2026-09-28). Deviations and details:
+     - Checked (BN 39f4883093): fixed_overmap_special_data::check debugmsgs "terrain X is invalid"
+       (or "rotates, but is specified without a rotation"), "point P is duplicated", missing or
+       invalid locations. draw_map with no mapgen for a tile's id: office / temple / mine prefixes
+       have C++ fallbacks, else a debugmsg when the tile is generated and a t_floor fill. C++
+       mapgens are registered per overmap terrain id (get_mapgen_cfunction: open_air, field,
+       forest, road_*, ...) and by an overmap_terrain's "mapgen" list.
+     - Validator.validate_building(index, building): CITY_LIST (note, city_buildings only),
+       BAD_TERRAIN (error, reported on load; a LINEAR terrain's id plus an om_lines suffix such as
+       road_ew or subway_ns is fine: DataIndex.is_overmap_terrain_id, LINE_SUFFIXES),
+       DUPLICATE_POINT (error, reported on load), NO_MAPGEN (deviation: a WARNING, not a note, as
+       BN reports it in game and fills the tile with floor; DataIndex.has_mapgen_for counts
+       enabled JSON mapgens, BUILTIN_MAPGENS, Lua ids, the fallback prefixes, a "mapgen" list or
+       LINEAR flag on the overmap_terrain). Mutable specials: only the city list check (so none:
+       they are overmap_specials). Not checked: locations, connections, a rotating terrain named
+       without its rotation. Findings carry Finding.building ("building X: ..." in describe()).
+     - DataIndex.city_listed: building id -> "houses of default" / "houses of overlay for all",
+       from region_settings and region_overlay "city" lists (EditSession.CITY_LISTS is now
+       DataIndex.CITY_LISTS).
+     - The count: at this BN checkout 400 of 406 city_building ids are in a city list (an
+       independent Python pass over data/json agrees), so 6 CITY_LIST notes (apartments_con,
+       apartments_mod, office_tower, garden_house_1, rvpark_city, home_improvement_superstore),
+       not 27: the 379 figure from Stage 10 is stale. No errors or warnings in core
+       (test_validation_bn::test_core_buildings).
+     - The Problems tab adds the building findings of the current map's place (sorted with the
+       map's); set_place now refreshes the Problems tab. Deviation: no building-level elevator
+       findings were added: every elevator finding starts from a control in some map, so they stay
+       per map (ELEVATOR_ON points at the console that has elevator_on).
+     - Stair and elevator findings carry Finding.levels, the other levels' mapgens involved
+       (_add_at_place merges them across places); MCP answers them as "other_levels": [{file,
+       index, map}].
+     - Roof hints: src/view/roof_hints.gd (RoofHints). A map is a roof at a place when it is above
+       ground with no building tile above any of its tiles. With the ghost below, cells are
+       compared as the canvas draws them (the ghost's pieces turned by LevelNav, and View as
+       placed's pieces when on): OVERHANG where the roof has something over a cell whose terrain
+       has no "roof" member (DataIndex.TileDef.roof, AsciiMap.roofed: floors, walls, doors and
+       windows have one; grass and pavement don't), UNCOVERED where it is open air over one that
+       has. MapCanvas.roof_hints outlines them (blue / yellow). Core count (first place of each
+       roof over a level below): 651 roofs, 395 with overhang cells (11067 cells), 112 with
+       uncovered ones (3496): far from rare, so a hint, not a finding. Checked with a
+       non-headless screenshot (bakery_upper_roof, 32 cells).
+     - Mutable specials: the Level picker lists them after the places ("rules (mutable
+       special)", item metadata = id; BuildingLevels.mutable_specials); picking one lists its
+       pieces with their mapgens in a menu (show_mutable_pieces), and choosing one opens that map
+       with no place. The tooltip and status bar say why there are no neighbours, ghost or levels.
+     - MCP: validate_building {id} (findings, and a city_building's city_lists); 32 tools; the
+       server instructions mention it.
+     - Result: tools/run_tests.sh passes 191 tests. tests/test_buildings.gd: validate_building on a
+       fake tree (listed through a mod's region_overlay, unlisted without the mod, a bad terrain,
+       a duplicated point, a tile no mapgen draws, open_air and road_ew fine, a mutable special);
+       a stair finding naming the roof's mapgen, MCP other_levels and validate_building; the
+       Problems tab switching with the Level picker; roof hints (overhang column, uncovered
+       cell, painted shut, no ghost, not a roof, a roof placed east over an unturned floor lines
+       up, also as placed); the mutable picker and its pieces menu. test_viewer's
+       apartments_mod_tower_NW now shows 2 notes (its city list note).
    - 11e. Renames and removals.
      - Remove or rename a map's own symbol (renaming repaints its cells; one undo step), rename a
        palette key (PaletteImpact lists every map repainted), delete an unused palette (refused

@@ -117,8 +117,9 @@ func test_main_scene_opens_map() -> void:
 	if check(m != null, "opened"):
 		check_eq(main.maps.size(), 1)
 		check_eq(m.ascii.size, Vector2i(48, 48))
-		# The stairs above are 3 cells off (BN's data; Stage 10c).
-		check_eq(main._problems_button.text, "1 note")
+		# The stairs above are 3 cells off (BN's data; Stage 10c), and no city
+		# list names apartments_mod (Stage 11d).
+		check_eq(main._problems_button.text, "2 notes")
 		# Opening the same entry again reuses its tab.
 		main.open_id("apartments_mod_tower_SE")
 		check_eq(main.maps.size(), 1, "same entry, same tab")

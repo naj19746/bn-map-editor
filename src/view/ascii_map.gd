@@ -75,6 +75,9 @@ var states := PackedByteArray()
 ## 1 where the level below shows through: NO_FLOOR terrain (t_open_air)
 ## with no furniture drawn, or nothing placed.
 var see_through := PackedByteArray()
+## 1 where the terrain is part of a building: it has a "roof" (floors,
+## walls, doors, windows; not grass or pavement). See RoofHints.
+var roofed := PackedByteArray()
 
 ## key -> Look, for the keys in use (and "" for cells with no key).
 var looks := {}
@@ -109,6 +112,7 @@ func refresh() -> void:
 	bg.resize(n)
 	states.resize(n)
 	see_through.resize(n)
+	roofed.resize(n)
 	_cell_looks.resize(n)
 	for y in size.y:
 		for x in size.x:
@@ -157,6 +161,7 @@ func piece(rect: Rect2i, turns: int) -> AsciiMap:
 	m.bg.resize(n)
 	m.states.resize(n)
 	m.see_through.resize(n)
+	m.roofed.resize(n)
 	for y in dim.y:
 		for x in dim.x:
 			var to := ChunkOverlay.rotate(Vector2i(x, y), turns, dim)
@@ -170,6 +175,7 @@ func piece(rect: Rect2i, turns: int) -> AsciiMap:
 			m.bg[j] = bg[i]
 			m.states[j] = states[i]
 			m.see_through[j] = see_through[i]
+			m.roofed[j] = roofed[i]
 	return m
 
 
@@ -182,6 +188,7 @@ func _set_look(x: int, y: int, look: Look) -> void:
 	states[i] = look.state
 	see_through[i] = 1 if look.state == State.EMPTY or (look.terrain and look.terrain.has_flag(NO_FLOOR)
 			and not (show_furniture and look.furniture)) else 0
+	roofed[i] = 1 if look.terrain and not look.terrain.roof.is_empty() else 0
 
 
 func state_at(x: int, y: int) -> State:

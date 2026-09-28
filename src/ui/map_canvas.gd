@@ -26,6 +26,9 @@ extends Control
 ## (each tile turned), read-only: placements, chunk footprints, previews and
 ## the rest are left out, and the cells the signals report are the map's
 ## own (to_map()).
+## Over a roof with the level below as the ghost, cells where the two
+## disagree ([member roof_hints], RoofHints) are outlined: blue where the
+## roof runs past the walls below, yellow where it leaves them open.
 
 ## The cell under the mouse changed; (-1, -1) when it left the map.
 signal cell_hovered(cell: Vector2i)
@@ -76,6 +79,9 @@ const NEIGHBOR_FLAT := Color(1.0, 0.75, 0.2, 0.08)
 const GHOST_DIM := 0.7
 const GHOST_STAIRS := Color(0.3, 0.9, 1.0, 0.9)
 const GHOST_ELEVATOR := Color(1.0, 0.6, 0.2, 0.9)
+## Roof hints (RoofHints.Kind).
+const ROOF_OVERHANG := Color(0.55, 0.7, 1.0, 0.85)
+const ROOF_UNCOVERED := Color(1.0, 0.9, 0.3, 0.85)
 ## Below this cell size neighbors are flat boxes: a big special's level
 ## would be hundreds of thousands of cells.
 const NEIGHBOR_CELLS_MIN := 7.0
@@ -182,6 +188,12 @@ var ghost_dim := true:
 var ghost_above := false
 ## The map as placed (LevelNav.placed, pieces with their ascii), drawn
 ## instead of [member ascii]; empty: the map as it is.
+## Where the map, a roof, and the ghost level under it disagree: cell ->
+## RoofHints.Kind, outlined over the map.
+var roof_hints := {}:
+	set(v):
+		roof_hints = v
+		queue_redraw()
 var placed: Array[LevelNav.Neighbor] = []:
 	set(v):
 		placed = v
@@ -406,6 +418,7 @@ func _draw() -> void:
 		for n in placed:
 			if n.ascii:
 				_draw_cells(n.ascii, origin + Vector2(n.cell) * cs, 0.0, font_size, baseline, through, true)
+		_draw_roof_hints()
 		_draw_ghost_stairs()
 		_draw_grid(x0, y0, x1, y1)
 		if hovered.x >= 0:
@@ -458,6 +471,7 @@ func _draw() -> void:
 						HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, ascii.fg[i])
 
 	_draw_preview(font_size, baseline, draw_text)
+	_draw_roof_hints()
 	_draw_ghost_stairs()
 	_draw_grid(x0, y0, x1, y1)
 	_draw_reach()
@@ -543,6 +557,20 @@ func _draw_cells(a: AsciiMap, at: Vector2, dim: float, font_size: int, baseline:
 				var tw := _font.get_string_size(ch, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
 				draw_string(_font, Vector2(rect.position.x + (cs - tw) / 2.0, rect.position.y + baseline),
 						ch, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, fg)
+
+
+## Roof cells that run past the walls below (OVERHANG) or leave the
+## building below open (UNCOVERED): a thin outline in their color.
+func _draw_roof_hints() -> void:
+	var cs := cell_size
+	if cs < 4.0:
+		return
+	var view := Rect2(Vector2(RULER, RULER), size)
+	for c: Vector2i in roof_hints:
+		var rect := Rect2(origin + Vector2(c) * cs, Vector2(cs, cs)).grow(-1.5)
+		if rect.intersects(view):
+			draw_rect(rect, ROOF_OVERHANG if roof_hints[c] == RoofHints.Kind.OVERHANG else ROOF_UNCOVERED,
+					false, 1.5)
 
 
 ## The ghost level's stairs to this level: an outlined cell with a

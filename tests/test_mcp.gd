@@ -113,7 +113,7 @@ func test_protocol() -> void:
 	check_eq(names, ["search_maps", "get_map", "get_palette", "validate_map", "validate_palette", "lookup_id",
 		"list_mods", "sync_status", "paint_cells", "paint_rect", "paint_line", "fill", "paint_rows", "add_symbol",
 		"remove_symbol", "undo", "redo", "save", "discard", "reload", "add_placement", "update_placement",
-		"remove_placement", "set_map_palettes", "set_symbol_mapping", "create_mapgen", "get_building", "create_building",
+		"remove_placement", "set_map_palettes", "set_symbol_mapping", "create_mapgen", "get_building", "validate_building", "create_building",
 		"edit_palette_key", "set_palette_includes", "create_palette"])
 	check_eq(reply.call('{"jsonrpc":"2.0","id":4,"method":"nope"}').error.code, McpServer.METHOD_NOT_FOUND)
 	check_eq(reply.call('{"jsonrpc":"2.0","id":5,"method":').error.code, McpServer.PARSE_ERROR)
@@ -616,7 +616,7 @@ func test_stdio() -> void:
 		return
 	check_eq(replies.map(func(r: Dictionary) -> Variant: return r.get("id")), [1, 2, 3, 4])
 	check_eq(replies[0].result.serverInfo.name, "bn-map-editor")
-	check_eq(replies[1].result.tools.size(), 31)
+	check_eq(replies[1].result.tools.size(), 32)
 	var found: Dictionary = BnJson.parse(replies[2].result.content[0].text).value
 	check_eq(found.maps[0].ids, ["chunk_a"])
 	var m: Dictionary = BnJson.parse(replies[3].result.content[0].text).value

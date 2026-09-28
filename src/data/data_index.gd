@@ -63,6 +63,9 @@ class TileDef:
 	var move_cost := 0
 	## "examine_action" when it is a name ("elevator", "controls_gate", ...).
 	var examine_action := ""
+	## Terrain: "roof", what the level above gets over it when built on
+	## (set for a building's floors, walls, doors and windows).
+	var roof := ""
 	var source: Source
 
 	func copy() -> TileDef:
@@ -78,6 +81,7 @@ class TileDef:
 		t.connect_group = connect_group
 		t.move_cost = move_cost
 		t.examine_action = examine_action
+		t.roof = roof
 		t.source = source
 		return t
 
@@ -212,12 +216,35 @@ class BuildingTile:
 	var dir := ""
 
 
+## The city lists of a region_settings / region_overlay "city" object that
+## name buildings (regional_settings.cpp load_building_types).
+const CITY_LISTS := ["houses", "urban_houses", "shops", "urban_shops", "parks", "finales"]
+
+## Overmap terrain ids BN draws with a C++ function when no JSON mapgen does
+## (mapgen_functions.cpp get_mapgen_cfunction, registered per id).
+const BUILTIN_MAPGENS := ["null", "test", "crater", "field", "forest", "forest_trail_straight",
+	"forest_trail_curved", "forest_trail_end", "forest_trail_tee", "forest_trail_four_way", "hive",
+	"road_straight", "road_curved", "road_end", "road_tee", "road_four_way", "highway",
+	"railroad_straight", "railroad_curved", "railroad_end", "railroad_tee", "railroad_four_way",
+	"railroad_bridge", "river_center", "river_curved_not", "river_straight", "river_curved",
+	"river_shore", "parking_lot", "cavern", "open_air", "rift", "hellmouth", "empty_rock", "rock",
+	"subway_straight", "subway_curved", "subway_end", "subway_tee", "subway_four_way",
+	"sewer_straight", "sewer_curved", "sewer_end", "sewer_tee", "sewer_four_way", "tutorial",
+	"lake_shore", "pd_border"]
+## Overmap terrain id prefixes BN draws in code when nothing else does
+## (mapgen.cpp draw_map's fallback).
+const FALLBACK_PREFIXES := ["office", "temple", "mine"]
+
 ## Rotation suffixes of overmap terrain ids (BN's om_direction names).
 const DIRECTIONS := ["north", "east", "south", "west"]
 
 ## om_terrain ids ending in one of these belong to the LINEAR overmap_terrain
 ## without the suffix (BN's om_lines::mapgen_suffixes).
 const LINEAR_SUFFIXES := ["_straight", "_curved", "_end", "_tee", "_four_way"]
+## The overmap terrain ids of a LINEAR terrain are its id plus one of these
+## (om_lines::all), e.g. road_ew.
+const LINE_SUFFIXES := ["_isolated", "_end_south", "_end_west", "_ne", "_end_north", "_ns", "_es", "_nes",
+	"_end_east", "_wn", "_ew", "_new", "_sw", "_nsw", "_esw", "_nesw"]
 
 ## Other object types whose ids mapgen refers to: JSON "type" -> the kind
 ## they're indexed under in [member ids]. Every item type is an "item".
@@ -261,6 +288,9 @@ var buildings := {}
 ## Overmap terrain type (as BuildingTile.oter) -> Array[BuildingTile]: the
 ## buildings that place it, in building load order.
 var building_tiles := {}
+## Building id -> the city lists naming it, e.g. "houses of region default"
+## (region_settings and region_overlay objects).
+var city_listed := {}
 ## Kind (a value of ID_TYPES) -> {id: Source of its last definition}.
 var ids := {}
 ## om_terrain mapgen ids something other than an overmap_terrain uses: map
@@ -277,6 +307,9 @@ var _deferred: Array = []
 ## Building id -> Array of [object, Source], in load order; resolved once
 ## everything (overmap_terrain included) has loaded.
 var _building_defs := {}
+## overmap_terrain id -> whether its definition has a "mapgen" list or is
+## LINEAR (see has_mapgen_for), read on first use.
+var _oter_draws := {}
 
 
 ## Loads the core mod plus [param selected] mods (in load order, with their
@@ -457,6 +490,8 @@ func _add_object(o: Dictionary, src: Source) -> void:
 				if not _building_defs.has(id):
 					_building_defs[id] = []
 				_building_defs[id].append([o, src])
+		"region_settings", "region_overlay":
+			_add_city_lists(o)
 		"map_extra":
 			var gen: Variant = o.get("generator", o)
 			if gen is Dictionary and gen.get("generator_method") == "mapgen" and gen.get("generator_id") is String:
@@ -465,6 +500,23 @@ func _add_object(o: Dictionary, src: Source) -> void:
 			var kind: String = ID_TYPES.get(type, "") if type is String else ""
 			if kind:
 				_add_ids(kind, type, o, src)
+
+
+## Records the buildings [param o]'s "city" lists name (see city_listed).
+func _add_city_lists(o: Dictionary) -> void:
+	var city: Variant = o.get("city")
+	if not city is Dictionary:
+		return
+	var region := str(o.get("id", "")) if o.type == "region_settings" else "overlay for %s" % ", ".join(
+			_tags(o.get("regions", [])))
+	for list: String in CITY_LISTS:
+		var names: Variant = city.get(list)
+		if not names is Dictionary:
+			continue
+		for id: String in names:
+			if not city_listed.has(id):
+				city_listed[id] = PackedStringArray()
+			city_listed[id].append("%s of %s" % [list, region])
 
 
 func _add_ids(kind: String, type: String, o: Dictionary, src: Source) -> void:
@@ -588,6 +640,8 @@ static func _apply_tile_fields(def: TileDef, o: Dictionary) -> void:
 			def.move_cost = int(o[key])
 	if o.has("examine_action"):
 		def.examine_action = o.examine_action if o.examine_action is String else ""
+	if o.has("roof"):
+		def.roof = o.roof if o.roof is String else ""
 	if o.has("symbol"):
 		def.symbol = _seasons(o.symbol)
 	# BN allows only one of the two; either replaces an inherited one.
@@ -856,6 +910,42 @@ func has_overmap_terrain(om_id: String) -> bool:
 		return true
 	for suffix: String in LINEAR_SUFFIXES:
 		if om_id.ends_with(suffix) and overmap_terrain.has(om_id.trim_suffix(suffix)):
+			return true
+	return false
+
+
+## True when BN has something to draw overmap terrain type [param oter]
+## (a BuildingTile.oter) with: an enabled om_terrain mapgen, a C++ function
+## (BUILTIN_MAPGENS, or a "mapgen" list in its overmap_terrain), a Lua
+## generator, or draw_map's fallback by prefix. A LINEAR terrain counts
+## (its mapgens are per suffix). Without one BN shows an error when it
+## generates the tile and fills it with t_floor.
+func has_mapgen_for(oter: String) -> bool:
+	for r: MapgenRef in om_terrain.get(oter, []):
+		if not r.disabled:
+			return true
+	if BUILTIN_MAPGENS.has(oter) or mapgen_users.has(oter):
+		return true
+	for prefix: String in FALLBACK_PREFIXES:
+		if oter.begins_with(prefix):
+			return true
+	if not overmap_terrain.has(oter):
+		# A LINEAR terrain's id plus a suffix, or no terrain at all.
+		return is_overmap_terrain_id(oter)
+	if not _oter_draws.has(oter):
+		var o := read_object(overmap_terrain[oter])
+		_oter_draws[oter] = o.get("mapgen") is Array or _tags(o.get("flags", [])).has("LINEAR")
+	return _oter_draws[oter]
+
+
+## True when [param oter] names an overmap terrain: a defined id, or a
+## LINEAR terrain's id plus one of LINE_SUFFIXES (a building placing a
+## piece of road).
+func is_overmap_terrain_id(oter: String) -> bool:
+	if overmap_terrain.has(oter):
+		return true
+	for suffix: String in LINE_SUFFIXES:
+		if oter.ends_with(suffix) and overmap_terrain.has(oter.trim_suffix(suffix)):
 			return true
 	return false
 

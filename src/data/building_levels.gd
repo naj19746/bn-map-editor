@@ -67,6 +67,21 @@ static func places(index: DataIndex, ref: DataIndex.MapgenRef) -> Array[Place]:
 	return out
 
 
+## The mutable specials that have one of [param ref]'s overmap terrains
+## among their pieces (they have no fixed points, so places() leaves them
+## out).
+static func mutable_specials(index: DataIndex, ref: DataIndex.MapgenRef) -> Array[DataIndex.Building]:
+	var out: Array[DataIndex.Building] = []
+	if ref == null or ref.kind != DataIndex.MapgenRef.OM_TERRAIN:
+		return out
+	for id in ref.ids:
+		for t in index.buildings_using(id):
+			var b: DataIndex.Building = index.buildings.get(t.building)
+			if b and b.mutable and not out.has(b):
+				out.append(b)
+	return out
+
+
 ## The om_terrain mapgens for [param oter]: enabled ones first.
 static func mapgens(index: DataIndex, oter: String) -> Array[DataIndex.MapgenRef]:
 	var out: Array[DataIndex.MapgenRef] = []

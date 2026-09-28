@@ -12,6 +12,9 @@ extends RefCounted
 ## and save writes files to the workspace, as the editor saves: never into
 ## BN. The editor may have the same workspace open, so a save refuses to
 ## overwrite a file that changed on disk since it was read (reload re-reads).
+## Before each call the session looks for such changes
+## (EditSession.external_changes): with no unsaved edits it reloads and the
+## answer says "reloaded"; with some, the answer carries a "disk_warning".
 ##
 ## The index loads on the first call that needs it ([member loader]), so
 ## initialize answers at once.
@@ -131,7 +134,38 @@ func call_tool(name: String, args: Dictionary) -> Variant:
 	var problem := _check_args(_tools[name].inputSchema, args)
 	if problem:
 		return Failure.new(problem)
-	return _tools[name].handler.call(args)
+	var disk := _check_disk() if name != "reload" else {}
+	var out: Variant = _tools[name].handler.call(args)
+	if disk.is_empty():
+		return out
+	if out is Dictionary:
+		out.merge(disk)
+	elif out is Failure:
+		out.message += " (%s)" % (("reloaded first: %s changed on disk" % ", ".join(disk.reloaded)) \
+				if disk.has("reloaded") else disk.disk_warning)
+	return out
+
+
+## Files another program (the editor) changed since the session read them:
+## with no unsaved edits, loads again ({"reloaded": files}); else
+## {"disk_warning": text}, once per change. {} when nothing changed.
+func _check_disk() -> Dictionary:
+	if session == null:
+		return {}
+	var changed := session.external_changes()
+	if changed.is_empty():
+		return {}
+	var dirty := session.dirty_files()
+	if dirty.is_empty():
+		session = null
+		load_errors = PackedStringArray()
+		_load_tried = false
+		_session()
+		return {"reloaded": Array(changed)}
+	session.accept_external()
+	return {"disk_warning": ("%s changed on disk (saved by the editor?) while %s ha%s unsaved edits here: " \
+			+ "saving a changed file is refused; reload with discard: true to take the disk's version.") % [
+				", ".join(changed), ", ".join(dirty), "s" if dirty.size() == 1 else "ve"]}
 
 
 ## Why [param args] don't fit [param schema], or "". Checks the member
@@ -367,6 +401,12 @@ static func _finding(f: Validator.Finding) -> Dictionary:
 			out["palette"] = f.palette
 			if f.key:
 				out["symbol"] = f.key
+	if f.building:
+		out["building"] = f.building
+	if not f.levels.is_empty():
+		# The other levels a stair or elevator finding is about, to open.
+		out["other_levels"] = f.levels.map(func(r: DataIndex.MapgenRef) -> Dictionary:
+			return {"file": r.source.path, "index": r.source.index, "map": r.title()})
 	return out
 
 
@@ -771,8 +811,9 @@ func _add_edit_tools() -> void:
 			+ "read the file again when next used. A new level's edits to its building's file go too.", {
 		"file": _string("The file (relative, as get_map gives it)."),
 	}, ["file"], discard)
-	_add("reload", "Read BN and the workspace again (e.g. after the editor saved or pushed files). Refused " \
-			+ "while there are unsaved edits, unless discard is true.", {
+	_add("reload", "Read BN and the workspace again. Files the editor saves are picked up by themselves " \
+			+ "(an answer then says \"reloaded\"), or warned about (\"disk_warning\") while there are unsaved " \
+			+ "edits here. Refused while there are unsaved edits, unless discard is true.", {
 		"discard": _bool("Throw away unsaved edits (default false)."),
 	}, [], reload)
 
@@ -1299,6 +1340,12 @@ func _add_level_tools() -> void:
 		"id": _string("The city_building / overmap_special id."),
 		"z": _int("Only this level."),
 	}, ["id"], get_building)
+	_add("validate_building", "What BN would say about a city_building / overmap_special (see validate_map " \
+			+ "for severities): terrains in \"overmaps\" that don't exist, points listed twice, tiles no mapgen " \
+			+ "draws, and a city_building no region's city list names (cities never place it). Stair and " \
+			+ "elevator findings are validate_map's, per map (with the other levels' files and indexes).", {
+		"id": _string("The city_building / overmap_special id."),
+	}, ["id"], validate_building)
 	_add("create_building", "Create a city_building placing a map's tiles at z 0 facing north (add its other " \
 			+ "levels with create_mapgen's level), optionally named in a city list so cities spawn it (without " \
 			+ "one it never spawns in a city). In a mod the list entry is a region_overlay next to the " \
@@ -1380,19 +1427,42 @@ func _levels(ref: DataIndex.MapgenRef) -> Array:
 	return out
 
 
+## Building [param id], or a Failure listing the ids containing it.
+func _find_building(id: String) -> Variant:
+	var b: DataIndex.Building = session.index.buildings.get(id)
+	if b:
+		return b
+	var like := PackedStringArray()
+	for other: String in session.index.buildings:
+		if other.to_lower().contains(id.to_lower()) and like.size() < DEFAULT_LIMIT:
+			like.append(other)
+	like.sort()
+	return Failure.new("No city_building / overmap_special \"%s\".%s" % [id,
+			" Ids containing it: " + ", ".join(like) if like.size() else ""])
+
+
+func validate_building(args: Dictionary) -> Variant:
+	if _session() == null:
+		return _no_session()
+	var found: Variant = _find_building(args.id)
+	if found is Failure:
+		return found
+	var b: DataIndex.Building = found
+	var out := {"id": b.id, "type": b.type, "file": b.source.path, "index": b.source.index}
+	out.merge(_findings(Validator.sorted(Validator.validate_building(session.index, b))))
+	if b.type == "city_building":
+		out["city_lists"] = Array(session.index.city_listed.get(b.id, PackedStringArray()))
+	return out
+
+
 func get_building(args: Dictionary) -> Variant:
 	if _session() == null:
 		return _no_session()
 	var index := session.index
-	var b: DataIndex.Building = index.buildings.get(args.id)
-	if b == null:
-		var like := PackedStringArray()
-		for id: String in index.buildings:
-			if id.to_lower().contains(args.id.to_lower()) and like.size() < DEFAULT_LIMIT:
-				like.append(id)
-		like.sort()
-		return Failure.new("No city_building / overmap_special \"%s\".%s" % [args.id,
-				" Ids containing it: " + ", ".join(like) if like.size() else ""])
+	var found: Variant = _find_building(args.id)
+	if found is Failure:
+		return found
+	var b: DataIndex.Building = found
 	var out := {"id": b.id, "type": b.type, "file": b.source.path, "index": b.source.index, "mod": b.source.mod}
 	var src := b.overmaps_source
 	if src and (src.path != b.source.path or src.index != b.source.index):

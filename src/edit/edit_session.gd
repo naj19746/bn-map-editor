@@ -15,6 +15,17 @@ extends RefCounted
 ## Open maps draw the nested chunks they place (MapDocument.chunk_overlay),
 ## read through [member objects], so an edited chunk or palette shows up in
 ## every open map drawing it: those are told to lay their chunks out again.
+## A map's stair and elevator findings read the other levels of its
+## buildings, so when a map changes, every other open map sharing a
+## building with it forgets its findings (MapDocument.levels_changed).
+##
+## Files other programs change (the MCP server next to the editor) are
+## noticed by external_changes(): the open files, and the workspace's
+## manifest and the files it lists, against what was read or saved.
+
+## A map changed (a stroke's cells, or a completed edit), or the chunks it
+## draws did: views drawing it elsewhere (neighbours, ghosts) redraw it.
+signal map_edited(ref: DataIndex.MapgenRef)
 
 ## Where a stub overmap_terrain copies from: an abstract city building in core.
 const OVERMAP_STUB_BASE := "generic_city_building"
@@ -23,7 +34,7 @@ const ROOF_STUB_BASE := "generic_city_house_roof"
 const BASEMENT_STUB_BASE := "generic_city_house_basement"
 ## The city lists of a region_settings "city" object that name buildings
 ## (regional_settings.cpp load_building_types).
-const CITY_LISTS := ["houses", "urban_houses", "shops", "urban_shops", "parks", "finales"]
+const CITY_LISTS := DataIndex.CITY_LISTS
 const REGION_SETTINGS_FILE := "data/json/regional_map_settings.json"
 const DEFAULT_FILL := "t_grass"
 
@@ -51,6 +62,14 @@ var _new_buildings := {}
 ## rel path of a map file -> the building files a new level of it edited,
 ## released with it (see add_level_tiles).
 var _linked := {}
+## Absolute path -> sha256 ("" when missing) of the workspace's manifest and
+## the files it lists, as this session last saw or wrote them (see
+## external_changes).
+var _stamps := {}
+## Absolute path -> [modified time, size, sha256]: a file's hash, taken
+## again only when its time or size moved (or it was written in the last
+## couple of seconds, which a time in whole seconds can't tell apart).
+var _hashes := {}
 
 
 func _init(p_index: DataIndex, p_workspace: Workspace, p_formatter: JsonFormatter = null) -> void:
@@ -58,6 +77,7 @@ func _init(p_index: DataIndex, p_workspace: Workspace, p_formatter: JsonFormatte
 	workspace = p_workspace
 	formatter = p_formatter if p_formatter else JsonFormatter.new()
 	objects = MapgenObjects.new(index, _live_objects)
+	accept_external()
 
 
 ## The objects of open file [param rel], or null.
@@ -108,19 +128,45 @@ func open(ref: DataIndex.MapgenRef) -> MapDocument:
 
 func _add_doc(doc: MapDocument) -> void:
 	doc.objects = objects
-	# Bound to the chunk id, not the document: that would be a reference cycle.
-	doc.changed.connect(_on_map_changed.bind(doc.chunk_id()))
+	# Bound to the chunk id and ref, not the document: that would be a
+	# reference cycle.
+	doc.changed.connect(_on_map_changed.bind(doc.chunk_id(), doc.ref))
+	doc.cells_changed.connect(_on_map_cells.bind(doc.ref))
 	docs.append(doc)
 
 
 ## A map changed; if it's a chunk, the maps drawing it lay their chunks out
-## again.
-func _on_map_changed(_full: bool, chunk_id: String) -> void:
-	if chunk_id.is_empty():
+## again. The maps sharing a building with any of them forget their
+## findings.
+func _on_map_changed(_full: bool, chunk_id: String, ref: DataIndex.MapgenRef) -> void:
+	var edited: Array[DataIndex.MapgenRef] = [ref]
+	if chunk_id:
+		for d in docs:
+			if d.overlay_uses(chunk_id):
+				d.refresh_overlay()
+				edited.append(d.ref)
+	for r in edited:
+		_notify_levels(r)
+		map_edited.emit(r)
+
+
+## Cells painted during a stroke (the stroke's end also emits changed).
+func _on_map_cells(_cells: Array[Vector2i], ref: DataIndex.MapgenRef) -> void:
+	map_edited.emit(ref)
+
+
+## Tells every other open map placed by a building that places [param ref]
+## that one of its levels changed.
+func _notify_levels(ref: DataIndex.MapgenRef) -> void:
+	var ids := {}
+	for p in BuildingLevels.places(index, ref):
+		ids[p.building.id] = true
+	if ids.is_empty():
 		return
 	for d in docs:
-		if d.overlay_uses(chunk_id):
-			d.refresh_overlay()
+		if d.ref != ref and BuildingLevels.places(index, d.ref).any(
+				func(p: BuildingLevels.Place) -> bool: return ids.has(p.building.id)):
+			d.other_level_changed()
 
 
 ## True when the file's object at ref's index is still that mapgen.
@@ -313,6 +359,9 @@ func save(rel: String) -> String:
 		return _fail(err)
 	last_notes = f.lossy_warnings()
 	f.mark_saved(workspace.path(rel), JsonFile.sha256_at(workspace.path(rel)))
+	# The session's own writes aren't changes by others.
+	_stamps[workspace.path(rel)] = f.disk_sha256
+	_stamps[workspace.path(Workspace.MANIFEST)] = _sha(workspace.path(Workspace.MANIFEST))
 	objects.forget(rel)
 	_new_refs.erase(rel)
 	_new_overmap.erase(rel)
@@ -345,6 +394,69 @@ func changed_on_disk() -> PackedStringArray:
 	return out
 
 
+## Files another program changed since this session read or wrote them
+## (relative paths; "manifest.json" for the workspace manifest): an open
+## file whose file on disk changed (check_on_disk), and the workspace's
+## manifest and the files it lists (one created, changed or deleted). The
+## editor reloads when it finds some (or asks, with unsaved edits); the
+## MCP server does before a tool call. accept_external() forgets them.
+func external_changes() -> PackedStringArray:
+	var out := PackedStringArray()
+	for rel: String in files:
+		var f: JsonFile = files[rel]
+		var target := workspace.path(rel)
+		if (f.disk_path and _sha(f.disk_path) != _stamps.get(f.disk_path, f.disk_sha256)) \
+				or (f.disk_path != target and _stamps.get(target, "") != _sha(target)):
+			out.append(rel)
+	var manifest := workspace.path(Workspace.MANIFEST)
+	if _stamps.get(manifest, "") != _sha(manifest):
+		out.append(Workspace.MANIFEST)
+		workspace.reload_manifest()
+	for rel: String in workspace.files:
+		var path := workspace.path(rel)
+		if not out.has(rel) and _stamps.get(path, "") != _sha(path):
+			out.append(rel)
+	for path: String in _stamps:
+		var rel := path.trim_prefix(workspace.root + "/")
+		if rel != path and rel != Workspace.MANIFEST and not out.has(rel) and not workspace.files.has(rel) \
+				and _stamps[path] != _sha(path):
+			out.append(rel)
+	return out
+
+
+## Takes the files on disk as they are now as seen (see external_changes):
+## after loading, and after the user chose to keep their edits over them.
+func accept_external() -> void:
+	_stamps.clear()
+	if workspace == null or workspace.root.is_empty():
+		return
+	workspace.reload_manifest()
+	_stamps[workspace.path(Workspace.MANIFEST)] = _sha(workspace.path(Workspace.MANIFEST))
+	for rel: String in workspace.files:
+		_stamps[workspace.path(rel)] = _sha(workspace.path(rel))
+	for rel: String in files:
+		_stamps[workspace.path(rel)] = _sha(workspace.path(rel))
+		if files[rel].disk_path:
+			_stamps[files[rel].disk_path] = _sha(files[rel].disk_path)
+
+
+## The sha256 of the file at [param path] ("" if there is none), hashed
+## again only when it may have changed (see _hashes).
+func _sha(path: String) -> String:
+	if not FileAccess.file_exists(path):
+		_hashes.erase(path)
+		return ""
+	var t := FileAccess.get_modified_time(path)
+	var size := FileAccess.get_size(path)
+	var known: Array = _hashes.get(path, [])
+	if not known.is_empty() and known[0] == t and known[1] == size \
+			and int(Time.get_unix_time_from_system()) - t > 2:
+		return known[2]
+	var sha := FileAccess.get_sha256(path)
+	_hashes[path] = [t, size, sha]
+	return sha
+
+
 ## [param rel] was pushed into BN and its workspace copy deleted. An open
 ## copy now counts as read from BN, so its next save records BN's new file
 ## as the base instead of marking the file new.
@@ -370,6 +482,7 @@ func save_all() -> PackedStringArray:
 func close(doc: MapDocument) -> void:
 	docs.erase(doc)
 	doc.changed.disconnect(_on_map_changed)
+	doc.cells_changed.disconnect(_on_map_cells)
 	_release_file(doc.file.rel_path)
 
 

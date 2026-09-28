@@ -170,15 +170,31 @@ var _new_building_dialog: NewBuildingDialog
 ## The building level the New map dialog is creating (null: none).
 var _pending_level: EditSession.LevelTarget
 var _ghost_picker: OptionButton
+## Lists a mutable special's pieces (see show_mutable_pieces), and the
+## mapgen of each item.
+var _mutable_menu: PopupMenu
+var _mutable_refs: Array = []
 var _dim_button: Button
 ## Where settings are kept; "" keeps them in memory only (tests).
 var settings_file := AppSettings.DEFAULT_FILE
+## Maps edited since the last flush_level_views() (MapgenRef -> true), and
+## whether the current map's findings were forgotten meanwhile.
+var _edited_refs := {}
+var _levels_stale := false
+## Shown over the map when files changed on disk while there are unsaved
+## edits (see check_disk).
+var _disk_banner: PanelContainer
+var _disk_label: Label
+var _disk_timer: Timer
+## How often the files on disk are checked, in seconds.
+const DISK_CHECK_SECONDS := 3.0
 
 
 func _ready() -> void:
 	settings = AppSettings.load_from(settings_file) if settings_file else AppSettings.new()
 	_parse_args()
 	_build_ui()
+	set_process(false)
 	tool.picked.connect(_on_picked)
 	placement_tool.selection_changed.connect(_on_placement_selected)
 	placement_tool.failed.connect(func(msg: String) -> void: _status.text = msg)
@@ -214,6 +230,8 @@ func _start() -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
 		_confirm_unsaved(_all_dirty(), get_tree().quit)
+	elif what == NOTIFICATION_APPLICATION_FOCUS_IN:
+		check_disk()
 
 
 ## The BN checkout to use: --bn, $BN_PATH, the saved path, or a
@@ -256,8 +274,10 @@ func load_index(path: String) -> void:
 	var ws_problem := Workspace.check_root(ws, path)
 	index = DataIndex.load_bn(path, settings.mods, null, "" if ws_problem else ws)
 	session = EditSession.new(index, Workspace.open(ws, path))
+	session.map_edited.connect(_on_map_edited)
 	_palette_editor.setup(session)
 	_browser.set_index(index)
+	_disk_banner.hide()
 	_status.text = "Loaded %d files from %s (%s) in %d ms. Workspace: %s. Pick a map in the Browser." % [
 		index.file_count, path, ", ".join(index.mods), Time.get_ticks_msec() - t,
 		ws if not ws_problem else "unusable, " + ws_problem]
@@ -318,6 +338,7 @@ func _add_tab(doc: MapDocument) -> OpenMap:
 	doc.cells_changed.connect(_on_doc_cells_changed.bind(m))
 	doc.changed.connect(_on_doc_changed.bind(m))
 	doc.overlay_changed.connect(_on_overlay_changed.bind(m))
+	doc.levels_changed.connect(_on_levels_changed.bind(m))
 	_update_neighbors(m)
 	_canvas_area.add_child(m.canvas)
 	maps.append(m)
@@ -563,9 +584,13 @@ func set_place(m: OpenMap, place: BuildingLevels.Place) -> void:
 	m.canvas.fit()
 	if m == current_map():
 		_update_level_controls()
+		# The Problems tab shows the building's findings.
+		_update_problems()
 
 
-## Sees the current map as placed by building [param i] of the toolbar's list.
+## Sees the current map as placed by building [param i] of the toolbar's
+## list. An item for a mutable special (listed after the places) instead
+## offers its pieces' maps (see show_mutable_pieces).
 func set_level_place(i: int) -> void:
 	var m := current_map()
 	if m == null or _updating_levels:
@@ -573,6 +598,33 @@ func set_level_place(i: int) -> void:
 	var places := BuildingLevels.places(index, m.ref)
 	if i >= 0 and i < places.size():
 		set_place(m, places[i])
+		return
+	var what: Variant = _level_picker.get_item_metadata(i) if i >= 0 and i < _level_picker.item_count else null
+	if what is String and index.buildings.has(what):
+		show_mutable_pieces(index.buildings[what])
+		_update_level_controls()
+
+
+## Lists mutable special [param b]'s pieces with their mapgens in a menu;
+## choosing one opens that map. Its pieces are placed by rules, not at
+## points, so the map gets no place: no neighbours, ghost or levels.
+func show_mutable_pieces(b: DataIndex.Building) -> void:
+	_mutable_menu.clear()
+	_mutable_refs.clear()
+	for t in b.tiles:
+		var refs := BuildingLevels.mapgens(index, t.oter)
+		if refs.is_empty():
+			_mutable_menu.add_item("%s   (no mapgen)" % t.oter)
+			_mutable_menu.set_item_disabled(_mutable_menu.item_count - 1, true)
+			_mutable_refs.append(null)
+		for r in refs:
+			_mutable_menu.add_item("%s   %s #%d%s" % [t.oter, r.source.path, r.source.index,
+					"   (never used: disabled)" if r.disabled else ""])
+			_mutable_refs.append(r)
+	_status.text = "%s is a mutable special: its pieces are placed by rules, not at fixed points, so it has no levels to show. Pick a piece to open its map." % b.id
+	if is_inside_tree():
+		_mutable_menu.position = Vector2i(get_global_mouse_position()) + get_window().position
+		_mutable_menu.popup()
 
 
 ## Goes [param dz] levels up (+) or down (-). See go_to_level.
@@ -795,6 +847,14 @@ func _update_level_controls() -> void:
 	else:
 		_z_spin.set_value_no_signal(0)
 		_level_picker.tooltip_text = "No city_building / overmap_special places this map." if m else ""
+	var mutables := BuildingLevels.mutable_specials(index, m.ref) if m else ([] as Array[DataIndex.Building])
+	for b in mutables:
+		_level_picker.add_item("%s (mutable special)" % b.id)
+		_level_picker.set_item_metadata(_level_picker.item_count - 1, b.id)
+	if not mutables.is_empty():
+		_level_picker.disabled = false
+		_level_picker.tooltip_text += "%sMutable specials (%s) place this map by rules, not at fixed points: no neighbours, ghost or levels; pick one to open its other pieces." % [
+				" " if _level_picker.tooltip_text else "", ", ".join(mutables.map(func(b: DataIndex.Building) -> String: return b.id))]
 	_updating_levels = false
 
 
@@ -828,6 +888,7 @@ func _update_placed(m: OpenMap) -> void:
 			n.ascii = n.shape(m.ascii)
 	if not list.is_empty() or not m.canvas.placed.is_empty():
 		m.canvas.placed = list
+	_update_roof_hints(m)
 
 
 ## Draws every map as its building places it (turned), read-only; or as it
@@ -864,24 +925,50 @@ func _update_ghosts(m: OpenMap) -> void:
 				continue
 			if not drawn.has(n.ref):
 				drawn[n.ref] = _render_ref(n.ref)
-			n.ascii = n.shape(drawn[n.ref])
-			var grid := stairs.grid_for(n.ref) if n.ref.method == "json" else null
-			if grid == null:
-				continue
-			var bit := Stairs.UP if dz < 0 else Stairs.LANDING
-			for t in n.tiles:
-				var at := n.ref.position_of(t.tile.oter)
-				for c in grid.cells(at, bit):
-					var cell := n.to_piece(at * MapgenResolver.OMT_SIZE + c)
-					if cell.x >= 0:
-						n.stairs.append(cell)
-				for c in grid.cells(at, Stairs.ELEVATOR):
-					var cell := n.to_piece(at * MapgenResolver.OMT_SIZE + c)
-					if cell.x >= 0:
-						n.elevators.append(cell)
+			_draw_ghost(n, drawn[n.ref], stairs, dz)
 	m.canvas.ghost_above = dz > 0
 	m.canvas.ghost_dim = settings.ghost_dim
 	m.canvas.ghosts = list
+	_update_roof_hints(m)
+
+
+## Outlines where [param m], a roof, and the ghost level under it disagree
+## (RoofHints): shown with the level below as the ghost.
+func _update_roof_hints(m: OpenMap) -> void:
+	var hints := {}
+	if m.place and settings.ghost < 0 and RoofHints.is_roof(m.place, m.ref):
+		var top := []
+		for n in m.canvas.placed:
+			if n.ascii:
+				top.append([n.ascii, n.cell])
+		if top.is_empty():
+			top.append([m.ascii, Vector2i.ZERO])
+		hints = RoofHints.find(top, m.canvas.ghosts)
+	if not hints.is_empty() or not m.canvas.roof_hints.is_empty():
+		m.canvas.roof_hints = hints
+
+
+## Gives ghost piece [param n] its look, cut from [param whole] (its map
+## drawn), and marks its stairs to the level [param dz] away and its
+## elevator floor.
+func _draw_ghost(n: LevelNav.Neighbor, whole: AsciiMap, stairs: Stairs, dz: int) -> void:
+	n.ascii = n.shape(whole)
+	n.stairs.clear()
+	n.elevators.clear()
+	var grid := stairs.grid_for(n.ref) if n.ref.method == "json" else null
+	if grid == null:
+		return
+	var bit := Stairs.UP if dz < 0 else Stairs.LANDING
+	for t in n.tiles:
+		var at := n.ref.position_of(t.tile.oter)
+		for c in grid.cells(at, bit):
+			var cell := n.to_piece(at * MapgenResolver.OMT_SIZE + c)
+			if cell.x >= 0:
+				n.stairs.append(cell)
+		for c in grid.cells(at, Stairs.ELEVATOR):
+			var cell := n.to_piece(at * MapgenResolver.OMT_SIZE + c)
+			if cell.x >= 0:
+				n.elevators.append(cell)
 
 
 ## Shows the level below (-1), above (1) or no ghost (0) under every map.
@@ -915,6 +1002,61 @@ func _refresh_open_neighbors(m: OpenMap) -> void:
 		if n.ref and session.docs.any(func(d: MapDocument) -> bool: return d.ref == n.ref):
 			n.ascii = n.shape(_render_ref(n.ref))
 	m.canvas.queue_redraw()
+
+
+## An open map changed: the current map's neighbours and ghost pieces
+## drawn from it redraw on the next frame (other tabs redraw theirs when
+## shown, see _refresh_open_neighbors).
+func _on_map_edited(ref: DataIndex.MapgenRef) -> void:
+	_edited_refs[ref] = true
+	set_process(true)
+
+
+## Another level of [param m]'s building changed, so its findings did.
+func _on_levels_changed(m: OpenMap) -> void:
+	if m == current_map():
+		_levels_stale = true
+		set_process(true)
+
+
+func _process(_delta: float) -> void:
+	flush_level_views()
+	set_process(false)
+
+
+## Redraws the current map's neighbour and ghost pieces drawn from maps
+## edited since the last call (each map rendered once), and its findings
+## if another level changed. Runs at most once a frame (_process).
+func flush_level_views() -> void:
+	var edited := _edited_refs
+	_edited_refs = {}
+	var m := current_map()
+	if m == null:
+		_levels_stale = false
+		return
+	var drawn := {}
+	var render := func(ref: DataIndex.MapgenRef) -> AsciiMap:
+		if not drawn.has(ref):
+			drawn[ref] = _render_ref(ref)
+		return drawn[ref]
+	var redraw := false
+	for n in m.canvas.neighbors:
+		if n.ref and edited.has(n.ref):
+			n.ascii = n.shape(render.call(n.ref))
+			redraw = true
+	var stairs: Stairs = null
+	for n in m.canvas.ghosts:
+		if n.ref and edited.has(n.ref):
+			if stairs == null:
+				stairs = Stairs.new(index, session.objects.object_for)
+			_draw_ghost(n, render.call(n.ref), stairs, settings.ghost)
+			redraw = true
+	if redraw:
+		_update_roof_hints(m)
+		m.canvas.queue_redraw()
+	if _levels_stale:
+		_levels_stale = false
+		_update_problems()
 
 
 ## How [param ref] looks, with the open document's edits if it is open.
@@ -1355,6 +1497,10 @@ func _update_tab_titles() -> void:
 func _update_problems() -> void:
 	var m := current_map()
 	var found: Array[Validator.Finding] = m.doc.findings() if m else ([] as Array[Validator.Finding])
+	if m and m.place:
+		# The building's own findings, for the place the map is seen at.
+		found.append_array(Validator.validate_building(index, m.place.building))
+		found = Validator.sorted(found)
 	var n := Validator.count(found)
 	_problems_button.visible = m != null
 	var parts := PackedStringArray()
@@ -1501,10 +1647,6 @@ func _on_tab_changed(i: int) -> void:
 		elif BuildingLevels.places(index, m.ref).size() > 1:
 			_status.text += "   (placed by several buildings: pick one in the toolbar)"
 		_refresh_open_neighbors(m)
-		if m.place:
-			# The stair check reads the other levels, which may have been
-			# edited in their own tabs.
-			m.doc.forget_findings()
 	_update_level_controls()
 	_update_problems()
 	_update_brush_label()
@@ -1676,12 +1818,114 @@ func _update_edit_menu() -> void:
 			m == null or m.doc.chunk_id().is_empty())
 
 
+# --- Files changed on disk ----------------------------------------------------
+
+## Looks for files another program (the MCP server) changed on disk (see
+## EditSession.external_changes): with no unsaved edits, reloads the data
+## at once, keeping the open tabs; else shows a banner offering to reload
+## (losing the edits) or keep them (save then refuses, as before). Runs
+## every DISK_CHECK_SECONDS and when the window gains focus. Returns the
+## files found.
+func check_disk() -> PackedStringArray:
+	if session == null or index == null:
+		return PackedStringArray()
+	# A dialog working on the loaded data finishes first.
+	for d: Window in [_mods_dialog, _new_symbol_dialog, _computer_dialog, _new_map_dialog, _unsaved_dialog,
+			_door_dialog, _new_level_dialog, _new_building_dialog]:
+		if d.visible:
+			return PackedStringArray()
+	var changed := session.external_changes()
+	if changed.is_empty():
+		return changed
+	var shown := ", ".join(changed.slice(0, 3)) + (" and %d more" % (changed.size() - 3) if changed.size() > 3 else "")
+	var dirty := _all_dirty()
+	if dirty.is_empty():
+		reload_from_disk()
+		_status.text = "Reloaded: %s changed on disk (saved by the MCP server or another editor?). %s" % [
+			shown, _status.text]
+	else:
+		_disk_label.text = "%s changed on disk. You have unsaved edits in %s; saving them would overwrite it." % [
+			shown, ", ".join(dirty)]
+		_disk_banner.show()
+		_canvas_area.move_child(_disk_banner, -1)
+	if _sync_dialog.visible:
+		_sync_dialog.setup(session)
+	return changed
+
+
+## The banner's "Keep mine": stop asking about the changes seen so far.
+func keep_disk_edits() -> void:
+	_disk_banner.hide()
+	if session:
+		session.accept_external()
+		_status.text = "Kept your edits. Saving a file that changed on disk is refused; reload (F5) to take the disk's version."
+
+
+## Loads the data again (dropping unsaved edits) and reopens the open tabs
+## where they were: the same file + index + title (else the same title in
+## that file), with each tab's building place, brush and view. A tab whose
+## map is gone is dropped and named in the status bar.
+func reload_from_disk() -> void:
+	if index == null:
+		return
+	var tabs := []
+	for m in maps:
+		tabs.append({"path": m.ref.source.path, "index": m.ref.source.index, "title": m.ref.title(),
+				"building": m.place.building.id if m.place else "", "origin": m.place.origin if m.place else Vector3i.ZERO,
+				"brush": m.brush, "cell_size": m.canvas.cell_size, "origin_px": m.canvas.origin})
+	var current := _tabs.current_tab
+	load_index(index.bn_path)
+	var dropped := PackedStringArray()
+	var reopened: Array[OpenMap] = []
+	for t: Dictionary in tabs:
+		var ref := _find_again(t.path, t.index, t.title)
+		var m: OpenMap = open_ref(ref) if ref else null
+		if m == null:
+			dropped.append(t.title)
+			reopened.append(null)
+			continue
+		reopened.append(m)
+		if t.building:
+			for p in BuildingLevels.places(index, m.ref):
+				if p.building.id == t.building and p.origin == t.origin:
+					set_place(m, p)
+		m.brush = t.brush
+		m.canvas.cell_size = t.cell_size
+		m.canvas.origin = t.origin_px
+		# _add_tab fits the view deferred; put it back after that.
+		m.canvas.set_deferred("cell_size", t.cell_size)
+		m.canvas.set_deferred("origin", t.origin_px)
+	if current >= 0 and current < reopened.size() and reopened[current]:
+		_tabs.current_tab = maps.find(reopened[current])
+	elif not maps.is_empty():
+		_tabs.current_tab = 0
+	_on_tab_changed(_tabs.current_tab)
+	if not dropped.is_empty():
+		_status.text = "Closed %s: no longer in %s." % [", ".join(dropped), "its file" if dropped.size() == 1 else "their files"]
+
+
+## The mapgen at [param path] #[param i] titled [param title] after a
+## reload, else the first one titled so in that file, else null.
+func _find_again(path: String, i: int, title: String) -> DataIndex.MapgenRef:
+	var same_title: DataIndex.MapgenRef = null
+	for r in index.mapgens:
+		if r.source.path != path or r.title() != title:
+			continue
+		if r.source.index == i:
+			return r
+		if same_title == null:
+			same_title = r
+	return same_title
+
+
 ## The Sync window pushed or discarded files. A push leaves the loaded data
 ## as it was (BN now has the same content); a discarded copy's content is
 ## still loaded, so reload when that's safe.
 func _on_sync_files_changed(reload_needed: bool) -> void:
 	_browser.refresh()
 	_update_tab_titles()
+	# Its writes to the workspace aren't another program's.
+	session.accept_external()
 	if not reload_needed:
 		_status.text = "Pushed into %s. Review and commit there." % index.bn_path
 	elif maps.is_empty():
@@ -1876,6 +2120,30 @@ func _build_ui() -> void:
 	_empty_label.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	_empty_label.grow_vertical = Control.GROW_DIRECTION_BOTH
 	_canvas_area.add_child(_empty_label)
+	_disk_banner = PanelContainer.new()
+	_disk_banner.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+	var banner_row := HBoxContainer.new()
+	_disk_banner.add_child(banner_row)
+	_disk_label = _label("")
+	_disk_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_disk_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_disk_label.add_theme_color_override("font_color", Color(1, 0.8, 0.4))
+	banner_row.add_child(_disk_label)
+	var reload_button := Button.new()
+	reload_button.text = "Reload (lose my edits)"
+	reload_button.pressed.connect(reload_from_disk)
+	banner_row.add_child(reload_button)
+	var keep_button := Button.new()
+	keep_button.text = "Keep mine"
+	keep_button.pressed.connect(keep_disk_edits)
+	banner_row.add_child(keep_button)
+	_disk_banner.hide()
+	_canvas_area.add_child(_disk_banner)
+	_disk_timer = Timer.new()
+	_disk_timer.wait_time = DISK_CHECK_SECONDS
+	_disk_timer.autostart = true
+	_disk_timer.timeout.connect(check_disk)
+	add_child(_disk_timer)
 	var layer_bar := HBoxContainer.new()
 	left.add_child(layer_bar)
 	layer_bar.add_child(_label(" Placements:"))
@@ -1962,6 +2230,11 @@ func _build_ui() -> void:
 	_computer_dialog.computer_edited.connect(func(key: String) -> void:
 		_status.text = "Changed the computer of '%s'." % key)
 	add_child(_computer_dialog)
+	_mutable_menu = PopupMenu.new()
+	_mutable_menu.index_pressed.connect(func(i: int) -> void:
+		if i < _mutable_refs.size() and _mutable_refs[i]:
+			open_ref(_mutable_refs[i]))
+	add_child(_mutable_menu)
 	_level_menu = PopupMenu.new()
 	_level_menu.id_pressed.connect(func(i: int) -> void: open_level_tile(_level_tile, i))
 	add_child(_level_menu)

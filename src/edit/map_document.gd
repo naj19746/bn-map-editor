@@ -21,6 +21,9 @@ signal changed(full: bool)
 ## Something outside this map that its nested chunks draw from changed (a
 ## chunk or a palette of one), so chunk_overlay() is new.
 signal overlay_changed
+## Another level of a building placing this map changed (EditSession tells
+## it), so its stair and elevator findings were forgotten.
+signal levels_changed
 
 ## Where a missing object member goes, relative to the others.
 const MEMBER_ORDER := ["mapgensize", "fill_ter", "rows", "palettes", "terrain", "furniture", "computers",
@@ -742,6 +745,12 @@ func refresh_overlay() -> void:
 	_overlay = null
 	forget_findings()
 	overlay_changed.emit()
+
+
+## Another open map of one of this map's buildings changed.
+func other_level_changed() -> void:
+	forget_findings()
+	levels_changed.emit()
 
 
 func forget_findings() -> void:

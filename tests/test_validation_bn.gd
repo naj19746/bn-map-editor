@@ -103,3 +103,24 @@ func test_core_validates() -> void:
 	check_eq(counts.get("ELEVATOR", 0), 5, "elevator controls offering no other floor (warnings)")
 	check_eq(counts.get("ELEVATOR_OFFSET", 0), 18, "controls with no car beside them, or floors too far off")
 	check_eq(counts.get("ELEVATOR_ON", 0), 0, "elevator_on with no powerless controls on the level")
+
+
+## Stage 11d: every core building validates with no errors (overmap terrain
+## ids, duplicated points) and every tile has something to draw it; the
+## city_buildings no region's city list names are notes. An independent
+## Python pass over data/json at BN 39f4883093 finds 400 of 406 city_building
+## ids in a city list (the other 6 spawn by other routes).
+func test_core_buildings() -> void:
+	var index := _core_index()
+	if index == null:
+		return
+	var counts := {}
+	var errors := PackedStringArray()
+	for id: String in index.buildings:
+		for f in Validator.validate_building(index, index.buildings[id]):
+			var code: String = Validator.Code.keys()[f.code]
+			counts[code] = counts.get(code, 0) + 1
+			if f.severity != Validator.Severity.NOTE and errors.size() < MAX_REPORTED:
+				errors.append(f.describe())
+	check_eq(errors, PackedStringArray(), "no errors or warnings")
+	check_eq(counts, {"CITY_LIST": 6}, "unlisted city_buildings")

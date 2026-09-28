@@ -46,6 +46,7 @@ enum Code {
 	DISABLED, SPANS_BACK, OUTSIDE_CHUNK, CHUNK_ROTATION, OVERHANG, CONDITIONAL, UNUSED_KEY_ID,
 	DOOR_ELSEWHERE, OTHER_LOCKED, SHARED_DOOR, EDGE_CONSOLE, CHUNK_CONSOLE, CONSOLE_OVERHANG,
 	STAIRS, STAIRS_OFFSET, STAIRS_NO_TILE, ELEVATOR, ELEVATOR_OFFSET, ELEVATOR_ON,
+	CITY_LIST, BAD_TERRAIN, DUPLICATE_POINT, NO_MAPGEN,
 }
 
 const NOT_CHECKED := "Not checked yet: sign and graffiti snippets, zone types and factions, mapgen " \
@@ -133,6 +134,11 @@ class Finding:
 	## the finding is selected, as ConsoleReachView.build's arguments after
 	## the index ([size, grids, cells, computer]); else empty.
 	var view: Array = []
+	## For a finding about a building (validate_building): its id.
+	var building := ""
+	## For a stair or elevator finding: the other levels' mapgens it is
+	## about (DataIndex.MapgenRef), so a client can open them.
+	var levels: Array = []
 
 	## "error", "warning" or "note".
 	func severity_name() -> String:
@@ -154,12 +160,15 @@ class Finding:
 					return "the stairs lead nowhere"
 				if code == Code.ELEVATOR:
 					return "the elevator goes nowhere"
+				if code == Code.NO_MAPGEN:
+					return "BN shows an error when it generates the tile, and fills it with floor"
 				return "BN silently skips it"
 		return "works, but oddly"
 
 	## One line: "error: <text> (BN won't load this map)".
 	func describe() -> String:
-		var where := "palette %s: " % palette if palette and target == Target.PALETTE_KEY else ""
+		var where := "palette %s: " % palette if palette and target == Target.PALETTE_KEY \
+				else "building %s: " % building if building else ""
 		return "%s: %s%s (%s)" % [severity_name(), where, text, reaction()]
 
 
@@ -222,6 +231,22 @@ static func validate_palettes(p_index: DataIndex, ids: PackedStringArray) -> Arr
 	return out
 
 
+## Every finding for building [param b] (a city_building or
+## overmap_special), as overmap_special::check and the city generator see
+## it: a city_building no region's city list names (NOTE); for a fixed
+## special, an "overmaps" terrain that doesn't exist and a point listed
+## twice (ERROR, reported on load), and a tile nothing draws (WARNING; see
+## DataIndex.has_mapgen_for). Not checked: "locations", connections, a
+## rotating terrain named without its rotation.
+static func validate_building(p_index: DataIndex, b: DataIndex.Building) -> Array[Finding]:
+	var v := Validator.new()
+	v.index = p_index
+	v._check_building(b)
+	for f in v.findings:
+		f.building = b.id
+	return v.findings
+
+
 ## [param list] with the errors first, then warnings, then notes (stable).
 static func sorted(list: Array[Finding]) -> Array[Finding]:
 	var out: Array[Finding] = []
@@ -238,6 +263,35 @@ static func count(list: Array[Finding]) -> Array[int]:
 	for f in list:
 		out[f.severity] += 1
 	return out
+
+
+# --- Buildings -----------------------------------------------------------------
+
+func _check_building(b: DataIndex.Building) -> void:
+	if b.type == "city_building" and not index.city_listed.has(b.id):
+		_add(Severity.NOTE, Code.CITY_LIST, "no region's city list (%s) names it, so cities don't place it; it spawns only if something else does (a mod's overmap rules, a Lua hook, another special)" % ", ".join(DataIndex.CITY_LISTS))
+	if b.mutable:
+		return
+	var points := {}
+	var oters := {}
+	for t in b.tiles:
+		if points.has(t.point):
+			if points[t.point] == 1:
+				_error(false, Code.DUPLICATE_POINT, "point (%d, %d, %d) is listed more than once in \"overmaps\"; the last one is used" % [
+						t.point.x, t.point.y, t.point.z])
+			points[t.point] += 1
+			continue
+		points[t.point] = 1
+		if t.oter.is_empty() or oters.has(t.oter):
+			continue
+		oters[t.oter] = true
+		var named := t.oter + ("_" + t.dir if t.dir else "")
+		if not index.is_overmap_terrain_id(t.oter) and not index.is_overmap_terrain_id(named):
+			_error(false, Code.BAD_TERRAIN, "\"overmaps\" names terrain \"%s\" (at (%d, %d, %d)), which no overmap_terrain defines" % [
+					named, t.point.x, t.point.y, t.point.z])
+		elif not index.has_mapgen_for(t.oter):
+			_add(Severity.WARNING, Code.NO_MAPGEN, "no mapgen draws %s (at (%d, %d, %d))" % [t.oter, t.point.x,
+					t.point.y, t.point.z])
 
 
 # --- Maps ----------------------------------------------------------------------
@@ -1074,17 +1128,23 @@ func _check_stairs(ref: DataIndex.MapgenRef, grid: Stairs.Grid, stairs: Stairs) 
 	_name_places(seen)
 
 
-## Adds [param pair] ([severity, text, code]) at map cell [param cell] for
-## [param place], or counts the place in the finding [param seen] already
-## has with the same text.
+## Adds [param pair] ([severity, text, code, the other levels' mapgens])
+## at map cell [param cell] for [param place], or counts the place in the
+## finding [param seen] already has with the same text.
 func _add_at_place(seen: Dictionary, place: BuildingLevels.Place, pair: Array, cell: Vector2i) -> void:
 	var text: String = pair[1]
+	var f: Finding
 	if seen.has(text):
 		seen[text][1].append(place.label())
-		return
-	_to(Target.CELL, "")
-	_cell_target(cell)
-	seen[text] = [_add(pair[0], pair[2], text), [place.label()]]
+		f = seen[text][0]
+	else:
+		_to(Target.CELL, "")
+		_cell_target(cell)
+		f = _add(pair[0], pair[2], text)
+		seen[text] = [f, [place.label()]]
+	for r: DataIndex.MapgenRef in pair[3]:
+		if not f.levels.has(r):
+			f.levels.append(r)
 
 
 ## Puts the first place, and how many others, before each text of
@@ -1097,7 +1157,7 @@ func _name_places(seen: Dictionary) -> void:
 				"" if where.size() == 2 else "s"] if where.size() > 1 else "", text]
 
 
-## [severity, text, code] for the stairs [param mine] (tile-local cells) of tile
+## [severity, text, code, mapgens] for the stairs [param mine] (tile-local cells) of tile
 ## [param bt] ([param id]) against the tile [param dz] levels away.
 ## [param offset] is the tile's first cell in the map ([param multi]: one
 ## of several tiles); texts give map cells.
@@ -1110,7 +1170,7 @@ func _stair_pairs(id: String, multi: bool, offset: Vector2i, bt: DataIndex.Build
 	var level := "the tile %s (z %d)" % ["above" if dz > 0 else "below", bt.point.z + dz]
 	if other == null:
 		out.append([Severity.NOTE, "%s: %s has no tile %s (z %d); they connect only if what the overmap puts there (another special, a lab, ...) has stairs %s" % [
-				what, place.building.id, "above" if dz > 0 else "below", bt.point.z + dz, "down" if dz > 0 else "up"], Code.STAIRS_NO_TILE])
+				what, place.building.id, "above" if dz > 0 else "below", bt.point.z + dz, "down" if dz > 0 else "up"], Code.STAIRS_NO_TILE, []])
 		return out
 	var refs: Array[DataIndex.MapgenRef] = []
 	for r in BuildingLevels.mapgens(index, other.oter):
@@ -1118,7 +1178,7 @@ func _stair_pairs(id: String, multi: bool, offset: Vector2i, bt: DataIndex.Build
 			refs.append(r)
 	if refs.is_empty():
 		out.append([Severity.WARNING, "%s: no mapgen draws %s, %s, so it has no stairs back" % [
-				what, other.oter, level], Code.STAIRS])
+				what, other.oter, level], Code.STAIRS, []])
 		return out
 	var turns := _turns(other.dir) - _turns(bt.dir)
 	for i in refs.size():
@@ -1133,14 +1193,14 @@ func _stair_pairs(id: String, multi: bool, offset: Vector2i, bt: DataIndex.Build
 			name += " (mapgen %d of %d, weight %d)" % [i + 1, refs.size(), refs[i].weight]
 		if theirs.is_empty():
 			out.append([Severity.WARNING, "%s: %s, %s, has no stairs %s anywhere in the tile; BN drops the player at the same x,y" % [
-					what, name, level, "down" if dz > 0 else "up"], Code.STAIRS])
+					what, name, level, "down" if dz > 0 else "up"], Code.STAIRS, [refs[i]]])
 		elif not mine.any(func(c: Vector2i) -> bool: return theirs.has(c)):
 			var near: Vector2i = theirs.keys()[0]
 			for c: Vector2i in theirs:
 				if _dist(c, mine[0]) < _dist(near, mine[0]):
 					near = c
 			out.append([Severity.NOTE, "%s: %s, %s, has its stairs %s elsewhere, e.g. over (%d, %d); BN takes the player to the nearest" % [
-					what, name, level, "down" if dz > 0 else "up", offset.x + near.x, offset.y + near.y], Code.STAIRS_OFFSET])
+					what, name, level, "down" if dz > 0 else "up", offset.x + near.x, offset.y + near.y], Code.STAIRS_OFFSET, [refs[i]]])
 	return out
 
 
@@ -1164,19 +1224,19 @@ func _check_elevators(ref: DataIndex.MapgenRef, grid: Stairs.Grid, stairs: Stair
 			if bt == null or bt.oter != id:
 				continue
 			var controls := grid.cells(at, Stairs.CONTROL)
-			## text -> [severity, code, cells]
+			## text -> [severity, code, cells, mapgens]
 			var by_text := {}
 			for c in controls:
 				for pair in _elevator_findings(grid, at, c, bt, place, stairs):
 					if not by_text.has(pair[1]):
-						by_text[pair[1]] = [pair[0], pair[2], [] as Array[Vector2i]]
+						by_text[pair[1]] = [pair[0], pair[2], [] as Array[Vector2i], pair[3]]
 					by_text[pair[1]][2].append(c)
 			for text: String in by_text:
 				var cells: Array[Vector2i] = by_text[text][2]
 				var what := "elevator controls at %s%s" % [_cells_text(cells, at * OMT_CELLS),
 						" (tile %s)" % id if ref.ids.size() > 1 else ""]
-				_add_at_place(seen, place, [by_text[text][0], "%s: %s" % [what, text], by_text[text][1]],
-						at * OMT_CELLS + cells[0])
+				_add_at_place(seen, place, [by_text[text][0], "%s: %s" % [what, text], by_text[text][1],
+						by_text[text][3]], at * OMT_CELLS + cells[0])
 	_name_places(seen)
 	if places.is_empty():
 		return
@@ -1197,7 +1257,7 @@ func _check_elevators(ref: DataIndex.MapgenRef, grid: Stairs.Grid, stairs: Stair
 			break
 
 
-## [severity, text, code] for the elevator control at tile-local cell
+## [severity, text, code, mapgens] for the elevator control at tile-local cell
 ## [param c] of tile [param at] (building tile [param bt]).
 func _elevator_findings(grid: Stairs.Grid, at: Vector2i, c: Vector2i, bt: DataIndex.BuildingTile,
 		place: BuildingLevels.Place, stairs: Stairs) -> Array:
@@ -1212,14 +1272,20 @@ func _elevator_findings(grid: Stairs.Grid, at: Vector2i, c: Vector2i, bt: DataIn
 			if grid.at(Vector2i(x, y)) & Stairs.ELEVATOR:
 				car = true
 	if not car:
-		out.append([Severity.NOTE, "no elevator floor (ELEVATOR terrain) next to them, so the player can't stand in the car to ride it", Code.ELEVATOR_OFFSET])
+		out.append([Severity.NOTE, "no elevator floor (ELEVATOR terrain) next to them, so the player can't stand in the car to ride it", Code.ELEVATOR_OFFSET, []])
 	var levels := stairs.elevator_levels(place.building, bt, c)
 	var reached := levels.keys().filter(func(z: int) -> bool: return not levels[z].near.is_empty())
 	if reached.is_empty():
 		var others := Array(place.building.levels()).filter(func(z: int) -> bool: return z != bt.point.z)
+		var refs := []
+		for z: int in others:
+			var t := place.building.at(Vector3i(bt.point.x, bt.point.y, z))
+			if t:
+				refs.append_array(BuildingLevels.mapgens(index, t.oter).filter(
+						func(x: DataIndex.MapgenRef) -> bool: return not x.disabled))
 		out.append([Severity.WARNING, "no other level of %s (%s) has elevator floor (ELEVATOR terrain) within %d cells of the same spot in its tile, so only this floor is offered" % [
 				place.building.id, "z " + ", ".join(others.map(str)) if not others.is_empty() else "it has one level",
-				Stairs.ELEVATOR_REACH], Code.ELEVATOR])
+				Stairs.ELEVATOR_REACH], Code.ELEVATOR, refs])
 	for z: int in levels:
 		for f: Array in levels[z].far:
 			var r: DataIndex.MapgenRef = f[0]
@@ -1229,7 +1295,7 @@ func _elevator_findings(grid: Stairs.Grid, at: Vector2i, c: Vector2i, bt: DataIn
 			if enabled.size() > 1:
 				name += " (mapgen %d of %d, weight %d)" % [enabled.find(r) + 1, enabled.size(), r.weight]
 			out.append([Severity.NOTE, "%s (z %d) has its elevator floor farther than %d cells off, e.g. at (%d, %d); BN doesn't offer that floor" % [
-					name, z, Stairs.ELEVATOR_REACH, o.x + f[1].x, o.y + f[1].y], Code.ELEVATOR_OFFSET])
+					name, z, Stairs.ELEVATOR_REACH, o.x + f[1].x, o.y + f[1].y], Code.ELEVATOR_OFFSET, [r]])
 	return out
 
 
