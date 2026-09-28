@@ -2203,6 +2203,34 @@ Stage 11 - Loose ends of the level work, and editor housekeeping (planned 2026-0
        then refuses as now). The Sync window refreshes on the same trigger.
      - Accept: a stair finding on z 1 goes away when the stairs are painted on z 2 in another
        tab; a workspace file rewritten by a second EditSession is picked up without F5.
+     - Reviewed 2026-09-28 after 11a/11b (against edit_session.gd, json_file.gd, main.gd,
+       mcp_tools.gd); changes:
+       - Which maps to notify: elevator findings (11b) read every level of the building at the
+         same x, y, and the tiles next to it (the 3-cell reach crosses tile edges), not only
+         z +/- 1. Simpler and enough: when a map changes, EditSession notifies every other open
+         map that shares a building with it (BuildingLevels.places); they forget their findings
+         and redraw their neighbours / ghost. EditSession._on_map_changed is bound to the chunk
+         id today; bind the ref too (a ref, not the document: no cycle).
+       - Redraws: a neighbour or ghost piece is now LevelNav.Neighbor.shape() of the whole
+         render (cut and turned per tile, 11a), and the View as placed pieces of the current map
+         too; the throttled redraw renders each edited document once and re-shapes its pieces.
+       - "A clean file is read again at once" has no mechanism yet: EditSession._reindex_from_disk
+         only refreshes definitions it already has, by index, so an object the MCP server added
+         (create_mapgen, create_palette, create_building, new level tiles) or removed stays
+         unknown, and there is no per-file reload in DataIndex. Deviation: when a change is
+         found and nothing is dirty, reload the data (as File > Reload data, ~1-3 s for core)
+         and reopen the open tabs by file + index + title, keeping each tab's place, brush and
+         view; drop a tab whose object is gone, and say so. With dirty files, the banner as
+         planned.
+       - What to watch: the open files (JsonFile.changed_on_disk), plus the workspace's
+         manifest.json and the files it lists (by modification time), so a file the MCP server
+         created or saved that the editor doesn't have open is seen too.
+       - The MCP server the other way: today it only has an explicit reload tool. Add the same
+         check before each tools/call: files changed on disk and nothing dirty, reload
+         silently and add "reloaded": [files] to the answer; dirty, add a warning (save still
+         refuses, as now).
+       - Accept adds: a mapgen created by a second EditSession in a workspace file shows in the
+         editor's browser without F5; the MCP answer after an editor save says "reloaded".
    - 11d. Buildings as validated objects.
      - Validator.validate_building: a city_building no region's city list names (NOTE; 27 in
        core, most spawned by other routes, so the text says so), "overmaps" entries naming an
@@ -2219,6 +2247,17 @@ Stage 11 - Loose ends of the level work, and editor housekeeping (planned 2026-0
        the other levels involved, so a client can open them.
      - Accept: core has no errors from validate_building; the city-list note count matches 10d's
        379 of 406.
+     - Reviewed 2026-09-28 after 11a/11b; changes:
+       - The city-list count checks out (379 of 406 named, so 27 NOTEs).
+       - Stair and elevator findings (both) name the other levels' files + indexes in MCP.
+       - The Problems tab's building findings: also the elevator ones that concern the building
+         rather than one map (ELEVATOR_ON has no map-level twin; leave the per-map ones where
+         they are).
+       - Roof edges: compare in world orientation (LevelNav pieces with their turns, as the
+         ghost draws them), or a turned roof over an unturned floor gives false hints.
+       - Mutable specials: the Level picker lists their pieces, but BuildingLevels.places
+         leaves them out (no points), so choosing one only opens the piece's map; say so in the
+         picker, no neighbours or ghost.
    - 11e. Renames and removals.
      - Remove or rename a map's own symbol (renaming repaints its cells; one undo step), rename a
        palette key (PaletteImpact lists every map repainted), delete an unused palette (refused
@@ -2228,6 +2267,31 @@ Stage 11 - Loose ends of the level work, and editor housekeeping (planned 2026-0
      - MCP: rename_symbol; remove_symbol already exists.
      - Accept: renaming a core palette key in a temp workspace repaints every using map and each
        file's other objects stay byte-identical.
+     - Reviewed 2026-09-28 after 11a/11b (JsonFile has touch / append but no remove);
+       changes:
+       - Deleting an object is new: JsonFile needs remove(i), and every later object of the
+         file moves down one index. DataIndex.Source.index (mapgens, palettes, overmap_terrain,
+         buildings' overmaps_source), the open MapDocuments / PaletteDocuments of that file and
+         EditSession's _new_* tables all hold indexes, and so do MapDocument.object_index /
+         PaletteDocument.object_index and JsonFile's per-object original text and touched
+         marks: add DataIndex.shift_sources(rel, i, -1), shift the documents' object_index, and
+         have JsonFile.remove shift its own bookkeeping. Undo of a deletion puts the
+         object back at the same index (shift +1). Test with a palette in the middle of a
+         multi-object core file (every other object byte-identical, the maps after it still
+         open and saving to the right object).
+       - The overmap_terrain auto-fix as an undo step: the stub is appended to the file, and
+         undoing it is a remove of that object; refuse the undo (say why) when something was
+         appended after it (a new mapgen or level in the same file), rather than shifting.
+         The undo step belongs to the map's MapDocument (as planned) but changes the file and
+         the index (index.overmap_terrain, EditSession._new_overmap).
+       - Renaming a palette key: a map that defines the old key itself keeps its own meaning
+         (map keys win), so only maps without it are repainted; refuse when the new key is
+         defined by the palette, by one of its includes, or by any using map (itself or through
+         another palette): the cells would change meaning. PaletteImpact lists both groups.
+       - Renaming a map's own symbol: refuse a new key any of the map's palettes defines (same
+         reason), unless the user means to take the palette's meaning (not offered).
+       - MCP: rename_symbol, and rename_key for palettes (edit_palette_key doesn't rename);
+         delete_palette. All answer the maps repainted, like edit_palette_key.
    - 11f. UI polish.
      - The toolbar fits at 1280 px: the ghost picker, Dim and the level controls move into a
        Level toolbar group that collapses to a menu button when narrow (they need ~1800 px now).
@@ -2237,6 +2301,11 @@ Stage 11 - Loose ends of the level work, and editor housekeeping (planned 2026-0
      - Each chunk option in a list gets its own "Open", not just the drawn one.
      - The palette editor's list scrolls to the palette opened.
      - Accept: UI tests for each; a non-headless screenshot at 1280x800 with the full toolbar.
+     - Reviewed 2026-09-28 after 11a/11b; changes:
+       - The Level toolbar group takes 11a's View as placed as a toggle too (today only a check
+         item in the Level menu), next to the ghost picker and Dim.
+       - The screenshot accept also shows a map in View as placed with a ghost, to check the
+         elevator marks and turned ghost at 1280 px.
  Then the "Later milestones" list.
 
 Explicitly out of scope until the later milestones: tilesets, preview rolls, z-level linking (Stage 10), update_mapgen,
