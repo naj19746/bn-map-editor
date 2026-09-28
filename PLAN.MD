@@ -1599,9 +1599,69 @@ Stage 9 - MCP server (planned 2026-09-27).
    - 9c. Map edit tools: paint_cells / paint_rect, add_symbol, undo, save (workspace only; returns
      the object summary). Each call is one undo group (begin_group/end_group). Accept: paint, save,
      untouched objects byte-identical, undo, in a temp workspace.
+     - Reviewed 2026-09-28 against the code; changes:
+     - Two processes, one workspace (new, and first): the editor and the server can have the same
+       workspace open, but Workspace.write_file overwrites without looking, save_manifest writes the
+       manifest it read at startup (dropping entries the other process added since), and the
+       server's index never sees the editor's saves. Before any save tool: JsonFile keeps the sha256
+       of the bytes it read (or last wrote) and where from; EditSession.save refuses when the file
+       it would replace (the workspace copy, or BN's file for one read from BN, or a workspace copy
+       that appeared since) no longer matches: "changed on disk since it was read; reload".
+       Workspace re-reads manifest.json and merges before writing it. The editor gets the same
+       guard (it only matters with two processes, but it's the same code). A `reload` tool rebuilds
+       the index and session (refused while there are unsaved edits unless discard: true), and
+       get_map / sync_status say when a file that was read changed on disk.
+     - Tools: paint_cells {map, key, cells: [[x, y], ...]}, paint_rect {map, key, x, y, x2, y2,
+       filled (default true)} (Shapes.rect), paint_line (Shapes.line), fill {map, key, x, y}
+       (Shapes.flood), and paint_rows {map, x, y, rows: ["....", ...], skip: char}: text laid over
+       the rows at x, y, a skip character (default none) leaving cells alone, split with CellText
+       (the natural form for an LLM; one call redraws a room). add_symbol {map, key, terrain,
+       furniture} (check_new_symbol), remove_symbol (remove_own_symbol), undo / redo {map}, save
+       {file} (or every dirty file), discard {file} (closes its maps: EditSession._release_file
+       puts the index back). "map" is the id/variant or file/index pair the read tools take.
+     - Checks the GUI never needed: MapDocument.paint takes any key (the brush is always defined).
+       The paint tools refuse a key the map doesn't define (resolved.symbols, or " " / "." which
+       leave fill_ter), a key of the wrong shape (check_key_shape), and cells outside the map
+       (set_cells skips them silently; the tool says so). A map without rows gets them (set_cells
+       creates them).
+     - Every edit tool runs inside begin_group/end_group (paint_rows paints each key in turn) and
+       returns {changed: cell count, undo: name, problems: counts, dirty: true}, not the whole map:
+       get_map shows it. undo/redo answer the step's name, or that there is nothing to undo.
+     - save returns WorkspaceSync.status(rel)'s state and object changes plus last_notes (lossy
+       re-encodings), and refuses on save_problems (a placement crossing a tile) as the editor
+       does. Without json_formatter it fails with the build command.
+     - Accept adds: a save refused after the file changed on disk (written by the test between
+       read and save); a manifest entry added by "another process" survives a save; paint_rows
+       with skip; an undefined key refused; discard restores the index.
    - 9d. Placements and new maps: add_placement / update_placement (kept inside one OMT, as
      PlacementTool does), create_mapgen (with the overmap_terrain auto-fix). Accept: handler tests
      plus a round trip of the saved file.
+     - Reviewed 2026-09-28; changes:
+     - A client's coordinates are not clamped: PlacementTool clamps a drag (Placement.clamp_move /
+       clamp_span) because a mouse is imprecise, but silently moving an explicit x/y would hide
+       the mistake. add_placement / update_placement use MapDocument.check_placement, refuse what
+       BN would refuse (CROSSES), and answer the entry's status and problems (e.g. DROPPED: BN
+       skips it silently) so the client can fix it.
+     - Tools: add_placement {map, member, entry} (member one of Placement.KINDS),
+       update_placement {map, member, index, fields (null removes a key), move_to: [x, y]}
+       (set_placement_fields; move_to goes through place_at(moved_only), so ranges keep their
+       form), remove_placement {map, member, index} (missing from the plan; later indices shift,
+       the answer says so). Ids in fields are checked as the Placements inspector does
+       (Validator.field_id_kind / is_known) and answered as warnings, not refusals (the editor
+       allows unknown ids too).
+     - Also on the map object (small; the documents already do them): set_map_palettes {map,
+       palettes} (MapDocument.set_palettes; unknown ids refused) and set_symbol_mapping {map, key,
+       kind, value} for a map's own nested/monster/items/... pieces (MapDocument.set_own_piece,
+       Placement.MAPPING_KINDS; null removes).
+     - create_mapgen {file, om_terrain: an id or a grid of ids | nested_id + mapgensize, fill_ter,
+       palettes, add_overmap_terrain (default true)} fills EditSession.NewMapgen and calls
+       check_new_mapgen / create_mapgen: the file must be a relative .json path inside a loaded mod
+       (a new file, or appended to an existing one, copied into the workspace on save). Answers
+       what get_map would, plus the overmap_terrain ids added. The new map is in the index at once
+       (search_maps finds it) and leaves it again on discard.
+     - Accept adds: an entry crossing a tile refused, a dropped one added with its warning;
+       move_to keeping a [lo, hi] range; remove shifting indices; create_mapgen into a new file and
+       appended to an existing BN file (its other objects byte-identical after save), then discard.
    - 9e. Palettes: edit_palette_key (returns the PaletteImpact list, so the client sees which maps
      change before saving). Accept: impact names the using maps, as test_palettes does.
    - Later/optional: resources (BN's mapgen.md, the format notes at the top of this plan).
