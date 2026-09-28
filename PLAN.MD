@@ -1523,6 +1523,48 @@ Development stages (each ends with a headless-testable acceptance check):
      window: dispensary_2 '&' (own toilet, a new items piece, the Add buttons wrapping).
    - Not done: traps and the other kinds (above); PaletteImpact needed no change (key_signature
      covers every extra).
+Stage 9 - MCP server (planned 2026-09-27).
+   - Goal: an MCP client (e.g. Claude Code) can browse, validate and edit BN mapgen through the
+     editor's core, under the editor's rules: saves go to the workspace only, through BnJson and
+     JsonFormatter; nothing writes into BN.
+   - Decided (2026-09-27): headless only for v1 (no attaching to a running editor; that would be a
+     TCP listener in main.gd, later). get_map returns both raw rows + legend and AsciiMap text.
+   - Transport: a stdio MCP server in GDScript, `godot --headless --no-header --path . -s
+     tools/mcp_server.gd -- [--bn <path>] [--workspace <path>]`. One process per session, so the
+     index is built once. It reuses EditSession, MapDocument, PaletteDocument, Validator,
+     MapgenResolver, DataIndex and WorkspaceSync; no second implementation.
+   - Checked (spike, Godot 4.7.2):
+     - OS.read_string_from_stdin(n) blocks under -s and returns what is available up to n bytes: a
+       100000-char line came back as 65540 + 34470 with n = 65536. The server buffers until "\n".
+     - printraw reaches a pipe at once (no buffering until exit); push_error goes to stderr only.
+     - --no-header drops the engine banner; stdout then holds only what the script writes.
+       --quiet is wrong: it silences printraw too. FileAccess on /dev/stdout hangs.
+     - src/ has no print() calls, so nothing else writes to stdout.
+   - 9a. Protocol and a thin slice (the first session; stop here with tests passing):
+     - src/mcp/ (no nodes): McpServer (reads stdin until "\n", JSON-RPC 2.0: initialize,
+       tools/list, tools/call, error replies), McpTools (name -> input schema -> handler; handlers
+       are called directly in tests). tools/mcp_server.gd loads BN and the workspace from its args.
+     - Two tools: search_maps (om_terrain / nested id / file) and get_map (rows, legend with each
+       symbol's source, placements, and AsciiMap text).
+     - tools/mcp_server.sh launcher, a sample .mcp.json entry, a CLAUDE.md section.
+     - Accept: tests/test_mcp.gd calls both handlers against a TempTree BN; one end-to-end test
+       pipes initialize + tools/list + tools/call lines into the -s process and reads the replies.
+       Usable from Claude Code after this step.
+   - 9b. The other read tools: get_palette, validate_map / validate_palette (Validator findings with
+     severity and "won't load"), lookup_id (Validator.id_candidates), list_mods, sync_status
+     (WorkspaceSync summary). Accept: handler tests; validate_map on every core map returns no
+     errors (as test_validation_bn).
+   - 9c. Map edit tools: paint_cells / paint_rect, add_symbol, undo, save (workspace only; returns
+     the object summary). Each call is one undo group (begin_group/end_group). Accept: paint, save,
+     untouched objects byte-identical, undo, in a temp workspace.
+   - 9d. Placements and new maps: add_placement / update_placement (kept inside one OMT, as
+     PlacementTool does), create_mapgen (with the overmap_terrain auto-fix). Accept: handler tests
+     plus a round trip of the saved file.
+   - 9e. Palettes: edit_palette_key (returns the PaletteImpact list, so the client sees which maps
+     change before saving). Accept: impact names the using maps, as test_palettes does.
+   - Later/optional: resources (BN's mapgen.md, the format notes at the top of this plan).
+   - Never: push. Pushing stays a human action in the Sync window (the one exception to "never
+     write into BN").
  Then the "Later milestones" list.
 
 Explicitly out of scope until the later milestones: tilesets, preview rolls, z-level linking, update_mapgen,
