@@ -124,7 +124,7 @@ func computer_state(key: String) -> String:
 		return "'%s' places no computer." % key
 	var b: ResolvedMapgen.Binding = info.extras.computers[-1]
 	if b.from_palette():
-		return "'%s''s computer is defined in %s; edit it there (as JSON in the palette editor)." % [key, b.source_label()]
+		return "'%s''s computer comes from %s; the palette editor can't edit computers yet." % [key, b.source_label()]
 	if not b.value is Dictionary:
 		return "'%s' places several computers; edit them as JSON." % key
 	return ""

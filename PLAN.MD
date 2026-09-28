@@ -1079,18 +1079,17 @@ Development stages (each ends with a headless-testable acceptance check):
        into the map's own definitions (the Stage 3 rule for new symbols), selects it as the brush and
        opens the editor. A selected computer symbol gets "Edit computer...".
      - Placements panel: ComputerEditor instead of raw JSON for place_computers, and Add.
-   - 8c. Reach display:
-     - With a computer selected, the canvas shows the stand cells, the radius cut at each stand
-       cell's OMT, target cells (solid if every stand cell reaches them, faded if only some do),
-       and wrong-type locked doors in range in red. Uses the rows plus the chunk overlay; doors from
-       "set"/place_terrain aren't included, and the panel says so.
+   - 8c. Reach display (revised after 8b, see "Checked after Stage 8b"):
+     - With a computer selected (the brush symbol places one, or a place_computers entry is
+       selected), the canvas shows, for every console of it: the stand cells, the reach area cut at
+       each stand cell's OMT, target cells (solid if every stand cell reaches them, faded if only
+       some do) and other locked doors in reach in red. Uses the rows plus the chunk overlay; doors
+       from "set"/place_terrain aren't included, and the panel says so.
      - On a door cell, "Control with a computer...": offer to swap it to a symbol with
        t_door_metal_locked (add_symbol), and if no unlock computer reaches it, highlight the cells
        where a new console would and place one there with the preset.
-     - "Can stand here" needs terrain move_cost in DataIndex (small). Without it, all 8 neighbours
-       count, which overstates reach.
-   - 8d. Later: computers in the palette editor (same control); computers inside chunks are judged
-     in each parent, through the overlay.
+   - 8d. Computers in the palette editor (same control); computers inside chunks judged in each
+     parent, through the overlay.
    - Accept: all 118 core computers go through the model and back to an equal value, and editing one
      option of a real map changes only its lines in the diff against BN. Core validates with 0
      computer errors, and the "no reachable door" warnings match an independent Python count (each
@@ -1152,8 +1151,56 @@ Development stages (each ends with a headless-testable acceptance check):
      - Found: Godot 4.7 doesn't emit a Range's value_changed outside the scene tree; UI tests emit
        it themselves.
    - Not done / open (8c, 8d): the canvas reach display, "Control with a computer..." on a door
-     cell, computers in the palette editor (the legend says a palette's computer is edited there
-     as JSON), chunk computers judged in their parents, "set"/place_terrain doors in reach.
+     cell, computers in the palette editor (the legend says it can't edit them yet), chunk computers judged in their parents, "set"/place_terrain doors in reach.
+ Checked after Stage 8b (2026-09-27, against BN 39f4883093 and core data; reviews 8c, 8d):
+   - Done early: "can stand here" (DataIndex TileDef.move_cost, passable()) went into 8a for the
+     validator, so 8c needs no index work. Validator.Reach already has what the display draws:
+     stands, targets per action, counts (how many stand cells reach each target, for solid vs
+     faded) and other_locked; MapDocument.console_reaches(key, data) gives it per console.
+   - 8c, the display:
+     - Cache console_reaches per change, like findings(): _draw runs on every hover, and a map can
+       have 22 consoles (multi-tile maps with consoles in core: 22).
+     - What "selected" means: the brush key when its symbol places a computer (the legend already
+       selects the brush), else the selected place_computers entry. Draw the reach under the
+       placement overlays and above the cells, with its own color per state; it only draws while
+       the Legend or Placements tab is showing the computer, so it doesn't hide the map otherwise.
+     - _draw is untested (CLAUDE.md): keep the shape work (which cells, which state) in a headless
+       class (a ConsoleReachView in src/view, from Reach + Computer.reach_rect) and test that; check
+       the drawing with a non-headless screenshot of police_station ("5" -> (2, 11), "6" -> (21, 6)).
+     - Radius 25 actions (open, release) cover most of an OMT (not all: a far corner can be ~32
+       away): draw the reach area's outline rather than shading every cell, so it stays readable.
+   - 8c, "Control with a computer...": right-click is only panning now (press/release, no menu).
+     A right-click that doesn't move (or Shift+F10 on the hovered cell) can open a cell menu with
+     this item, which also leaves room for later cell actions. The flow: if the cell's terrain
+     isn't t_door_metal_locked, offer to swap it to an existing symbol with that terrain
+     (matching_keys) or add one (add_symbol); then, if no unlock computer reaches it, arm a
+     "place console" mode (like PlacementTool.armed) that highlights every cell a console could go
+     (a stand cell next to it within 8 of the door, in the door's OMT, and the console cell not the
+     door itself) and, on click, adds a Door control symbol (or reuses an existing one with an
+     unlock option) and paints it. Esc cancels, as with Add placement.
+   - 8c accept (proposed): the headless view for police_station gives exactly the stand cells and
+     targets above, with the 25-radius and OMT cut tested on the fake BN; a main-scene test runs
+     "Control with a computer..." on a plain t_door_c cell of a fake map, ending in a painted
+     console, a t_door_metal_locked cell, and an empty Problems tab.
+   - 8d, palette computers: 5 core palettes define one (lab_loot_bionic_vault, lab_loot_serum_vault,
+     lab_palette_map_computer, school_palette: '6'; industrial_center_palette: 'A'), listed
+     directly by 18 maps. The palette editor shows other per-key kinds read-only and PaletteDocument edits only
+     terrain/furniture, so 8d needs PaletteDocument.computer()/set_computer() through its member
+     snapshots, the ComputerDialog taking either document, and PaletteImpact's "which maps change"
+     warning before applying (a computer edit changes every map using the key). The legend's
+     "Edit computer..." then opens the palette editor at the key instead of saying it can't.
+   - 8d, chunk computers: 32 chunk mapgens (22 chunk ids) define computers; 17 of those consoles
+     have door actions, and none of those chunks holds its target terrain directly (it comes
+     from palettes, or the parent). Every one of the 22 ids is placed directly by some map (37
+     placements). Today they're judged nowhere (the reach check skips chunks). Needed: ChunkOverlay
+     records each chunk console (cell after rotation, the computer JSON, the stamp), and
+     Validator.console_cells adds them, so they're judged in each parent like the map's own; the
+     finding points at the stamp's placement (as overlay findings do), and says "in chunk X". A
+     chunk opened on its own keeps no reach check (its doors may be in the parent). Accept: count
+     the parents' warnings over core with an independent pass (chunk rotation included), and look
+     at each one.
+   - Still unchecked after 8d: "set"/place_terrain doors (0 maps with their own consoles use them
+     in core, so a note is enough), elevator_on (1 object in core), and other z-levels.
  Then the "Later milestones" list.
 
 Explicitly out of scope until the later milestones: tilesets, preview rolls, z-level linking, update_mapgen,
