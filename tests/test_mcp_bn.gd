@@ -132,3 +132,34 @@ func test_core_edit_and_save() -> void:
 	check(back is Dictionary and back.errors == 0, "still valid: %s" % [back])
 	TempTree.remove(ws)
 
+
+## Stage 9e on core: a dry run on a widely used palette names its users
+## and leaves the palette as it was; a real edit, saved, changes only the
+## palette's object.
+func test_core_palette_edit() -> void:
+	var ws := TempTree.make({})
+	var tools := _tools(ws)
+	if tools == null:
+		return
+	var start := Time.get_ticks_msec()
+	var dry: Variant = tools.call_tool("edit_palette_key", {"id": "standard_domestic_palette", "key": "h",
+		"furniture": "f_stool", "dry_run": true, "limit": 5})
+	var ms := Time.get_ticks_msec() - start
+	if check(dry is Dictionary, "dry run: %s" % [dry.message if dry is McpTools.Failure else ""]):
+		check(dry.would_change.count > 50, "many houses use its chairs: %d" % dry.would_change.count)
+		check_eq(dry.would_change.maps.size(), 5)
+		check_eq(dry.key.h.furniture.value, "f_stool")
+	check(ms < 20000, "measured in %d ms" % ms)
+	var pal: Variant = tools.call_tool("get_palette", {"id": "standard_domestic_palette", "include_json": false})
+	check_eq(pal.keys.h.furniture.value, "f_chair", "a dry run edits nothing")
+	if not JsonFormatter.new().is_available():
+		skip("json_formatter not built (tools/build_json_formatter.sh)")
+		TempTree.remove(ws)
+		return
+	var r: Variant = tools.call_tool("edit_palette_key", {"id": "standard_domestic_palette", "key": "h",
+		"furniture": "f_stool"})
+	check(r is Dictionary and r.maps_changed.count == dry.would_change.count, "edit: %s" % [r])
+	var saved: Variant = tools.call_tool("save", {})
+	if check(saved is Dictionary, "save: %s" % [saved.message if saved is McpTools.Failure else ""]):
+		check_eq(saved.saved[0].changes, ["changed palette standard_domestic_palette"])
+	TempTree.remove(ws)

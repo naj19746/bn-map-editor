@@ -28,8 +28,9 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   fill, paint_rows, add_symbol, remove_symbol, undo, redo, add/update/remove_placement,
   set_map_palettes, set_symbol_mapping, create_mapgen (with "level": a building's new floor);
   save (workspace only; a map's file also saves its linked building file), discard, reload.
-  Levels: get_map's "levels", get_building, create_building. Stage 9 in PLAN.MD lists what comes
-  next (9e: palettes).
+  Levels: get_map's "levels", get_building, create_building. Palettes: edit_palette_key,
+  set_palette_includes (both answer PaletteImpact's changed maps; dry_run measures only),
+  create_palette, undo/redo with "palette".
 - The editor and the server may share a workspace: a save refuses when the file changed on disk
   since it was read (`EditSession.check_on_disk`), and manifest changes go through
   `Workspace.set_entry`, which re-reads manifest.json first.

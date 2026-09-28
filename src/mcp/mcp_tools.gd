@@ -90,6 +90,7 @@ func _init(p_loader := Callable()) -> void:
 	_add_edit_tools()
 	_add_placement_tools()
 	_add_level_tools()
+	_add_palette_tools()
 
 
 ## Loads BN at [param bn_path] (core plus [param mods]) with the workspace
@@ -527,18 +528,29 @@ func get_palette(args: Dictionary) -> Variant:
 	var sorted: Array = view.symbols.keys()
 	sorted.sort()
 	for key: String in sorted:
-		var sym := _symbol(view.symbols[key])
-		for kind: String in sym:
-			for b: Dictionary in (sym[kind] if sym[kind] is Array else [sym[kind]]):
-				if b.get("from") == ResolvedMapgen.SOURCE_MAP:
-					b["from"] = "this palette"
-		keys[key] = sym
+		keys[key] = _palette_symbol(view.symbols[key])
 	out["keys"] = keys
 	if not view.problems.is_empty():
 		out["problems"] = Array(view.problems)
+	var doc := session.palette_doc_for(def)
+	if doc:
+		out["dirty"] = session.is_dirty(def.source.path)
+		if doc.can_undo():
+			out["undo"] = doc.undo_name()
 	if args.get("include_json", true):
 		out["json"] = data
 	return out
+
+
+## A palette's key as get_palette shows it: the palette's own definitions
+## are "from": "this palette".
+static func _palette_symbol(info: ResolvedMapgen.SymbolInfo) -> Dictionary:
+	var sym := _symbol(info)
+	for kind: String in sym:
+		for b: Dictionary in (sym[kind] if sym[kind] is Array else [sym[kind]]):
+			if b.get("from") == ResolvedMapgen.SOURCE_MAP:
+				b["from"] = "this palette"
+	return sym
 
 
 # --- validate_map / validate_palette -------------------------------------------
@@ -744,8 +756,10 @@ func _add_edit_tools() -> void:
 			+ "any, then applies). Cells still using it stay as they are.", _map_props({
 		"key": _string("The symbol."),
 	}), ["key"], remove_symbol)
-	_add("undo", "Undo the map's last edit (edits made in this session only).", _map_props({}), [], undo)
-	_add("redo", "Redo the map's last undone edit.", _map_props({}), [], redo)
+	var palette := _string("Instead of a map: a palette id (its edits have an undo history of their own).")
+	_add("undo", "Undo the map's (or palette's) last edit (edits made in this session only).",
+			_map_props({"palette": palette}), [], undo)
+	_add("redo", "Redo the map's (or palette's) last undone edit.", _map_props({"palette": palette}), [], redo)
 	_add("save", "Write a file with unsaved edits to the workspace (formatted as BN's json_formatter does; " \
 			+ "objects not edited stay byte-identical), or every such file. Never writes into BN. Refused when " \
 			+ "the file changed on disk since it was read (reload), or when a placement would stop BN loading " \
@@ -998,6 +1012,8 @@ func remove_symbol(args: Dictionary) -> Variant:
 # --- undo / redo ---------------------------------------------------------------
 
 func undo(args: Dictionary) -> Variant:
+	if args.has("palette"):
+		return _palette_history(args.palette, true)
 	var got: Variant = _edit_doc(args)
 	if got is Failure:
 		return got
@@ -1010,6 +1026,8 @@ func undo(args: Dictionary) -> Variant:
 
 
 func redo(args: Dictionary) -> Variant:
+	if args.has("palette"):
+		return _palette_history(args.palette, false)
 	var got: Variant = _edit_doc(args)
 	if got is Failure:
 		return got
@@ -1509,3 +1527,212 @@ func create_building(args: Dictionary) -> Variant:
 		out["note"] = "In no city list: cities won't spawn it until a region's city list names it."
 	return out
 
+
+# --- Palettes ------------------------------------------------------------------
+
+func _add_palette_tools() -> void:
+	var dry_run := _bool("Only measure which maps would change; the palette stays as it is (default false).")
+	var limit := _int("Changed maps listed at most (default %d; the count is always given)." % DEFAULT_LIMIT)
+	_add("edit_palette_key", "Change what a palette key places: terrain, furniture, a computer, or its other " \
+			+ "mappings (nested, items, monsters, ...). A palette is shared: the answer lists every map whose " \
+			+ "rows use a symbol the edit changes, and the maps placing a nested chunk that changes (\"via\"); " \
+			+ "dry_run measures that without editing. Omitted fields stay as they are. One undo step (undo " \
+			+ "with palette); save writes the palette's file.", {
+		"id": _string("The palette id."),
+		"key": _string("The symbol."),
+		"terrain": _any("A terrain id, or any mapgen value (a distribution, ...); \"\" or null removes the " \
+				+ "palette's own terrain for the key."),
+		"furniture": _any("A furniture id or mapgen value; \"\" or null removes it."),
+		"computer": _any("A computer object, as the palette's \"computers\" takes it; null removes it. A new " \
+				+ "computer on a key the palette gives no terrain gets t_console too."),
+		"mappings": _object("Other mappings by kind (%s), each one piece object or a list of them; a null " \
+				% ", ".join(Placement.MAPPING_KINDS.keys()) + "value removes the palette's own mapping of that kind."),
+		"dry_run": dry_run,
+		"limit": limit,
+	}, ["id", "key"], edit_palette_key)
+	_add("set_palette_includes", "Replace the palettes a palette includes (later ones win over earlier ones; " \
+			+ "its own keys win over all). Answers the maps that change, as edit_palette_key does.", {
+		"id": _string("The palette id."),
+		"palettes": _array("Palette ids (or distribution/param objects); [] removes the list."),
+		"dry_run": dry_run,
+		"limit": limit,
+	}, ["id", "palettes"], set_palette_includes)
+	_add("create_palette", "Create an empty palette in a new file or appended to an existing one; fill it " \
+			+ "with edit_palette_key / set_palette_includes and point maps at it with set_map_palettes. Unsaved " \
+			+ "until save; discard removes it again.", {
+		"file": _string("Relative .json path inside a loaded mod, e.g. data/json/mapgen_palettes/my_pal.json."),
+		"id": _string("The new palette id."),
+	}, ["file", "id"], create_palette)
+
+
+## The palette BN uses for [param id], opened for editing, or a Failure.
+func _palette_doc(id: String) -> Variant:
+	if _session() == null:
+		return _no_session()
+	var got: Variant = _find_palette(id)
+	if got is Failure:
+		return got
+	var doc := session.open_palette(got)
+	if doc == null:
+		return Failure.new("Can't open palette %s: %s" % [id, session.last_error])
+	return doc
+
+
+## The maps of [param affected] (sorted by id), the first [param limit]
+## named with what changes in them.
+func _impact(affected: Array[PaletteImpact.Affected], limit: int) -> Dictionary:
+	var list := affected.duplicate()
+	list.sort_custom(func(a: PaletteImpact.Affected, b: PaletteImpact.Affected) -> bool:
+		return a.ref.title() < b.ref.title())
+	var maps := []
+	for a: PaletteImpact.Affected in list.slice(0, limit):
+		var e := {"id": a.ref.title(), "file": a.ref.source.path, "index": a.ref.source.index}
+		var variants := session.index.mapgens_for(a.ref.title())
+		if variants.size() > 1:
+			e["variant"] = variants.find(a.ref)
+		if a.via:
+			e["via_chunk"] = a.via
+		else:
+			e["symbols"] = Array(a.keys)
+		maps.append(e)
+	var out := {"count": affected.size(), "maps": maps}
+	if affected.size() > limit:
+		out["not_listed"] = affected.size() - limit
+	return out
+
+
+## Measures [param c] on [param doc], commits it unless dry_run, and
+## answers the maps it changes, [param key]'s meaning afterwards (when
+## given), and the palette's findings (those about [param key] only, when
+## given).
+func _palette_edit(doc: PaletteDocument, c: PaletteDocument.Change, args: Dictionary, key := "") -> Dictionary:
+	var dry: bool = args.get("dry_run", false)
+	var affected := session.impact_of(doc, c)
+	var out := {"palette": doc.id, "file": doc.file.rel_path}
+	if dry:
+		out["dry_run"] = true
+	out["would_change" if dry else "maps_changed"] = _impact(affected, _limit(args))
+	doc.apply(c, true)
+	if key:
+		var info: ResolvedMapgen.SymbolInfo = doc.view().symbols.get(key)
+		out["key"] = {key: _palette_symbol(info) if info else null}
+	var list: Array[Validator.Finding] = []
+	for f in Validator.validate_palette(session.index, doc.id, doc.palette()):
+		if not key or f.key == key:
+			list.append(f)
+	doc.apply(c, false)
+	if not list.is_empty():
+		out["findings"] = Validator.sorted(list).map(_finding)
+	if not dry:
+		doc.commit(c)
+		out["undo"] = doc.undo_name()
+		out["dirty"] = session.is_dirty(doc.file.rel_path)
+	return out
+
+
+func edit_palette_key(args: Dictionary) -> Variant:
+	var got: Variant = _palette_doc(args.id)
+	if got is Failure:
+		return got
+	var doc: PaletteDocument = got
+	var key: String = args.key
+	var mappings: Dictionary = args.get("mappings", {})
+	var steps: Array[Callable] = []
+	var problem := ""
+	if args.has("terrain") or args.has("furniture"):
+		var tiles := []
+		for kind: String in PaletteDocument.TILE_KINDS:
+			var v: Variant = args.get(kind)
+			if args.has(kind) and not (v == null or v is String or v is Dictionary or v is Array):
+				return Failure.new("%s is an id or a mapgen value (object or list), not %s." % [kind, BnJson.stringify(v)])
+			# null keeps a tile in PaletteDocument; here null removes it.
+			tiles.append(("" if v == null else v) if args.has(kind) else null)
+		problem = doc.check_tiles(key, tiles[0], tiles[1])
+		steps.append(doc.build_set_tiles.bind(key, tiles[0], tiles[1]))
+	if not problem and args.has("computer"):
+		if args.computer is Dictionary:
+			problem = doc.check_computer(key)
+			steps.append(doc.build_set_computer.bind(key, args.computer))
+		elif args.computer == null:
+			problem = doc.check_piece(key, "computers", null)
+			steps.append(doc.build_set_piece.bind(key, "computers", null))
+		else:
+			problem = "computer is an object, or null to remove it."
+	for kind: String in mappings:
+		if problem:
+			break
+		if not Placement.MAPPING_KINDS.has(kind):
+			problem = "Unknown mapping kind \"%s\" (one of %s)." % [kind, ", ".join(Placement.MAPPING_KINDS.keys())]
+		else:
+			problem = doc.check_piece(key, kind, mappings[kind])
+			steps.append(doc.build_set_piece.bind(key, kind, mappings[kind]))
+	if problem:
+		return Failure.new(problem)
+	if steps.is_empty():
+		return Failure.new("Give terrain, furniture, computer or mappings to change.")
+	var c := doc.build_steps("Edit '%s'" % key, steps)
+	if c == null:
+		return Failure.new("Nothing changes: palette %s already has that for '%s'." % [doc.id, key])
+	return _palette_edit(doc, c, args, key)
+
+
+func set_palette_includes(args: Dictionary) -> Variant:
+	var got: Variant = _palette_doc(args.id)
+	if got is Failure:
+		return got
+	var doc: PaletteDocument = got
+	var list: Array = args.palettes
+	for v: Variant in list:
+		if not (v is String or v is Dictionary):
+			return Failure.new("A palettes entry is an id or a distribution/param object, not %s." % BnJson.stringify(v))
+	var params: Variant = doc.palette().get("parameters")
+	var ids := DataIndex.palette_options({"palettes": list, "parameters": params if params is Dictionary else {}})
+	for id in ids:
+		if session.index.palette(id) == null:
+			return Failure.new("Unknown palette \"%s\"; lookup_id with kind \"palette\" finds ids." % id)
+	if session.index.palette_closure(ids).has(doc.id):
+		return Failure.new("Palette %s would include itself." % doc.id)
+	_exact_palettes(ids)
+	var c := doc.build_set_includes(list)
+	if c == null:
+		return Failure.new("Nothing changes: palette %s already includes that." % doc.id)
+	var out := _palette_edit(doc, c, args)
+	if not args.get("dry_run", false):
+		out["includes"] = doc.includes().duplicate(true)
+	return out
+
+
+func create_palette(args: Dictionary) -> Variant:
+	if _session() == null:
+		return _no_session()
+	var problem := session.check_new_palette(args.file, args.id)
+	if problem:
+		return Failure.new(problem)
+	var doc := session.create_palette(args.file, args.id)
+	if doc == null:
+		return Failure.new(session.last_error)
+	return {"palette": doc.id, "file": doc.file.rel_path, "index": doc.object_index,
+		"dirty": session.is_dirty(doc.file.rel_path)}
+
+
+## undo ([param back]) or redo in palette [param id].
+func _palette_history(id: String, back: bool) -> Variant:
+	if _session() == null:
+		return _no_session()
+	var got: Variant = _find_palette(id)
+	if got is Failure:
+		return got
+	var doc := session.palette_doc_for(got)
+	var what := "undo" if back else "redo"
+	if doc == null or not (doc.can_undo() if back else doc.can_redo()):
+		return Failure.new("Nothing to %s in palette %s (this session's edits only)." % [what, id])
+	var out := {"palette": id}
+	if back:
+		out["undone"] = doc.undo_name()
+		doc.undo()
+		out["redo"] = doc.redo_name()
+	else:
+		out["redone"] = doc.redo_name()
+		doc.redo()
+	out["dirty"] = session.is_dirty(doc.file.rel_path)
+	return out

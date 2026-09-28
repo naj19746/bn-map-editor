@@ -265,6 +265,31 @@ func build_set_includes(list: Array, name := "Includes") -> Change:
 			ObjectMembers.set_member(p, "palettes", copy, MEMBER_ORDER))
 
 
+## One change named [param name] made of [param steps]: callables returning
+## a Change (or null), each built on the state the ones before it leave.
+## Null when nothing changes.
+func build_steps(name: String, steps: Array[Callable]) -> Change:
+	var done: Array[Change] = []
+	for step in steps:
+		var c: Change = step.call()
+		if c:
+			apply(c, true)
+			done.append(c)
+	for i in range(done.size() - 1, -1, -1):
+		apply(done[i], false)
+	if done.is_empty():
+		return null
+	var out := Change.new()
+	out.name = name
+	out.before = done[0].before
+	out.order_before = done[0].order_before
+	out.after = done[-1].after
+	out.order_after = done[-1].order_after
+	if JSON.stringify(out.before) == JSON.stringify(out.after) and out.order_before == out.order_after:
+		return null
+	return out
+
+
 ## Applies [param c] and records it for undo.
 func commit(c: Change) -> void:
 	if c == null:

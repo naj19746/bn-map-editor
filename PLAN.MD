@@ -1727,6 +1727,30 @@ Stage 9 - MCP server (planned 2026-09-27).
        server's saves until F5 (it refuses to overwrite them, as above).
    - 9e. Palettes: edit_palette_key (returns the PaletteImpact list, so the client sees which maps
      change before saving). Accept: impact names the using maps, as test_palettes does.
+   - 9e done (2026-09-28).
+     - Tools: edit_palette_key {id, key, terrain, furniture, computer, mappings: {kind: value},
+       dry_run, limit}: omitted fields stay, "" / null removes (PaletteDocument's null = keep is
+       mapped); every part is one undo step (PaletteDocument.build_steps chains the build_* changes,
+       each built on the state the ones before leave). It answers maps_changed (or would_change
+       with dry_run): count and the first `limit` maps by id with their symbols or via_chunk
+       (PaletteImpact through EditSession.impact_of, as the palette editor asks), the key as it
+       reads afterwards, and the palette's findings about the key (unknown ids are reported, not
+       refused, except terrain/furniture ids, which check_tiles refuses as the editor does).
+     - Added beyond the plan (small, same path): set_palette_includes (unknown ids and a palette
+       that would include itself refused; answers the impact), create_palette
+       (EditSession.check_new_palette / create_palette), undo/redo take "palette" instead of a map
+       (a palette's history is its own, as in the editor). get_palette answers dirty/undo for an
+       open palette. The edit tools edit the definition in effect (a mod's replacing one); the
+       server instructions say palettes are shared and to dry_run first.
+     - Not done: moving a map's own symbol into a palette (EditSession.move_symbol) has no tool;
+       undo/redo of a palette don't measure their impact.
+     - Result: tests/test_mcp_palettes.gd (test_palettes' fixture plus a map placing the chunk):
+       impact names cabin/house for '#', and bunker/cabin/chunk/house plus plain via the chunk for
+       '.', dry runs change nothing, limit, several kinds in one step with ints kept, removal,
+       a computer with t_console, refusals, includes, palette undo/redo followed by maps, a new
+       palette saved/discarded, a palette in a mapgen file saved as the only changed object.
+       tests/test_mcp_bn.gd::test_core_palette_edit: a dry run on standard_domestic_palette's 'h'
+       names its many users; the edit saved changes only the palette object.
    - Later/optional: resources (BN's mapgen.md, the format notes at the top of this plan).
    - Never: push. Pushing stays a human action in the Sync window (the one exception to "never
      write into BN").
@@ -2077,9 +2101,9 @@ Stage 10 - Z-levels, up and down (added 2026-09-28; from the later milestones). 
    - TODO (added 2026-09-28): draw turned multi-tile pieces turned. Moved to Stage 11a, with
      showing the current map turned.
 Stage 11 - Loose ends of the level work, and editor housekeeping (planned 2026-09-28).
-   - Scope: the TODOs and "Not done" items left by Stages 3-10 that group well, except 9e
-     (edit_palette_key, still its own step). Tilesets, the preview roll, conditional pieces and the
-     Select tool stay in the later milestones: each is a stage of its own.
+   - Scope: the TODOs and "Not done" items left by Stages 3-10 that group well (9e is done).
+     Tilesets, the preview roll, conditional pieces and the Select tool stay in the later
+     milestones: each is a stage of its own.
    - 11a. Turned levels (Stage 10's "draw turned multi-tile pieces turned" TODO and the open
      question of the current map's turn).
      - A neighbour or ghost piece drawn by a grid mapgen whose tiles the building places turned is

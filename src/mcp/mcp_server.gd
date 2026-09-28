@@ -31,7 +31,9 @@ const INSTRUCTIONS := "Browse, validate and edit Cataclysm-BN JSON mapgen throug
 		+ "step per call, until save writes the file to the workspace; nothing is ever written into the BN " \
 		+ "checkout (a person pushes workspace files into BN from the editor). A building's floors are " \
 		+ "separate om_terrain maps stacked by a city_building / overmap_special: get_map's levels and " \
-		+ "get_building show them, create_mapgen's level adds one."
+		+ "get_building show them, create_mapgen's level adds one. Palettes are shared by many maps: " \
+		+ "edit_palette_key and set_palette_includes answer every map an edit changes (dry_run first), " \
+		+ "and add_symbol keeps a map's own symbols out of palettes."
 
 var tools: McpTools
 ## Where replies go; stdout by default. Tests collect them instead.
