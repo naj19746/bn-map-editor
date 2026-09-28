@@ -38,7 +38,7 @@ enum Menu {
 	NEW_MAP, NEW_CHUNK, SAVE, SAVE_ALL, WORKSPACE,
 	UNDO, REDO, NEW_SYMBOL, NEW_COMPUTER, ADD_OVERMAP, PALETTES, CHUNK_PARENTS,
 	SYNC,
-	LEVEL_UP, LEVEL_DOWN, NEW_LEVEL_UP, NEW_ROOF, NEW_LEVEL_DOWN, NEW_BUILDING,
+	LEVEL_UP, LEVEL_DOWN, NEW_LEVEL_UP, NEW_ROOF, NEW_LEVEL_DOWN, NEW_BUILDING, VIEW_PLACED,
 	CELL_PICK, CELL_EDIT_COMPUTER, CELL_DOOR_COMPUTER,
 }
 
@@ -101,6 +101,9 @@ var show_furniture := true
 var show_keys := false
 ## Draw the nested chunks each map places over its cells.
 var show_chunks := true
+## Draw each map turned as its building places it, read-only (Level > View
+## as placed).
+var view_placed := false
 var season := 0
 ## Placement layers shown (bit 1 << Placement.Layer).
 var layer_mask := (1 << Placement.LAYER_NAMES.size()) - 1
@@ -399,6 +402,9 @@ func _update_brush_label() -> void:
 
 
 func _on_cell_pressed(cell: Vector2i, alt: bool, shift: bool, m: OpenMap) -> void:
+	if not m.canvas.placed.is_empty() and not alt and tool.kind != MapTool.Kind.PICK:
+		_status.text = "The map is drawn as placed (turned): read-only. Level > View as placed to edit it; Pick and Alt+click still work."
+		return
 	if m.console_door.x >= 0 and not alt:
 		place_door_console(cell)
 		return
@@ -443,6 +449,7 @@ func _on_picked(key: String) -> void:
 func _on_doc_cells_changed(cells: Array[Vector2i], m: OpenMap) -> void:
 	m.ascii.update_cells(cells)
 	m.canvas.queue_redraw()
+	_update_placed(m)
 	_update_reach(m)
 
 
@@ -455,6 +462,7 @@ func _on_doc_changed(full: bool, m: OpenMap) -> void:
 		m.ascii.refresh()
 	m.canvas.placements = m.doc.placements()
 	m.canvas.queue_redraw()
+	_update_placed(m)
 	_update_tab_titles()
 	if m == current_map():
 		if m.sel_member and m.doc.placement(m.sel_member, m.sel_index) == null:
@@ -483,6 +491,7 @@ func _on_overlay_changed(m: OpenMap) -> void:
 	if _update_overlay(m):
 		m.ascii.refresh()
 	m.canvas.queue_redraw()
+	_update_placed(m)
 	_update_reach(m)
 	if m == current_map():
 		_placements_panel.refresh()
@@ -795,6 +804,7 @@ func _update_neighbors(m: OpenMap) -> void:
 	_update_ghosts(m)
 	if m.place == null:
 		m.canvas.neighbors = [] as Array[LevelNav.Neighbor]
+		_update_placed(m)
 		return
 	var list := LevelNav.neighbors(index, m.place, m.ref, _open_refs())
 	# Big specials repeat a few generic maps (fields, forest) many times.
@@ -803,10 +813,35 @@ func _update_neighbors(m: OpenMap) -> void:
 		if n.ref:
 			if not drawn.has(n.ref):
 				drawn[n.ref] = _render_ref(n.ref)
-			n.ascii = drawn[n.ref]
-			if n.ascii and n.turns():
-				n.ascii = n.ascii.rotated(n.turns())
+			n.ascii = n.shape(drawn[n.ref])
 	m.canvas.neighbors = list
+	_update_placed(m)
+
+
+## Draws [param m] turned as its place puts it down when view_placed is on
+## (and a tile of it is turned), else as it is.
+func _update_placed(m: OpenMap) -> void:
+	var list: Array[LevelNav.Neighbor] = []
+	if view_placed and m.place:
+		list = LevelNav.placed(m.place, m.ref)
+		for n in list:
+			n.ascii = n.shape(m.ascii)
+	if not list.is_empty() or not m.canvas.placed.is_empty():
+		m.canvas.placed = list
+
+
+## Draws every map as its building places it (turned), read-only; or as it
+## is, for editing.
+func set_view_placed(on: bool) -> void:
+	view_placed = on
+	_level_menu_bar.set_item_checked(_level_menu_bar.get_item_index(Menu.VIEW_PLACED), on)
+	for m in maps:
+		_update_ghosts(m)
+		_update_placed(m)
+	var m := current_map()
+	if m and on:
+		_status.text = "Drawn as placed: read-only (Pick and Alt+click still work)." if not m.canvas.placed.is_empty() \
+				else "%s isn't turned where it is placed; it is drawn as it is." % m.ref.title()
 
 
 ## The mapgens open in tabs.
@@ -815,12 +850,13 @@ func _open_refs() -> Array:
 
 
 ## Draws the ghost level (settings.ghost) under [param m]: the whole level
-## below or above, with the stairs that lead to [param m]'s level.
+## below or above, with the stairs that lead to [param m]'s level and its
+## elevator floor.
 func _update_ghosts(m: OpenMap) -> void:
 	var list: Array[LevelNav.Neighbor] = []
 	var dz := settings.ghost
 	if m.place and dz != 0 and m.place.building.levels().has(m.place.origin.z + dz):
-		list = LevelNav.ghosts(index, m.place, m.ref, m.place.origin.z + dz, _open_refs())
+		list = LevelNav.ghosts(index, m.place, m.ref, m.place.origin.z + dz, _open_refs(), view_placed)
 		var stairs := Stairs.new(index, session.objects.object_for)
 		var drawn := {}
 		for n in list:
@@ -828,9 +864,7 @@ func _update_ghosts(m: OpenMap) -> void:
 				continue
 			if not drawn.has(n.ref):
 				drawn[n.ref] = _render_ref(n.ref)
-			n.ascii = drawn[n.ref]
-			if n.ascii and n.turns():
-				n.ascii = n.ascii.rotated(n.turns())
+			n.ascii = n.shape(drawn[n.ref])
 			var grid := stairs.grid_for(n.ref) if n.ref.method == "json" else null
 			if grid == null:
 				continue
@@ -838,8 +872,13 @@ func _update_ghosts(m: OpenMap) -> void:
 			for t in n.tiles:
 				var at := n.ref.position_of(t.tile.oter)
 				for c in grid.cells(at, bit):
-					var cell := at * MapgenResolver.OMT_SIZE + c
-					n.stairs.append(ChunkOverlay.rotate(cell, n.turns(), n.size))
+					var cell := n.to_piece(at * MapgenResolver.OMT_SIZE + c)
+					if cell.x >= 0:
+						n.stairs.append(cell)
+				for c in grid.cells(at, Stairs.ELEVATOR):
+					var cell := n.to_piece(at * MapgenResolver.OMT_SIZE + c)
+					if cell.x >= 0:
+						n.elevators.append(cell)
 	m.canvas.ghost_above = dz > 0
 	m.canvas.ghost_dim = settings.ghost_dim
 	m.canvas.ghosts = list
@@ -874,9 +913,7 @@ func _refresh_open_neighbors(m: OpenMap) -> void:
 	_update_ghosts(m)
 	for n in m.canvas.neighbors:
 		if n.ref and session.docs.any(func(d: MapDocument) -> bool: return d.ref == n.ref):
-			n.ascii = _render_ref(n.ref)
-			if n.ascii and n.turns():
-				n.ascii = n.ascii.rotated(n.turns())
+			n.ascii = n.shape(_render_ref(n.ref))
 	m.canvas.queue_redraw()
 
 
@@ -958,6 +995,8 @@ func open_cell_menu(cell: Vector2i) -> void:
 	_cell_menu.clear()
 	var key := m.doc.resolved.cells[cell.y][cell.x]
 	_cell_menu.add_item("Use '%s' as the brush" % LegendPanel._show_key(key), Menu.CELL_PICK)
+	if not m.canvas.placed.is_empty():
+		return  # Drawn as placed: read-only.
 	if m.doc.computer_source(key):
 		var why := _legend.computer_state(key)
 		_cell_menu.add_item("Edit computer '%s'..." % LegendPanel._show_key(key), Menu.CELL_EDIT_COMPUTER)
@@ -1600,6 +1639,8 @@ func _on_menu(id: int) -> void:
 			new_level(-1)
 		Menu.NEW_BUILDING:
 			new_building()
+		Menu.VIEW_PLACED:
+			set_view_placed(not view_placed)
 		Menu.SHOW_FURNITURE:
 			set_show_furniture(not show_furniture)
 		Menu.SHOW_KEYS:
@@ -1724,6 +1765,8 @@ func _build_ui() -> void:
 		["New level below...", Menu.NEW_LEVEL_DOWN, 0],
 		[],
 		["New building from this map...", Menu.NEW_BUILDING, 0],
+		[],
+		["View as placed (turned, read-only)", Menu.VIEW_PLACED, 0, true],
 	])
 	_level_menu_bar.about_to_popup.connect(_update_level_menu)
 	_view_menu = _menu(menu_bar, "View", [

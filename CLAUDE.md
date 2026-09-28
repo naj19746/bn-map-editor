@@ -51,8 +51,9 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   z-stacks: `Building`, `BuildingTile`, `buildings_using(oter)`; `overmaps_source`, the definition
   whose "overmaps" list is in effect), `BuildingLevels` (a map's places in buildings, each level's
   tiles and mapgens, the step up/down; new level ids and fill suggestions), `Stairs` (cells that may
-  hold stairs: every id choice, place_terrain/"set", every chunk pick; the Validator pairs them
-  with the levels above/below as game::find_stairs does), `CellText` (rows -> cells, BN's wcwidth rule),
+  hold stairs, elevator floor and elevator controls: every id choice, place_terrain/"set", every
+  chunk pick; the Validator pairs stairs with the levels above/below as game::find_stairs does,
+  and elevator controls with the floors iexamine::elevator offers), `CellText` (rows -> cells, BN's wcwidth rule),
   `Placement` (one place_*/"set" entry read BN's way: first-value anchor, dropped/crossing/reversed
   ranges, "set" in every OMT; `IntRange` keeps how a jmapgen_int is written), `ChunkOverlay` (the
   nested chunks a map places, laid over its cells in BN's order, rotation and recursion; footprints,
@@ -76,7 +77,8 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   tools/list, tools/call), `McpTools` (tool name -> schema -> handler, loading the session on first use).
 - `src/view/`: display logic without nodes, testable headless. `AsciiMap` (what each cell looks like,
   wall joining, hover text), `BnColors` (BN color names -> RGB), `LevelNav` (the rest of a
-  map's level drawn around it, and the ghost level under it), `ConsoleReachView` (what the canvas
+  map's level drawn around it, and the ghost level under it: each piece turned as placed, a
+  turned multi-tile map split per tile; `placed()`, the map itself as placed, for View as placed), `ConsoleReachView` (what the canvas
   draws for a selected computer: stand cells, reach outline, doors reached; where a new door
   console could go).
 - `src/ui/`: controls built in code (`MapCanvas`, `LegendPanel`, `MapBrowser`, `ModsDialog`,

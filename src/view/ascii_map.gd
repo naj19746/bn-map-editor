@@ -136,27 +136,31 @@ func update_cells(points: Array[Vector2i]) -> void:
 ## It has the chars, colors and states; [member resolved] stays the
 ## unturned map's, so don't look cells up by key in it.
 func rotated(turns: int) -> AsciiMap:
+	return piece(Rect2i(Vector2i.ZERO, size), turns)
+
+
+## Like rotated(), for the cells in [param rect] only (one overmap tile of
+## a bigger map, which BN turns on its own).
+func piece(rect: Rect2i, turns: int) -> AsciiMap:
 	turns = posmod(turns, 4)
+	rect = rect.intersection(Rect2i(Vector2i.ZERO, size))
 	var m := AsciiMap.new()
 	m.index = index
 	m.resolved = resolved
 	m.season = season
 	m.show_furniture = show_furniture
-	m.size = size if turns % 2 == 0 else Vector2i(size.y, size.x)
-	var n := size.x * size.y
+	var dim := rect.size
+	m.size = dim if turns % 2 == 0 else Vector2i(dim.y, dim.x)
+	var n := dim.x * dim.y
 	m.chars.resize(n)
 	m.fg.resize(n)
 	m.bg.resize(n)
 	m.states.resize(n)
 	m.see_through.resize(n)
-	for y in size.y:
-		for x in size.x:
-			var to := Vector2i(x, y)
-			match turns:
-				1: to = Vector2i(size.y - y - 1, x)
-				2: to = Vector2i(size.x - x - 1, size.y - y - 1)
-				3: to = Vector2i(y, size.x - x - 1)
-			var i := y * size.x + x
+	for y in dim.y:
+		for x in dim.x:
+			var to := ChunkOverlay.rotate(Vector2i(x, y), turns, dim)
+			var i := (rect.position.y + y) * size.x + rect.position.x + x
 			var j := to.y * m.size.x + to.x
 			var ch := chars[i]
 			for t in turns:

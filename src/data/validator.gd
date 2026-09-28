@@ -45,13 +45,13 @@ enum Code {
 	DROPPED, DROPPED_SET, ITEMS_CHANCE, COMPUTER_IGNORED, NO_OPTIONS, NO_STAND, NO_DOOR,
 	DISABLED, SPANS_BACK, OUTSIDE_CHUNK, CHUNK_ROTATION, OVERHANG, CONDITIONAL, UNUSED_KEY_ID,
 	DOOR_ELSEWHERE, OTHER_LOCKED, SHARED_DOOR, EDGE_CONSOLE, CHUNK_CONSOLE, CONSOLE_OVERHANG,
-	STAIRS, STAIRS_OFFSET, STAIRS_NO_TILE,
+	STAIRS, STAIRS_OFFSET, STAIRS_NO_TILE, ELEVATOR, ELEVATOR_OFFSET, ELEVATOR_ON,
 }
 
 const NOT_CHECKED := "Not checked yet: sign and graffiti snippets, zone types and factions, mapgen " \
 		+ "flags, parameter scopes and types, the PLANT rule for furniture outside sealed_item, " \
 		+ "paint on NO_PAINT terrain, joins; for computers, doors from \"set\"/place_terrain or on other " \
-		+ "z-levels, and elevator_on."
+		+ "z-levels."
 
 ## Kinds of ids, as [label, the id meaning "nothing"].
 const ID_KINDS := {
@@ -152,6 +152,8 @@ class Finding:
 					return "BN crashes if that tile isn't generated yet"
 				if code == Code.STAIRS:
 					return "the stairs lead nowhere"
+				if code == Code.ELEVATOR:
+					return "the elevator goes nowhere"
 				return "BN silently skips it"
 		return "works, but oddly"
 
@@ -182,8 +184,9 @@ var _console_texts := {}
 ## its chunk [param overlay] (null to skip the chunk checks). Palettes it
 ## uses are left to validate_palette(). With [param stairs], its stairs are
 ## paired with the levels above and below in every building placing it
-## (see _check_stairs); share one Stairs between maps to look each other
-## level up once.
+## (see _check_stairs), and its elevator controls with the building's other
+## levels (_check_elevators); share one Stairs between maps to look each
+## other level up once.
 static func validate_map(p_index: DataIndex, ref: DataIndex.MapgenRef, mapgen: Dictionary,
 		resolved: ResolvedMapgen, placements: Array[Placement], overlay: ChunkOverlay,
 		stairs: Stairs = null) -> Array[Finding]:
@@ -192,7 +195,9 @@ static func validate_map(p_index: DataIndex, ref: DataIndex.MapgenRef, mapgen: D
 	v._check_map(ref, mapgen, resolved, placements, overlay)
 	if stairs and ref and not ref.disabled and ref.kind == DataIndex.MapgenRef.OM_TERRAIN \
 			and mapgen.get("object") is Dictionary:
-		v._check_stairs(ref, stairs.grid_of(mapgen, resolved, overlay), stairs)
+		var grid := stairs.grid_of(mapgen, resolved, overlay)
+		v._check_stairs(ref, grid, stairs)
+		v._check_elevators(ref, grid, stairs, resolved, placements)
 	return v.findings
 
 
@@ -1065,13 +1070,26 @@ func _check_stairs(ref: DataIndex.MapgenRef, grid: Stairs.Grid, stairs: Stairs) 
 				if mine.is_empty():
 					continue
 				for pair in _stair_pairs(id, ref.ids.size() > 1, at * OMT_CELLS, bt, dz, mine, place, stairs):
-					var text: String = pair[1]
-					if seen.has(text):
-						seen[text][1].append(place.label())
-						continue
-					_to(Target.CELL, "")
-					_cell_target(at * OMT_CELLS + mine[0])
-					seen[text] = [_add(pair[0], pair[2], text), [place.label()]]
+					_add_at_place(seen, place, pair, at * OMT_CELLS + mine[0])
+	_name_places(seen)
+
+
+## Adds [param pair] ([severity, text, code]) at map cell [param cell] for
+## [param place], or counts the place in the finding [param seen] already
+## has with the same text.
+func _add_at_place(seen: Dictionary, place: BuildingLevels.Place, pair: Array, cell: Vector2i) -> void:
+	var text: String = pair[1]
+	if seen.has(text):
+		seen[text][1].append(place.label())
+		return
+	_to(Target.CELL, "")
+	_cell_target(cell)
+	seen[text] = [_add(pair[0], pair[2], text), [place.label()]]
+
+
+## Puts the first place, and how many others, before each text of
+## [param seen] (see _add_at_place).
+func _name_places(seen: Dictionary) -> void:
 	for text: String in seen:
 		var f: Finding = seen[text][0]
 		var where: Array = seen[text][1]
@@ -1124,6 +1142,108 @@ func _stair_pairs(id: String, multi: bool, offset: Vector2i, bt: DataIndex.Build
 			out.append([Severity.NOTE, "%s: %s, %s, has its stairs %s elsewhere, e.g. over (%d, %d); BN takes the player to the nearest" % [
 					what, name, level, "down" if dz > 0 else "up", offset.x + near.x, offset.y + near.y], Code.STAIRS_OFFSET])
 	return out
+
+
+## Each elevator control's floors (see Stairs.elevator_levels), in every
+## building placing the map: no other level has an ELEVATOR cell within
+## reach of the control's cell, a WARNING (only this floor is offered); a
+## level whose mapgen has its elevator farther off, a NOTE (BN leaves that
+## floor out); a control with no ELEVATOR cell next to it, a NOTE (the
+## player can't stand in the car to ride it). Controls with the same
+## findings are one finding. A console with elevator_on at a level of the
+## building without any t_elevator_control_off, a NOTE: it switches on
+## those of the whole z-level, so other buildings nearby may have some.
+func _check_elevators(ref: DataIndex.MapgenRef, grid: Stairs.Grid, stairs: Stairs, resolved: ResolvedMapgen,
+		placements: Array[Placement]) -> void:
+	var seen := {}
+	var places := BuildingLevels.places(index, ref)
+	for place in places:
+		for id in ref.ids:
+			var at := ref.position_of(id)
+			var bt := place.building.at(place.origin + Vector3i(at.x, at.y, 0))
+			if bt == null or bt.oter != id:
+				continue
+			var controls := grid.cells(at, Stairs.CONTROL)
+			## text -> [severity, code, cells]
+			var by_text := {}
+			for c in controls:
+				for pair in _elevator_findings(grid, at, c, bt, place, stairs):
+					if not by_text.has(pair[1]):
+						by_text[pair[1]] = [pair[0], pair[2], [] as Array[Vector2i]]
+					by_text[pair[1]][2].append(c)
+			for text: String in by_text:
+				var cells: Array[Vector2i] = by_text[text][2]
+				var what := "elevator controls at %s%s" % [_cells_text(cells, at * OMT_CELLS),
+						" (tile %s)" % id if ref.ids.size() > 1 else ""]
+				_add_at_place(seen, place, [by_text[text][0], "%s: %s" % [what, text], by_text[text][1]],
+						at * OMT_CELLS + cells[0])
+	_name_places(seen)
+	if places.is_empty():
+		return
+	var consoles := console_cells(resolved, placements)
+	for at: Vector2i in consoles:
+		if not Computer.of(consoles[at][1]).door_actions().has("elevator_on"):
+			continue
+		for place in places:
+			if _level_has(place, stairs, Stairs.CONTROL_OFF):
+				continue
+			if consoles[at][0]:
+				_to(Target.CELL, consoles[at][0])
+				_cell_target(at)
+			else:
+				_to(Target.PLACEMENT, "", "place_computers", consoles[at][3])
+			_add(Severity.NOTE, Code.ELEVATOR_ON, "console at (%d, %d): \"elevator_on\" switches on every %s on the z-level, and %s has none at z %d (other buildings nearby may)" % [
+					at.x, at.y, Stairs.CONTROL_OFF_ID, place.building.id, place.origin.z])
+			break
+
+
+## [severity, text, code] for the elevator control at tile-local cell
+## [param c] of tile [param at] (building tile [param bt]).
+func _elevator_findings(grid: Stairs.Grid, at: Vector2i, c: Vector2i, bt: DataIndex.BuildingTile,
+		place: BuildingLevels.Place, stairs: Stairs) -> Array:
+	var out := []
+	var o := at * OMT_CELLS
+	# The car is the ELEVATOR cells around the player, next to the control
+	# (in this map; one on the map's edge may have it in the next map).
+	var p := o + c
+	var car := p.x == 0 or p.y == 0 or p.x == grid.size.x - 1 or p.y == grid.size.y - 1
+	for y in range(maxi(0, p.y - 1), mini(grid.size.y, p.y + 2)):
+		for x in range(maxi(0, p.x - 1), mini(grid.size.x, p.x + 2)):
+			if grid.at(Vector2i(x, y)) & Stairs.ELEVATOR:
+				car = true
+	if not car:
+		out.append([Severity.NOTE, "no elevator floor (ELEVATOR terrain) next to them, so the player can't stand in the car to ride it", Code.ELEVATOR_OFFSET])
+	var levels := stairs.elevator_levels(place.building, bt, c)
+	var reached := levels.keys().filter(func(z: int) -> bool: return not levels[z].near.is_empty())
+	if reached.is_empty():
+		var others := Array(place.building.levels()).filter(func(z: int) -> bool: return z != bt.point.z)
+		out.append([Severity.WARNING, "no other level of %s (%s) has elevator floor (ELEVATOR terrain) within %d cells of the same spot in its tile, so only this floor is offered" % [
+				place.building.id, "z " + ", ".join(others.map(str)) if not others.is_empty() else "it has one level",
+				Stairs.ELEVATOR_REACH], Code.ELEVATOR])
+	for z: int in levels:
+		for f: Array in levels[z].far:
+			var r: DataIndex.MapgenRef = f[0]
+			var other := place.building.at(Vector3i(bt.point.x, bt.point.y, z))
+			var enabled := BuildingLevels.mapgens(index, other.oter).filter(func(x: DataIndex.MapgenRef) -> bool: return not x.disabled)
+			var name := other.oter
+			if enabled.size() > 1:
+				name += " (mapgen %d of %d, weight %d)" % [enabled.find(r) + 1, enabled.size(), r.weight]
+			out.append([Severity.NOTE, "%s (z %d) has its elevator floor farther than %d cells off, e.g. at (%d, %d); BN doesn't offer that floor" % [
+					name, z, Stairs.ELEVATOR_REACH, o.x + f[1].x, o.y + f[1].y], Code.ELEVATOR_OFFSET])
+	return out
+
+
+## True when some enabled mapgen of a tile of [param place]'s level may
+## put down a cell with [param bit].
+func _level_has(place: BuildingLevels.Place, stairs: Stairs, bit: int) -> bool:
+	for t in place.building.level(place.origin.z):
+		for r in BuildingLevels.mapgens(index, t.oter):
+			if r.disabled:
+				continue
+			var g := stairs.grid_for(r)
+			if g and not g.cells(r.position_of(t.oter), bit).is_empty():
+				return true
+	return false
 
 
 static func _turns(dir: String) -> int:

@@ -61,6 +61,8 @@ class TileDef:
 	## Terrain: "move_cost" (0 is impassable). Furniture: "move_cost_mod"
 	## (-1 is impassable).
 	var move_cost := 0
+	## "examine_action" when it is a name ("elevator", "controls_gate", ...).
+	var examine_action := ""
 	var source: Source
 
 	func copy() -> TileDef:
@@ -75,6 +77,7 @@ class TileDef:
 		t.flags = flags.duplicate()
 		t.connect_group = connect_group
 		t.move_cost = move_cost
+		t.examine_action = examine_action
 		t.source = source
 		return t
 
@@ -583,6 +586,8 @@ static func _apply_tile_fields(def: TileDef, o: Dictionary) -> void:
 	for key in ["move_cost", "move_cost_mod"]:
 		if o.get(key) is float or o.get(key) is int:
 			def.move_cost = int(o[key])
+	if o.has("examine_action"):
+		def.examine_action = o.examine_action if o.examine_action is String else ""
 	if o.has("symbol"):
 		def.symbol = _seasons(o.symbol)
 	# BN allows only one of the two; either replaces an inherited one.

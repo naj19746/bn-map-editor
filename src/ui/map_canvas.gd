@@ -20,7 +20,12 @@ extends Control
 ## is hatched. Double-clicking one reports neighbor_activated.
 ## Under both, a ghost level (the level below or above, LevelNav.ghosts) is
 ## drawn dimmed where the map is see-through (AsciiMap.see_through: open
-## air), and its stairs to this level are marked over everything.
+## air), and its stairs to this level (and its elevator floor) are marked
+## over everything.
+## With [member placed], the map itself is drawn as its building places it
+## (each tile turned), read-only: placements, chunk footprints, previews and
+## the rest are left out, and the cells the signals report are the map's
+## own (to_map()).
 
 ## The cell under the mouse changed; (-1, -1) when it left the map.
 signal cell_hovered(cell: Vector2i)
@@ -70,6 +75,7 @@ const NEIGHBOR_FLAT := Color(1.0, 0.75, 0.2, 0.08)
 ## dimmed).
 const GHOST_DIM := 0.7
 const GHOST_STAIRS := Color(0.3, 0.9, 1.0, 0.9)
+const GHOST_ELEVATOR := Color(1.0, 0.6, 0.2, 0.9)
 ## Below this cell size neighbors are flat boxes: a big special's level
 ## would be hundreds of thousands of cells.
 const NEIGHBOR_CELLS_MIN := 7.0
@@ -174,6 +180,12 @@ var ghost_dim := true:
 		queue_redraw()
 ## True when the ghost is the level above (its stairs lead down here).
 var ghost_above := false
+## The map as placed (LevelNav.placed, pieces with their ascii), drawn
+## instead of [member ascii]; empty: the map as it is.
+var placed: Array[LevelNav.Neighbor] = []:
+	set(v):
+		placed = v
+		queue_redraw()
 var cell_size := 18.0
 ## Screen position of cell (0, 0)'s top-left corner.
 var origin := Vector2(RULER + 8, RULER + 8)
@@ -206,6 +218,18 @@ func cell_at(pos: Vector2) -> Vector2i:
 	if c.x < 0 or c.y < 0 or c.x >= ascii.size.x or c.y >= ascii.size.y:
 		return -Vector2i.ONE
 	return c
+
+
+## The map's cell drawn at [param c] (a cell_at() cell): [param c] itself
+## unless the map is drawn [member placed]; then (-1, -1) where no tile of
+## it is drawn.
+func to_map(c: Vector2i) -> Vector2i:
+	if c.x < 0 or placed.is_empty():
+		return c
+	for n in placed:
+		if n.rect().has_point(c):
+			return n.to_ref(c - n.cell)
+	return -Vector2i.ONE
 
 
 ## The cell at a point, clamped to the map (for drags that leave it).
@@ -285,7 +309,7 @@ func _gui_input(event: InputEvent) -> void:
 					_right_press = mb.position
 				elif _right_press.x >= 0:
 					_right_press = -Vector2.ONE
-					var c := cell_at(mb.position)
+					var c := to_map(cell_at(mb.position))
 					if c.x >= 0:
 						cell_context.emit(c, mb.position)
 			accept_event()
@@ -296,13 +320,14 @@ func _gui_input(event: InputEvent) -> void:
 					neighbor_activated.emit(n)
 			elif mb.pressed:
 				var c := cell_at(mb.position)
-				if c.x >= 0:
+				if to_map(c).x >= 0:
 					_dragging = true
 					_drag_cell = c
-					cell_pressed.emit(c, mb.alt_pressed, mb.shift_pressed)
+					cell_pressed.emit(to_map(c), mb.alt_pressed, mb.shift_pressed)
 			elif _dragging:
 				_dragging = false
-				cell_released.emit(cell_at_clamped(mb.position), mb.shift_pressed)
+				var c := cell_at_clamped(mb.position)
+				cell_released.emit(to_map(c) if to_map(c).x >= 0 else to_map(_drag_cell), mb.shift_pressed)
 			accept_event()
 	elif event is InputEventMouseMotion:
 		var mm := event as InputEventMouseMotion
@@ -319,16 +344,16 @@ func _gui_input(event: InputEvent) -> void:
 			neighbor_hovered.emit(n)
 		if _dragging:
 			var c := cell_at_clamped(mm.position)
-			if c != _drag_cell:
+			if c != _drag_cell and to_map(c).x >= 0:
 				_drag_cell = c
-				cell_dragged.emit(c, mm.shift_pressed)
+				cell_dragged.emit(to_map(c), mm.shift_pressed)
 	elif event is InputEventKey:
 		var k := event as InputEventKey
 		if k.keycode == KEY_SPACE:
 			_space = k.pressed
 			accept_event()
-		elif k.pressed and hovered.x >= 0 and (k.keycode == KEY_MENU or (k.keycode == KEY_F10 and k.shift_pressed)):
-			cell_context.emit(hovered, origin + (Vector2(hovered) + Vector2(0.5, 0.5)) * cell_size)
+		elif k.pressed and to_map(hovered).x >= 0 and (k.keycode == KEY_MENU or (k.keycode == KEY_F10 and k.shift_pressed)):
+			cell_context.emit(to_map(hovered), origin + (Vector2(hovered) + Vector2(0.5, 0.5)) * cell_size)
 			accept_event()
 
 
@@ -341,7 +366,7 @@ func _notification(what: int) -> void:
 		_panning = false
 	elif what == NOTIFICATION_FOCUS_EXIT and _dragging:
 		_dragging = false
-		cell_released.emit(_drag_cell, false)
+		cell_released.emit(to_map(_drag_cell), false)
 
 
 func _set_hovered(c: Vector2i) -> void:
@@ -349,7 +374,7 @@ func _set_hovered(c: Vector2i) -> void:
 		return
 	hovered = c
 	queue_redraw()
-	cell_hovered.emit(c)
+	cell_hovered.emit(to_map(c))
 
 
 func _draw() -> void:
@@ -377,6 +402,16 @@ func _draw() -> void:
 	var through := not ghosts.is_empty()
 	for i in neighbors.size():
 		_draw_neighbor(neighbors[i], i == hovered_neighbor, font_size, baseline, through)
+	if not placed.is_empty():
+		for n in placed:
+			if n.ascii:
+				_draw_cells(n.ascii, origin + Vector2(n.cell) * cs, 0.0, font_size, baseline, through, true)
+		_draw_ghost_stairs()
+		_draw_grid(x0, y0, x1, y1)
+		if hovered.x >= 0:
+			draw_rect(Rect2(origin + Vector2(hovered) * cs, Vector2(cs, cs)), HOVER, false, 2.0)
+		_draw_rulers(x0, y0, x1, y1)
+		return
 
 	for y in range(y0, y1):
 		var row: PackedStringArray = ascii.resolved.cells[y]
@@ -475,10 +510,12 @@ func _draw_neighbor(n: LevelNav.Neighbor, is_hovered: bool, font_size: int, base
 
 ## The visible cells of [param a] with its top-left at [param at], colors
 ## faded [param dim] towards the background; see-through cells skipped
-## when [param through].
-func _draw_cells(a: AsciiMap, at: Vector2, dim: float, font_size: int, baseline: float, through: bool) -> void:
+## when [param through]. Nothing below NEIGHBOR_CELLS_MIN unless
+## [param small].
+func _draw_cells(a: AsciiMap, at: Vector2, dim: float, font_size: int, baseline: float, through: bool,
+		small := false) -> void:
 	var cs := cell_size
-	if cs < NEIGHBOR_CELLS_MIN:
+	if cs < NEIGHBOR_CELLS_MIN and not small:
 		return
 	var x0 := maxi(0, floori((RULER - at.x) / cs))
 	var y0 := maxi(0, floori((RULER - at.y) / cs))
@@ -510,10 +547,22 @@ func _draw_cells(a: AsciiMap, at: Vector2, dim: float, font_size: int, baseline:
 
 ## The ghost level's stairs to this level: an outlined cell with a
 ## triangle pointing the way they lead (up from below, down from above).
+## Its elevator floor: a dashed outline.
 func _draw_ghost_stairs() -> void:
 	var cs := cell_size
 	if cs < 4.0:
 		return
+	for g in ghosts:
+		for c in g.elevators:
+			var rect := Rect2(origin + Vector2(g.cell + c) * cs, Vector2(cs, cs)).grow(-2.0)
+			if not rect.intersects(Rect2(Vector2(RULER, RULER), size)):
+				continue
+			var d := maxf(2.0, cs / 6.0)
+			for side in [[rect.position, rect.position + Vector2(rect.size.x, 0)],
+					[rect.position + Vector2(0, rect.size.y), rect.end],
+					[rect.position, rect.position + Vector2(0, rect.size.y)],
+					[rect.position + Vector2(rect.size.x, 0), rect.end]]:
+				draw_dashed_line(side[0], side[1], GHOST_ELEVATOR, 1.5, d)
 	for g in ghosts:
 		for c in g.stairs:
 			var rect := Rect2(origin + Vector2(g.cell + c) * cs, Vector2(cs, cs))

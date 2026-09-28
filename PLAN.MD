@@ -2002,7 +2002,7 @@ Stage 10 - Z-levels, up and down (added 2026-09-28; from the later milestones). 
        src/ui/new_building_dialog.gd, main.gd (Level menu, ghost picker and Dim, new_level,
        new_building, main.settings_file).
      - Not done: roof edges vs the floor below's walls (the plan's "hint, not a check"; the ghost
-       shows them); t_elevator (2 levels) isn't paired; a stair finding is rebuilt when its own
+       shows them); t_elevator (2 levels) isn't paired (done in 11b, differently); a stair finding is rebuilt when its own
        map changes or its tab is shown, not when another level is edited in the background;
        no Validator note for a city_building no region lists (the New building dialog says it
        instead; buildings aren't validated objects yet); the toolbar needs ~1800 px to show the
@@ -2137,6 +2137,60 @@ Stage 11 - Loose ends of the level work, and editor housekeeping (planned 2026-0
      - Accept: core still has no errors; the stair counts are re-taken and the difference
        explained; a fake three-level building with an elevator on 0 and 2 but not 1 reports z 1
        nothing and z 0 / z 2 reachable.
+   - 11a done (2026-09-28).
+     - LevelNav.Neighbor gains part (the cells of its mapgen it draws), turn (replacing
+       turned_from), shape() (AsciiMap.piece: cut to part, then turned), to_piece() / to_ref().
+       _pieces splits a multi-tile mapgen into one-tile pieces whenever one of its tiles is turned
+       (after taking off the current map's tile under it, for a ghost); unturned multi-tile pieces
+       stay whole. A ghost piece is turned less the dir of the current map's tile over it (per
+       tile now, not only for a 1x1 map).
+     - Found in core: a building that turns a whole multi-tile map (apartments_mod's tower, placed
+       south) trades its tiles' places, so seen from NW's place the map's other tiles aren't
+       under its footprint: they show as split neighbours at their real points. Deviation:
+       LevelNav.placed() draws only the tiles the building puts where the map's layout has them;
+       the rest of the footprint is left blank (to_map() answers (-1, -1) there, so hover, Pick
+       and the cell menu skip it).
+     - "View as placed (turned, read-only)" is a check item in the Level menu (main.view_placed;
+       not saved), not a toolbar toggle (11f reworks the toolbar). While on, MapCanvas.placed
+       holds the pieces and is drawn instead of the map, without placements, chunk footprints,
+       previews, reach or focus; canvas signals report map cells (MapCanvas.to_map); painting and
+       Place are refused with a status message; Pick, Alt+click and the cell menu's Pick work;
+       ghosts are drawn with their own turns. Edits and undo redraw it.
+     - Result: tools/run_tests.sh passes; tests/test_turned_levels.gd (the accept's 2x1 grid
+       placed east under 1x1 floors: split pieces, rock and stairs in the same world cells, both
+       ghost directions, a whole-turned 2x1 map; the main window's View as placed, read-only,
+       Pick, redraw on paint and undo). Non-headless screenshots checked: mansion_c (placed east)
+       lines up with its neighbours; apartments_mod_tower_NW as placed shows the tower's four
+       tiles each turned south, walls joining.
+     - Not done: wall joining at a turned piece's edge uses the piece's own cells only (BN joins
+       with the neighbour tile); the placed view has no placement or chunk overlays.
+   - 11b done (2026-09-28). Deviations from the plan above:
+     - The premise was wrong again: game::find_local_stairs_leading_to is only the "Walk to the
+       stairs?" auto-walk prompt. game::find_stairs (where the player lands) counts ELEVATOR
+       only as t_elevator for movez +/- 2. So the stair check is unchanged and so are its core
+       counts (STAIRS 20, STAIRS_OFFSET 249, STAIRS_NO_TILE 4).
+     - The floor search pairs mapgen cells: turning the control's spot by get_rot_turns (the
+       destination tile's dir less this one's) makes it the same cell of the other tile's mapgen,
+       unturned. BN looks in world coordinates, so the 3-cell square crosses tile edges (the
+       mine's control is at x 23 with its car at x 24, in the next tile); Stairs.elevator_levels
+       follows it into the next tile of that level.
+     - Stairs: bits ELEVATOR, CONTROL (examine_action "elevator", DataIndex.TileDef.examine_action
+       is new; t_elevator_control_off counts too) and CONTROL_OFF.
+     - Validator._check_elevators, per place, controls with the same findings merged:
+       ELEVATOR (warning): no other level has elevator floor within 3; ELEVATOR_OFFSET (note): a
+       level's elevator floor is farther off, or no ELEVATOR cell is next to the controls (the
+       player can't ride in the car; a control on the map's edge isn't judged); ELEVATOR_ON
+       (note): a console with elevator_on at a level of the building with no
+       t_elevator_control_off. The console isn't given the controls' names in the UI (only the
+       note when there are none). NOT_CHECKED no longer lists elevator_on.
+     - The ghost marks its elevator floor cells (dashed orange outline; Neighbor.elevators).
+     - Core: no errors; ELEVATOR 5, ELEVATOR_OFFSET 18, ELEVATOR_ON 0 (test_validation_bn).
+       Spot-checked: the steel mill's z 1 has t_open_air_rooved where z 0's car would arrive, so
+       BN offers no floor; mall_b_25's second control has no car beside it.
+     - Result: tools/run_tests.sh passes 182 tests. tests/test_elevators.gd: the accept's
+       three-level building (z 1 nothing, z 0 and z 2 reach each other; z 2 turned and its car 2
+       cells off), a car only far off, a lone control, elevator_on with and without off controls,
+       the car across a tile edge, the ghost's elevator marks.
    - 11c. Keeping views and findings fresh.
      - Other levels: a stair or elevator finding depends on the levels around it. EditSession
        notifies maps whose building levels changed (the maps drawing the tiles at z +/- 1 of each

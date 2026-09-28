@@ -11,8 +11,19 @@ extends RefCounted
 ## - Terrain and furniture flags both count (map::has_flag).
 ## - DEEP_WATER cells aren't stairs: find_stairs skips them going up, and
 ##   the lake and sea beds that "go up" are swum through.
-## TODO: elevators. find_stairs also takes t_elevator when moving 2 levels
-## (movez +/- 2), which isn't paired here (PLAN.MD, Stage 10 "TODO").
+## - ELEVATOR cells aren't stairs: find_stairs takes t_elevator only for
+##   movez +/- 2, which nothing does (game::find_local_stairs_leading_to
+##   counts ELEVATOR, but only to offer auto-walking to it).
+##
+## Elevators (iexamine::elevator, BN 39f4883093 src/iexamine_elevator.cpp):
+## examining a control (examine_action "elevator") offers every z of the
+## same overmap x, y with an ELEVATOR cell within 3 cells (a square) of the
+## control's spot there. The spot is turned by the two tiles' rotation
+## difference (get_rot_turns), which makes it the same cell of the other
+## tile's mapgen, unturned: unlike stairs, elevators pair mapgen cells.
+## The car (the 4-connected ELEVATOR cells under the player) moves to the
+## same cells there. t_elevator_control_off is a control once a computer's
+## elevator_on switches it on.
 ##
 ## "May have": every id a cell can get counts (distributions, parameters,
 ## switches), and so do place_terrain / place_furniture / "set" entries
@@ -23,11 +34,20 @@ extends RefCounted
 ##
 ## A [Grid] holds one bit set per cell of a map: [constant UP], [constant
 ## DOWN], [constant LANDING] (a cell the player may land on going up: DOWN
-## or a manhole cover).
+## or a manhole cover), [constant ELEVATOR], [constant CONTROL] (an
+## elevator control, on or off) and [constant CONTROL_OFF].
 
 const UP := 1
 const DOWN := 2
 const LANDING := 4
+const ELEVATOR := 8
+const CONTROL := 16
+const CONTROL_OFF := 32
+## How far from a control's spot BN looks for another level's ELEVATOR cell
+## (elevator::find_elevators_nearby, a square).
+const ELEVATOR_REACH := 3
+## The control a computer's elevator_on switches on.
+const CONTROL_OFF_ID := "t_elevator_control_off"
 const OMT := MapgenResolver.OMT_SIZE
 const MANHOLE := "t_manhole_cover"
 ## place_* lists that set terrain or furniture, and the field naming it.
@@ -171,6 +191,12 @@ func _bits_of(kind: String, ids: PackedStringArray) -> int:
 					f |= DOWN | LANDING
 			if id == MANHOLE:
 				f |= LANDING
+			if def and def.has_flag("ELEVATOR"):
+				f |= ELEVATOR
+			if def and def.examine_action == "elevator":
+				f |= CONTROL
+			if id == CONTROL_OFF_ID:
+				f |= CONTROL | CONTROL_OFF
 			_flags[k] = f
 		b |= _flags[k]
 	return b
@@ -221,3 +247,74 @@ static func _any(g: Grid) -> bool:
 		if b:
 			return true
 	return false
+
+
+## What an elevator control at tile-local [param cell] of building tile
+## [param bt] offers: z -> {"near": the enabled mapgens with an ELEVATOR
+## cell within ELEVATOR_REACH of the control's spot on that level (the
+## spot's own tile, or a tile next to it: BN looks across tile edges),
+## "far": [[mapgen, nearest ELEVATOR cell, tile-local]] for the spot's own
+## tile's mapgens with ELEVATOR cells only farther away}. Levels with no
+## ELEVATOR cell there (or no tile) are left out; so is bt's own.
+func elevator_levels(building: DataIndex.Building, bt: DataIndex.BuildingTile, cell: Vector2i) -> Dictionary:
+	var out := {}
+	var size := Vector2i(OMT, OMT)
+	for z in building.levels():
+		if z == bt.point.z:
+			continue
+		var there := building.at(Vector3i(bt.point.x, bt.point.y, z))
+		if there == null:
+			continue
+		# The spot is the same cell of there's mapgen (see the class doc).
+		var near: Array[DataIndex.MapgenRef] = []
+		for dy in range(-ELEVATOR_REACH, ELEVATOR_REACH + 1):
+			for dx in range(-ELEVATOR_REACH, ELEVATOR_REACH + 1):
+				var p := cell + Vector2i(dx, dy)
+				var tile := there
+				if p.x < 0 or p.y < 0 or p.x >= OMT or p.y >= OMT:
+					# Across there's edge, in the world: the tile next to it.
+					var w := ChunkOverlay.rotate(p, _turns(there.dir), size)
+					var d := Vector2i(floori(w.x / float(OMT)), floori(w.y / float(OMT)))
+					tile = building.at(Vector3i(bt.point.x + d.x, bt.point.y + d.y, z))
+					if tile == null:
+						continue
+					p = ChunkOverlay.rotate(w - d * OMT, -_turns(tile.dir), size)
+				for r in _elevator_refs(tile.oter, p):
+					if not near.has(r):
+						near.append(r)
+		var far := []
+		if near.is_empty():
+			for r in BuildingLevels.mapgens(index, there.oter):
+				var g := grid_for(r) if not r.disabled else null
+				if g == null:
+					continue
+				var cars := g.cells(r.position_of(there.oter), ELEVATOR)
+				if cars.is_empty():
+					continue
+				var best: Vector2i = cars[0]
+				for c in cars:
+					if _dist(c, cell) < _dist(best, cell):
+						best = c
+				far.append([r, best])
+		if not near.is_empty() or not far.is_empty():
+			out[z] = {"near": near, "far": far}
+	return out
+
+
+## The enabled mapgens of [param oter] that may put an ELEVATOR cell at its
+## tile-local [param p].
+func _elevator_refs(oter: String, p: Vector2i) -> Array[DataIndex.MapgenRef]:
+	var out: Array[DataIndex.MapgenRef] = []
+	for r in BuildingLevels.mapgens(index, oter):
+		var g := grid_for(r) if not r.disabled else null
+		if g and g.at(r.position_of(oter) * OMT + p) & ELEVATOR:
+			out.append(r)
+	return out
+
+
+static func _turns(dir: String) -> int:
+	return maxi(0, DataIndex.DIRECTIONS.find(dir))
+
+
+static func _dist(a: Vector2i, b: Vector2i) -> int:
+	return maxi(absi(a.x - b.x), absi(a.y - b.y))

@@ -16,6 +16,8 @@ extends "res://tests/support/test_case.gd"
 ## independent Python pass over every json mapgen counts (pick by pick).
 ## Stairs between levels (Stage 10c): warnings where the next level has none
 ## back, notes for pairs in other cells and stairs leaving the building.
+## Elevators (Stage 11b): controls offering no other floor, floors off
+## reach, controls with no car beside them.
 
 const BnEnv := preload("res://tests/support/bn_env.gd")
 const MAX_REPORTED := 20
@@ -94,3 +96,10 @@ func test_core_validates() -> void:
 	check_eq(counts.get("STAIRS", 0), 20, "stairs with none back on the next level (warnings)")
 	check_eq(counts.get("STAIRS_OFFSET", 0), 249, "stairs paired with stairs elsewhere in the tile")
 	check_eq(counts.get("STAIRS_NO_TILE", 0), 4, "stairs out of the building")
+	# Elevators (Stage 11b): the editor's own count; spot-checked (the steel
+	# mill's z 1 has open air where z 0's car would arrive, mall_b_25's second
+	# control has no car beside it). The stair counts above didn't change:
+	# BN never pairs ELEVATOR cells as stairs.
+	check_eq(counts.get("ELEVATOR", 0), 5, "elevator controls offering no other floor (warnings)")
+	check_eq(counts.get("ELEVATOR_OFFSET", 0), 18, "controls with no car beside them, or floors too far off")
+	check_eq(counts.get("ELEVATOR_ON", 0), 0, "elevator_on with no powerless controls on the level")
