@@ -88,7 +88,8 @@ MVP scope:
 Later milestones:
  - Tileset rendering via a BN tileset's tile_config.json.
  - Preview roll: resolve weights, distributions, chances and nested chunks into one sample outcome.
- - Multi-z-level linking (roofs, basements) through city_building/overmap_special.
+ - Multi-z-level linking (roofs, basements) through city_building/overmap_special: planned as
+   Stage 10 (z-levels, up and down).
  - update_mapgen, parameters/switch editing, rotation preview, dedicated editors for vehicles/NPCs/
    computers (since Stage 5 every place_* list is shown, moved and edited as fields; what's left are
    id pickers and structured editors, e.g. computer options; computers are planned as Stage 8).
@@ -362,6 +363,7 @@ Development stages (each ends with a headless-testable acceptance check):
      writes a minimal overmap_terrain per missing id into the workspace (next to the map, or in an
      overmap_terrain file of the same mod). DataIndex indexes overmap_terrain ids (Stage 7 validation
      needs them anyway). Spawning (city_building / overmap_special) stays with z-level linking.
+     (Done in Stage 10d: Level > New building from this map, with its city list entry.)
      (Corrected after Stage 6: BN does check. mapgen_factory::check_consistency debugmsgs "Mapgen X
      is not used by anything!" on every load for an om_terrain mapgen id that no overmap_terrain,
      mapgen map_extra or Lua "on_make_mapgen_factory_list" hook uses. So the warning is really a
@@ -1662,14 +1664,504 @@ Stage 9 - MCP server (planned 2026-09-27).
      - Accept adds: an entry crossing a tile refused, a dropped one added with its warning;
        move_to keeping a [lo, hi] range; remove shifting indices; create_mapgen into a new file and
        appended to an existing BN file (its other objects byte-identical after save), then discard.
+   - 9c + 9d done (2026-09-28, one session).
+     - Two processes, one workspace: JsonFile keeps disk_path + disk_sha256 (the file it was read
+       from or last written to; a new file's is its workspace path with "" = must not exist, via
+       JsonFile.create_at). EditSession.check_on_disk refuses a save when that file changed or went,
+       or a workspace copy appeared over a file read from BN ("changed on disk since it was read ...;
+       reload"); the editor's saves get the same check (main.gd shows last_error). mark_pushed
+       points the file at BN's new file. Workspace.set_entry(rel, entry | null) re-reads
+       manifest.json, changes one entry and writes it (write_file and WorkspaceSync.remove_copy use
+       it), so the other process's entries, added or removed, stay as it left them. Deviation: an
+       unreadable manifest is now left alone (set_entry returns the error; the file itself is
+       written) instead of being overwritten.
+     - Tools added (26 in all): paint_cells, paint_rect, paint_line, fill, paint_rows, add_symbol,
+       remove_symbol, undo, redo, save, discard, reload; add_placement, update_placement,
+       remove_placement, set_map_palettes, set_symbol_mapping, create_mapgen. The schema check
+       learned "array" (with an item type), "object" and untyped (any JSON, null included) members.
+     - Paint tools: MapDocument.defines_key (the map or a palette defines it, any option of a palette
+       choice included, or " " / "."); an undefined key or one of the wrong shape is refused before
+       anything is painted (paint_rows checks every key first). Cells outside the map are counted
+       and named in "outside". "changed" counts cells whose symbol changed (worked out before
+       painting; a cell listed twice counts once). Each call is one begin_group/end_group step.
+     - Deviations/additions: add_symbol's key is optional (MapDocument.suggest_key: the tile's own
+       symbol if free, else a free one; core palettes take many symbols, so an LLM guessing one often
+       collides). remove_symbol answers cells_using_it. undo/redo with nothing to do are errors.
+       save {file} refuses a file that isn't open and skips one without edits (a palette file read
+       for display is open in the session but must not be copied into the workspace); several
+       files: the ones saved plus "errors". discard is EditSession.discard(rel), which also releases
+       a file read without a document. reload keeps the loader (McpTools._load_tried) and answers
+       what it discarded; get_map answers changed_on_disk (the reason) and sync_status re-reads the
+       manifest and lists changed_on_disk files.
+     - 9d deviation: add_placement refuses DROPPED as well as CROSSES (MapDocument.check_placement,
+       as the editor does): an entry BN drops without a word has no use, and the refusal says why
+       ("anchored at (30, 1), outside the map, so BN drops it"). update_placement may keep an entry
+       that was already dropped/crossing (set_placement_fields' rule).
+     - Id checks come from the Validator's findings that point at the placement (or symbol), not a
+       second field_id_kind pass: e.g. an unknown monster is an error BN reports on every load, not
+       a warning, but still not a refusal. update_placement merges move_to (Placement.values_for,
+       moved_only, instance 0: "set" x/y stay tile-local) into fields and makes one
+       set_placement_fields call, so a refused move changes nothing; move_to plus x/y in fields is
+       refused. set_map_palettes points the new palettes at BnJson objects first (_exact_palettes).
+       create_mapgen refuses a flat om_terrain list (BN's "one map for several ids" form, which
+       NewMapgen doesn't make), fill_ter on a chunk and mapgensize on a map; it calls
+       add_missing_overmap_terrain itself to answer overmap_terrain_added.
+     - The server instructions say edits stay in memory until save, and that finding texts count
+       placements from 1 while the tools' indices are 0-based.
+     - Result: tools/run_tests.sh passes 155 tests. tests/test_mcp.gd: test_paint_tools (each paint
+       tool, outside cells, paint_rows skip / ' ' / refused keys painting nothing, add/remove symbol,
+       undo to the start), test_save_tool (only the edited file, other objects byte-identical, ints
+       kept, undone + saved = "same as BN"), test_save_guards (workspace copy rewritten by "the
+       editor", reload refused then with discard; manifest entries another Workspace added or
+       removed survive a save; a copy appearing over a BN-read file and over a new file),
+       test_placement_tools (crossing/dropped/malformed refused, unknown id reported, move_to keeps
+       [lo, hi], remove shifts indices, palettes, symbol mappings), test_create_mapgen (2x1 map
+       into a new file, a chunk appended to an existing file, refusals, discard takes it out of
+       the index, save + reload reads both back). tests/test_mcp_bn.gd::test_core_edit_and_save
+       edits house_01 (paint_rows, a suggested symbol, a place_loot), saves into a temp workspace:
+       every other object of the file byte-identical, BN's sha unchanged, still no errors.
+     - Code: src/mcp/mcp_tools.gd (the new tools), EditSession.check_on_disk / changed_on_disk /
+       discard, JsonFile.disk_path / disk_sha256 / changed_on_disk / create_at,
+       Workspace.reload_manifest / set_entry, MapDocument.defines_key.
+     - Not done: still not tried from a live Claude Code session; the editor doesn't notice the
+       server's saves until F5 (it refuses to overwrite them, as above).
    - 9e. Palettes: edit_palette_key (returns the PaletteImpact list, so the client sees which maps
      change before saving). Accept: impact names the using maps, as test_palettes does.
    - Later/optional: resources (BN's mapgen.md, the format notes at the top of this plan).
    - Never: push. Pushing stays a human action in the Sync window (the one exception to "never
      write into BN").
+Stage 10 - Z-levels, up and down (added 2026-09-28; from the later milestones).  [10a-10e DONE 2026-09-28]
+   - Goal: see and edit a building's floors together: basements (z < 0), ground (z = 0), upper
+     floors and roofs (z > 0). BN keeps each floor as its own mapgen with its own om_terrain id
+     (2Story02_basement / _1 / _2 / _roof); only city_building / overmap_special "overmaps" entries
+     ({"point": [x, y, z], "overmap": "<oter>_north"}) say which ids stack. Nothing in src/ reads
+     them yet (EditSession only uses generic_city_building as an overmap_terrain stub base).
+   - Counted in core (2026-09-28): 406 city_building + 235 overmap_special, 557 of them span more
+     than one z. z runs from -10 to +9: 187 use z = -1, 528 z = 1, 163 z = 2; deep labs/mines go
+     below -5, towers above +5. 8 overmap_specials are "subtype": "mutable" (placed by rules, no
+     fixed points; show them, don't try to stack them).
+   - 10a. Index: DataIndex reads city_building / overmap_special (core + mods) into z-stacks:
+     per building, (x, y, z) -> oter id with the rotation suffix stripped, and a reverse map
+     oter id -> the buildings and points that use it. Accept: 2Story02 gives four levels;
+     a roof id finds its building; a map used by two buildings lists both.
+   - 10b. Viewer: level up / level down (PgUp / PgDn, and a z spinner in the toolbar) switch to the
+     mapgen at z +/- 1 of the same building and point; a multi-tile building shows the whole
+     footprint of that level (several mapgens side by side when a floor isn't one nested
+     om_terrain). Where a level has several mapgens (weights) or several buildings share a map,
+     ask which. A missing level (point with no mapgen) is shown and offered to create_mapgen.
+   - 10a + 10b done (2026-09-28, one session).
+     - Checked (BN 39f4883093, src/overmap/overmap.cpp): city_building is loaded as an overmap_special
+       (one id space). "overmaps" entries are {point, overmap, locations}; an entry without
+       "overmap" only reserves a location (skipped). A mutable special's "overmaps" is an object of
+       named pieces with no points. 164 definitions use copy-from, every one of its own id
+       (mods overriding occurrences / flags) and none re-listing "overmaps", so a copy keeps its
+       base's. Rotation suffixes are _north/_east/_south/_west; a map is turned get_rotation()
+       quarter turns clockwise (point::rotate: east = 1). Linear terrains in specials (subway_ns,
+       ants_nesw, road_ew) keep their line suffix; their mapgens are the _straight/... ids, so they
+       show as "no mapgen" (fine: they aren't building floors).
+     - Counted (core): 341 of 643 multi-tile levels are drawn by several mapgens, 299 by one grid
+       mapgen; 339 building-used ids are shared by more than one building; the biggest level is
+       Isherwood Farms z 0 with 900 tiles (873 neighbours, but only 24 distinct mapgens).
+     - 10a: DataIndex.buildings (id -> Building: type, source, mutable, tiles) and
+       building_tiles / buildings_using(oter) (the reverse map; with or without a suffix).
+       BuildingTile = building id (not the object: a reference cycle), point, oter (suffix
+       stripped unless an overmap_terrain has the full id, e.g. a NO_ROTATE "gate_north"), dir,
+       placed. Built after everything loads (_finish_buildings), so the suffix rule sees every
+       overmap_terrain and copy-from can point forward.
+     - 10b deviations:
+       - "The whole footprint" is not one composite, editable canvas: the tab still edits one
+         MapDocument, and the rest of its level is drawn around it, dimmed and read-only
+         (LevelNav.Neighbor on MapCanvas.neighbors; negative cells for tiles west/north).
+         Double-click a piece to open it; hovering names its tiles and points. This is also where
+         10c's ghost layer can draw from.
+       - One-tile neighbours placed turned are drawn turned (AsciiMap.rotated, line glyphs turned
+         too), else a mansion's corners don't join. A turned multi-tile neighbour and the current
+         map itself are drawn unturned and labelled ("placed turned east here; shown unturned").
+       - Which building: the toolbar's Level picker lists every place (building + point of the
+         map's top-left tile) and starts on the first; the status bar says when there are
+         several. Not a modal question: most shared ids are roofs/basements used by house
+         families, where any choice is fine.
+       - Which mapgen: a menu asks when a level tile has several (weights; disabled ones last and
+         marked), unless one of them is already open in a tab, which is used (so stepping back and
+         forth asks once).
+       - Missing level: a dialog offers File > New map prefilled with the tile's om_terrain id and
+         the current map's file (a building's floors usually share one); the new tab gets the
+         place it was asked from. (NewMapDialog.prefill.)
+       - Step target: the tile at z under the map's footprint (top-left first), else the nearest
+         tile of that level; the z spinner covers the building's lowest to highest level, and a
+         gap says which levels exist.
+       - Cost: neighbours are resolved once per distinct mapgen (Isherwood: 89 ms); below 7 px a
+         cell they draw as flat boxes, and Fit shows the map alone when the level won't fit at
+         that size. Open neighbours are redrawn from their documents on tab change.
+     - Result: tools/run_tests.sh passes 160 tests. test_data_index::test_buildings (copy-from
+       keeping overmaps, a mod override, suffix rules, mutable, empty points, reverse lookups),
+       test_bn_index::test_core_buildings (2Story02's four levels, the roof's building,
+       house_04_roof in several houses, counts, every tile a known overmap_terrain),
+       test_levels (LevelNav on a fake BN: two buildings, weighted variants, a missing roof, a 2x1
+       grid floor over two 1x1 maps, a turned tile; the main window: picker, z spinner, the menu,
+       the new-level offer and creation, neighbours, double-click), test_viewer::test_main_levels_bn
+       (2Story02 up and down, asking once per floor; mansion_entry's 8 neighbours, some turned).
+       Drawing checked with a non-headless screenshot of mansion_entry and mansion_entry_up.
+     - Code: DataIndex.Building / BuildingTile / buildings_using, src/view/level_nav.gd (LevelNav:
+       places, step, place_of, neighbors), AsciiMap.rotated, MapCanvas.neighbors (drawing,
+       neighbor_hovered / neighbor_activated, bounds, fit), main.gd "Levels" section (Level picker
+       and z spinner in the toolbar, PgUp / PgDn), NewMapDialog.prefill.
+     - Not done: placing the current map turned; mutable specials only listed (no levels);
+       neighbours of other tabs don't redraw while you paint, only on tab change.
+   - 10c. Ghost layer: draw the level below (dimmed) under the current one, and optionally the
+     level above, so walls, stairs and roof edges line up. Check stair pairs across levels:
+     GOES_UP terrain/furniture at z should have GOES_DOWN at z + 1 at the same cell, and the
+     reverse (a Validator note, not an error: BN tolerates it, stairs just don't connect).
+     Roof edges vs the floor below's outer walls is a hint, not a check.
+     - A "Dim" toggle button in the toolbar (on by default) turns the dimming off, so ghost
+       levels draw at full colour; it applies to every ghost level shown and is kept in
+       AppSettings. The current level always draws on top, so its cells still hide the ghost's.
+     - Reviewed 2026-09-28 after 10a/10b (BN 39f4883093 game.cpp and core data); changes:
+     - Stairs, as BN finds them (game::find_stairs): the same x,y on the next level first, else the
+       nearest GOES_DOWN (going up) / GOES_UP (going down) cell anywhere in that overmap tile
+       (plus t_manhole_cover going up, t_elevator for 2 levels). Only when the tile has none does
+       the player land at the same x,y with "You may be unable to return back down these stairs".
+       Terrain and furniture flags both count (map::has_flag).
+     - Counted in core (first mapgen of each tile, palettes resolved, chunks not): of 1148 tiles
+       with stairs up, 1003 have their stairs down in the same cells, 100 have them elsewhere in
+       the tile above (e.g. church_roof), 38 have none in the tile above and 7 have no tile above.
+       So "same cell" is not the rule: the check is per overmap tile. Findings: no counterpart in
+       the tile at z +/- 1 (or no tile there) is a WARNING on the stair cell ("BN drops the player
+       at the same x,y"); an offset pair is a NOTE at most (BN handles it; worth a hint because
+       the player arrives somewhere else). Before choosing, re-count the 38 with chunks: stairs
+       placed by nested chunks (ChunkOverlay, any possible pick) and parameter/random choices
+       (Binding.ids) must count, or the check has false positives in core, which must stay clean
+       of errors (and should stay near-clean of warnings).
+     - Compare in world orientation: 43 tiles have a different rotation from the tile above at the
+       same point, so turn each level's cells by its tile's dir first (as AsciiMap.rotated does).
+       The same goes for the ghost: the level below is drawn turned by (its turns - the current
+       map's turns).
+     - A level has several mapgens (weights) in ~90 houses: pair the current map against every
+       enabled mapgen of the tile above/below and name the variant in the finding.
+     - Where it runs: the check spans maps, so the Validator needs building data. Move the
+       non-drawing half of LevelNav (places, mapgens, level, step, place_of) into src/data (e.g.
+       a BuildingLevels class next to DataIndex.Building); keep Neighbor/neighbors in src/view.
+       src/data must not depend on src/view. Findings go on the map being validated, with the
+       building and point in the text (a map used by several buildings is checked in each).
+     - Ghost of a multi-tile level: draw the whole level below under the current map and its
+       neighbours (the 10b footprint), reusing main.gd's per-mapgen render cache. Resolve chunks
+       (the open question): 10b measured 89 ms for the largest level with chunks, and stairs are
+       sometimes in chunks.
+   - 10d. Editing: paint on any level with each level's own undo (they are separate MapDocuments);
+     "new level above / below" creates the mapgen (NewMapgen with the same grid size, t_open_air
+     fill for z > 0 or a rock fill for z < 0, roof_palette as a suggestion for roofs) plus its
+     overmap_terrain stubs, and adds the point to the building's "overmaps" in the workspace (a
+     city_building / overmap_special edit through JsonFile + touch, round-trip-clean like maps).
+     Creating a whole new building (city_building + its levels) closes the "Spawning stays with
+     z-level linking" item from Stage 3.
+     - Reviewed 2026-09-28 after 10a/10b (core data); changes:
+     - Already there: every level is its own tab and MapDocument with its own undo (10b), and 10b
+       offers File > New map for a tile the building lists but no mapgen draws. What's left is a
+       level or point the building doesn't list yet (the "overmaps" edit) and better defaults.
+     - Fills, corrected (city_building tiles in core): upper floors are mostly fill_ter t_floor
+       (443), roofs t_flat_roof (296) or t_shingle_flat_roof (180), t_open_air only 62;
+       basements t_thconc_floor (122) or t_floor (60), rock 13. So: a floor above copies the
+       floor below's fill_ter; a roof (an id ending in _roof, or "Roof" picked) gets t_flat_roof
+       and roof_palette (413 of 503 roofs use it); a basement gets t_thconc_floor. Suggestions in
+       NewMapDialog, not rules.
+     - overmap_terrain stubs: EditSession.overmap_stub always copies generic_city_building. Core
+       upper floors copy generic_city_building (362) or generic_city_house_roof (145); basements
+       generic_city_house_basement (112). Give overmap_stub a base, and for a new level take the
+       base of the same point's other levels' overmap_terrain (their copy-from), else those
+       generics by z.
+     - The "overmaps" edit: the index is built once (_finish_buildings clears _building_defs), so
+       DataIndex needs set_building(object, Source) / a way to rebuild one Building and its
+       building_tiles from the live JsonFile object, and EditSession must put it back from disk on
+       discard (as it does for new mapgens and palettes). With copy-from, the object in effect may
+       have no "overmaps" (all 164 core copy-froms are mod overrides without one): edit the
+       definition that supplies the list and say which file that is, or refuse; don't silently
+       copy the list into the override. New entries copy the form of the same point's existing
+       entries ("locations" present or not; check BN's default_locations for z != 0 before
+       relying on it). Not undoable (like creating a mapgen); discard reverts it.
+     - A whole new building: a city_building spawns only if a region_settings / region_overlay
+       city list ("houses", "shops", "parks", "finales") names it (379 of 406 core ones are
+       listed; the rest spawn through other routes). Creating one must say so and offer the
+       entry (in a mod's region_overlay, never core's regional_map_settings.json unless the
+       building is in core); the Validator can report a city_building no region lists (NOTE).
+   - 10c + 10d done (2026-09-28, one session).
+     - Checked (BN 39f4883093): game::find_stairs as reviewed above, plus: going up skips a
+       GOES_DOWN cell that is DEEP_WATER, and core's lake/sea beds (t_lake_bed, t_ocean_bed,
+       t_bulkhead_roof, ...) are DEEP_WATER + GOES_UP (swum through), so DEEP_WATER cells aren't
+       stairs either way. region_overlay objects are applied the moment they load
+       (load_region_overlay), so one in core may load before core's region_settings; mods load
+       after core. City lists: houses, urban_houses, shops, urban_shops, parks, finales. New
+       entries: 2216 of 2224 core city_building entries have no "locations" (the building's
+       top-level "locations": ["land"] fills them in, fixed_overmap_special_data::finalize).
+     - 10c stairs: src/data/stairs.gd (Stairs) marks the cells of a map that MAY hold stairs up /
+       down / a landing (GOES_DOWN or t_manhole_cover): every id a cell's terrain or furniture can
+       get (Binding.ids: distributions, parameters, switches), place_terrain / place_furniture /
+       "set" point|line|square over their whole range, and every pick of every nested piece
+       (every "chunks" / "else_chunks" option, mapgen, rotation and anchor cell, recursively).
+       Validator._check_stairs pairs each overmap tile against the tile at z +/- 1 of every
+       building placing the map, in world orientation (each tile turned by its dir), against
+       every enabled mapgen of that tile (named "mapgen 2 of 3, weight 50"):
+       - STAIRS (warning, "the stairs lead nowhere"): the other tile has no stairs back anywhere,
+         or no mapgen draws it.
+       - STAIRS_OFFSET (note): none of them in the same cells; names the nearest one.
+       - STAIRS_NO_TILE (note, deviation: the plan said warning): the building has no tile there.
+         The four in core are labs / silos / an evac shelter whose level below comes from other
+         overmap generation (a lab special, hidden lab stairs), so the building doesn't decide.
+       A finding names its first place ("in 2Story02 (0, 0, z 1)") and counts the others with
+       the same text. validate_map takes an optional Stairs (MapDocument.findings and the MCP
+       validate_map pass one, so stair findings reach MCP clients); tests share one across maps.
+       Counted in core with chunks and every choice: 20 warnings (e.g. house_31 / house_32 have
+       no stairs down to their basements, urban_35_8's stairs down have no stairs up below), 249
+       offset notes (e.g. apartments_mod_tower_NW's stairs up at (20, 12), the floor above's down
+       at (22, 9)), 4 no-tile notes; no errors. The editor's own count, spot-checked by hand, not
+       an independent pass.
+     - 10c ghost: LevelNav.ghosts (the whole level z +/- 1, pieces as for neighbours; a one-tile
+       piece under the current map is turned by its dir minus the map's, so it lines up with the
+       map as drawn). The canvas draws it under the map and its neighbours where they are
+       see-through (AsciiMap.see_through: NO_FLOOR terrain such as t_open_air with no furniture
+       shown, or nothing placed), faded unless Dim is off; every other cell paints the
+       background so the ghost doesn't show through glyphs. The ghost's stairs to this level
+       (Stairs cells: up-stairs of the level below, landings of the level above) are marked on
+       top of everything (an outlined cell with a triangle). Deviation: "the level below, and
+       optionally the level above" is one toolbar picker (Ghost: below / none / above), as two
+       ghosts under one map can't be told apart; it and Dim are kept in AppSettings ([view]).
+       A tile with several mapgens shows one open in a tab, else the first (neighbours too now).
+       Selecting a stair finding in Problems switches the ghost to the level the stairs lead to.
+       Checked with non-headless screenshots (2Story02_roof / _2, mansion_t_up).
+     - 10d: src/edit/edit_session.gd "Building levels":
+       - NewMapgen.level (EditSession.LevelTarget: building, origin, dir) makes create_mapgen add
+         the new tiles to the building's "overmaps" (add_level_tiles), with the rotation suffix of
+         the map it was added to ("" for a NO_ROTATE tile). Not undoable (like creating a mapgen);
+         discarding the map's file also discards the building's file (EditSession.linked_files,
+         which Save of the map saves too) and puts DataIndex back from disk
+         (set_building_overmaps from _reindex_from_disk).
+       - The edit goes to Building.overmaps_source, the definition whose list is in effect: with
+         copy-from that is the base's definition, and the dialog says so and names every building
+         sharing the list (level_tiles_note). Refused: a mutable special, a point the building
+         already has (it goes there instead), a list that's gone. A new entry copies "locations"
+         from an entry at the same x, y when one has it.
+       - overmap_terrain stubs take a base (overmap_stub(ids, base), NewMapgen.overmap_base):
+         level_stub_base uses the copy-from of the same point's other levels on the same side of
+         the ground (nearest first), else generic_city_house_roof for a roof,
+         generic_city_house_basement below ground, else generic_city_building.
+       - Suggestions (BuildingLevels.new_level_id / new_level_defaults, prefilled in NewMapDialog):
+         id "x_2" above "x_1", "x_roof", "x_basement" (made unique); a roof t_flat_roof +
+         roof_palette; below ground t_thconc_floor; an upper floor copies the floor below's
+         fill_ter unless that is the ground floor (usually t_grass outside), then t_floor. The 10b
+         "missing level" offer uses the same fills.
+       - UI: a Level menu (level up / down, New level above..., New roof above..., New level
+         below..., New building from this map...). A new level spans the current map's
+         footprint and starts with its size and file.
+       - New building (NewBuildingDialog, EditSession.create_building): a city_building with
+         "locations": ["land"] placing the map's tiles at z 0 facing north, plus optionally a city
+         list entry with a weight (add_to_city_list): in a mod, a region_overlay for "all"
+         regions appended next to the building; in core, the region_settings of
+         data/json/regional_map_settings.json (a core overlay could load before the regions).
+         Without a list the dialog says the building won't spawn in cities.
+     - Result: tools/run_tests.sh passes 168 tests. test_stairs (Stairs cells from a chunk, from
+       place_terrain, not deep water; pairs, an offset second mapgen, a roof without a mapgen, a
+       tile below the building, a tile placed turned east; ghosts below / above / turned,
+       see-through cells, the picker and Dim, a finding switching the ghost), test_new_levels
+       (ids, fills, stub bases, refusals and notes; a level added through a copy-from, a roof
+       without a suffix, discard putting the index back, saved and read back; new buildings in
+       core and in a mod; the main window's New roof above and New building), test_edit_bn::
+       test_new_level_core (a level above 2Story02's roof: every other object of
+       multitile_city_buildings.json and of the map's file unchanged, BN untouched),
+       test_validation_bn (the stair counts above; core still has no errors). test_edit_bn and
+       test_viewer now expect apartments_mod_tower_NW's stair note.
+     - Code: src/data/building_levels.gd (moved out of LevelNav: Place, Tile, places, mapgens,
+       level, step, place_of; new_level_id, new_level_defaults), src/data/stairs.gd,
+       Validator._check_stairs (codes STAIRS, STAIRS_OFFSET, STAIRS_NO_TILE), DataIndex
+       Building.overmaps_source / set_building_overmaps / add_building / remove_building,
+       LevelNav.ghosts, AsciiMap.see_through, MapCanvas ghosts / ghost_dim / _draw_cells /
+       _draw_ghost_stairs, EditSession LevelTarget / level_stub_base / check_level_tiles /
+       add_level_tiles / create_building / add_to_city_list / linked_files,
+       src/ui/new_building_dialog.gd, main.gd (Level menu, ghost picker and Dim, new_level,
+       new_building, main.settings_file).
+     - Not done: roof edges vs the floor below's walls (the plan's "hint, not a check"; the ghost
+       shows them); t_elevator (2 levels) isn't paired; a stair finding is rebuilt when its own
+       map changes or its tab is shown, not when another level is edited in the background;
+       no Validator note for a city_building no region lists (the New building dialog says it
+       instead; buildings aren't validated objects yet); the toolbar needs ~1800 px to show the
+       ghost picker and Dim; the ghost of a turned multi-tile level is drawn unturned, like its
+       neighbours.
+   - 10e. MCP: get_map answers the building(s) and z of a map and its neighbours above/below;
+     a get_building tool (every level's ids and points); create_mapgen takes a building + z.
+     - Reviewed 2026-09-28: the read half (get_map's buildings/z/above/below and get_building,
+       with each tile's mapgens, rotation and "no mapgen" tiles) only needs 10a/10b and can be
+       done now, before 10c. create_mapgen with building + z needs 10d's overmaps edit and stub
+       bases. 9e (edit_palette_key) is still open and independent. The stair findings of 10c
+       reach validate_map on their own.
+     - Reviewed again 2026-09-28 after 10c/10d (against src/mcp/mcp_tools.gd); changes:
+       - Read half, now on BuildingLevels (src/data, no view code needed): get_map gains
+         "levels": one entry per place (BuildingLevels.places: building, type, origin point, dir,
+         the building's z list) with the tiles at z +/- 1 under the map's footprint
+         (BuildingLevels.level / step), each with oter, dir and its mapgens (file, index, weight,
+         disabled) or "no mapgen". get_building(id): type, mutable, the file giving its
+         "overmaps" (Building.overmaps_source, which differs from the definition for a
+         copy-from), and every tile by z (point, oter, dir, mapgens); a mutable special lists its
+         pieces without points.
+       - create_mapgen takes an optional "level": {building, point: [x, y, z] of the top-left
+         tile, dir}, filled into NewMapgen.level; dir defaults to the dir of the building's tile
+         at the same x, y on another level, else "north". Omitted fill_ter / palettes default to
+         BuildingLevels.new_level_defaults, overmap_base to EditSession.level_stub_base (a roof:
+         an id ending in _roof). Refusals come from check_level_tiles (mutable, taken point, gone
+         list); the answer adds "tiles_added" and level_tiles_note (which file, which buildings
+         share the list).
+       - A new level edits a second file (the building's). save with "file" must also save
+         EditSession.linked_files(file) (as the editor's Save does), and discard of the map's
+         file already takes the building edit back; say both in the tool descriptions.
+       - create_building (optional, same step): wraps EditSession.create_building with
+         city_list / weight; in core it edits data/json/regional_map_settings.json, a third
+         file, so it answers every file touched.
+       - Stair findings already reach validate_map (map_findings and MapDocument pass a
+         Stairs). Fixed in this review: validate_map on an open map now rebuilds its findings,
+         since another level may have been edited through MCP since (the editor does the same
+         on tab change).
+       - Accept: get_map on 2Story02_1 lists 2Story02 at (0, 0, z 0) with 2Story02_2 above and
+         2Story02_basement below; get_building 2Story02 gives four levels; create_mapgen with a
+         level on the fake tree of test_new_levels adds the tile, and save of the map's file
+         writes both files.
+   - 10e done (2026-09-28).
+     - get_map answers "levels" for an om_terrain map ([] when no building places it): per
+       place (BuildingLevels.places) building, type, origin, dir, z_levels, a note when the
+       building turns the map, and "above" / "below" {z, tiles}: the tiles of z +/- 1 under the
+       map's footprint, each {om_terrain, point, offset (in tiles from the map's top-left), dir,
+       mapgens: [{file, index, map (grid id), weight, disabled}] or no_mapgen}. Deviation: when
+       none is under the footprint, the nearest tile (BuildingLevels.step) marked "nearest", or a
+       note that the building has no such level. Mapgens are named by file + index (what the map
+       tools take; a variant number would need the grid's title, not the tile's id).
+     - get_building {id, z}: type, file, overmaps_from (with copy-from: the definition whose list
+       is in effect, and that a new level edits there), shares_overmaps_with, z_levels, levels by
+       z with the tiles as above; a mutable special answers "pieces" without points. Unknown ids
+       list the buildings containing the query. z (optional) limits it to one level (Isherwood's
+       900 tiles are a lot of text).
+     - create_mapgen "level": {building, point, dir: north|east|south|west|none}. Deviations:
+       - A point the building already lists with the same ids isn't refused: the map just draws
+         those tiles (tiles_added: [], "already lists"), the MCP form of 10b's missing-level
+         offer. Any other taken point is refused by check_level_tiles.
+       - dir's default is the tile at the same x, y on the nearest other level, the one below
+         first; "none" (a NO_ROTATE tile) writes the id without a suffix.
+       - fill_ter / palettes left out take new_level_defaults with the nearest level's first
+         mapgen's fill_ter (read through session.objects, so unsaved maps count), reported as
+         defaults_used; overmap_base is level_stub_base (a roof: an id ending in _roof).
+       - The answer's "level" has tiles_added, the level_tiles_note, and "error" if the mapgen
+         was made but the tiles couldn't be added; plus linked_files and a save_note.
+     - save {file} also saves the file's dirty linked_files (as the editor's Save); discard
+       already took them back (EditSession._release_file). Both descriptions say so.
+     - create_building {map (id / file+index), building, building_file (default: the map's
+       file), city_list, weight}: the map's tiles at z 0 facing north (as NewBuildingDialog),
+       refused by check_new_building; answers tiles, files_touched (the region settings in core),
+       and the city list note or that it won't spawn in cities.
+     - The server instructions mention levels (get_map's levels, get_building, create_mapgen's
+       level). 28 tools.
+     - Result: tools/run_tests.sh passes 173 tests. tests/test_mcp_levels.gd on a fake tree
+       (a building with a cellar no mapgen draws, a weighted floor, a copy-from twin, a turned
+       building, a mutable special): get_map levels, get_building (twin's overmaps_from, z
+       filter, pieces, unknown id), create_mapgen refusals, a level through the copy-from (tile,
+       dir, fill, stub base), a roof with dir none and roof_palette, filling the listed cellar,
+       save of the map's file writing both files, discard taking both back, create_building in a
+       mod and in core. test_mcp_bn::test_core_reads: 2Story02_1's place at (0, 0, 0) with
+       2Story02_2 above and 2Story02_basement below; get_building 2Story02 has four levels.
+     - Code: McpTools._add_level_tools, _levels, _building_tile, _level_mapgen, get_building,
+       _level_spec, create_building; create_mapgen / save changes; McpServer.INSTRUCTIONS.
+     - Not done: still not tried from a live Claude Code session; no MCP tool steps a map to the
+       next level's map in one call (get_map's above/below give file + index to pass).
+   - Also unblocks: joins/connections conditions for nested pieces (see the later milestones) need
+     the same overmap_special data.
+   - Open questions (updated 2026-09-28, after 10d): picking a building is the toolbar's Level
+     picker (10b); the ghost resolves chunks and the stair check counts every chunk pick (10c);
+     levels are compared turned (10c). Still open: showing the current map turned when its
+     building places it turned (editing stays unturned); mutable specials (listed, no levels).
+   - TODO (added 2026-09-28): pair elevators. Moved to Stage 11b (the movez +/- 2 premise was
+     wrong: BN's elevators are ELEVATOR-flag terrain with a floor picker).
+   - TODO (added 2026-09-28): draw turned multi-tile pieces turned. Moved to Stage 11a, with
+     showing the current map turned.
+Stage 11 - Loose ends of the level work, and editor housekeeping (planned 2026-09-28).
+   - Scope: the TODOs and "Not done" items left by Stages 3-10 that group well, except 9e
+     (edit_palette_key, still its own step). Tilesets, the preview roll, conditional pieces and the
+     Select tool stay in the later milestones: each is a stage of its own.
+   - 11a. Turned levels (Stage 10's "draw turned multi-tile pieces turned" TODO and the open
+     question of the current map's turn).
+     - A neighbour or ghost piece drawn by a grid mapgen whose tiles the building places turned is
+       split into one-tile pieces, each turned by its tile's dir (less the current map's, under
+       it) and put at its point, as BN turns each 24x24 tile on its own. LevelNav.Neighbor.turns()
+       stops being 0 above 1x1.
+     - A "View as placed" toggle draws the current map turned by its place's dir, with its
+       neighbours and ghost turned to match. Read-only while on: painting stays in the mapgen's
+       own orientation, so the toggle is a check, not a mode (hover and Pick still work, mapping
+       cells back through the turn).
+     - Accept: a fake building with a 2x1 grid floor placed _east lines up with a 1x1 floor above
+       (walls and stairs in the same world cells); a turned mansion tile in core, checked with a
+       non-headless screenshot.
+   - 11b. Elevators (replaces Stage 10's elevator TODO; its premise was wrong).
+     - Checked (BN 39f4883093): an elevator is terrain with the ELEVATOR flag (t_elevator,
+       t_elevator_no_roof), and the control has examine_action "elevator"
+       (src/iexamine_elevator.cpp): the car is the 4-connected ELEVATOR cells around the player,
+       and the floors offered are every z of the same overmap x, y with an ELEVATOR cell within 3
+       cells of the control's spot there (turned by the tiles' rotation difference,
+       get_rot_turns). Not movez +/- 2. game::find_local_stairs_leading_to also counts ELEVATOR
+       cells as stairs both ways, so today's stair check may report STAIRS / STAIRS_OFFSET where an
+       elevator serves the level: re-count core first.
+     - Stairs gains an ELEVATOR bit (the same "may hold" rules: every id choice, place_terrain,
+       chunk picks). The stair check treats ELEVATOR cells as both up and down stairs, as
+       find_local_stairs_leading_to does. A new check pairs each elevator control's car with the
+       building's other levels at that x, y: a car no other level can reach is a WARNING
+       (ELEVATOR: "the elevator goes nowhere"); a level whose car is more than 3 cells off is a
+       note. The ghost marks elevator cells of the level it shows.
+     - Stage 8's computer action elevator_on (switches every t_elevator_control_off on the
+       z-level) can name the controls it turns on, if the building has any at that z.
+     - Accept: core still has no errors; the stair counts are re-taken and the difference
+       explained; a fake three-level building with an elevator on 0 and 2 but not 1 reports z 1
+       nothing and z 0 / z 2 reachable.
+   - 11c. Keeping views and findings fresh.
+     - Other levels: a stair or elevator finding depends on the levels around it. EditSession
+       notifies maps whose building levels changed (the maps drawing the tiles at z +/- 1 of each
+       place of the edited map), so their findings rebuild; today they only rebuild on tab change.
+     - Neighbours and ghosts of other tabs redraw while you paint (throttled: at most once a
+       frame, only pieces drawn from the edited document).
+     - The disk: the editor checks the files it has open (JsonFile.changed_on_disk) when its
+       window gains focus and every few seconds, so the MCP server's saves show: a clean file is
+       read again at once; a dirty one gets a banner (reload and lose edits / keep mine, and save
+       then refuses as now). The Sync window refreshes on the same trigger.
+     - Accept: a stair finding on z 1 goes away when the stairs are painted on z 2 in another
+       tab; a workspace file rewritten by a second EditSession is picked up without F5.
+   - 11d. Buildings as validated objects.
+     - Validator.validate_building: a city_building no region's city list names (NOTE; 27 in
+       core, most spawned by other routes, so the text says so), "overmaps" entries naming an
+       overmap_terrain that doesn't exist (BN's check), a tile with no mapgen (NOTE; linear
+       terrains excepted). The Problems tab shows the building's findings for the current
+       map's place.
+     - Roof edges (Stage 10's "hint, not a check"): where a roof tile's non-open-air cells run
+       past the outer walls of the floor below, or leave its interior uncovered. Shown as a hint on
+       the ghost (outlined cells), not a finding, unless a core count shows it is rare enough to be
+       a note.
+     - Mutable specials: the Level picker lists their pieces with their mapgens (no levels);
+       get_building already does.
+     - MCP: validate_building {id}; validate_map's stair findings name the files + indexes of
+       the other levels involved, so a client can open them.
+     - Accept: core has no errors from validate_building; the city-list note count matches 10d's
+       379 of 406.
+   - 11e. Renames and removals.
+     - Remove or rename a map's own symbol (renaming repaints its cells; one undo step), rename a
+       palette key (PaletteImpact lists every map repainted), delete an unused palette (refused
+       while a loaded map uses it; lists them).
+     - The overmap_terrain auto-fix becomes an undo step of the map (today it marks the file
+       changed and only discard takes it back).
+     - MCP: rename_symbol; remove_symbol already exists.
+     - Accept: renaming a core palette key in a temp workspace repaints every using map and each
+       file's other objects stay byte-identical.
+   - 11f. UI polish.
+     - The toolbar fits at 1280 px: the ghost picker, Dim and the level controls move into a
+       Level toolbar group that collapses to a menu button when narrow (they need ~1800 px now).
+     - The New map dialog's Palettes field completes the last id (IdCompleter on the word under
+       the caret).
+     - The weighted id list's add row takes a position (insert above the selected row).
+     - Each chunk option in a list gets its own "Open", not just the drawn one.
+     - The palette editor's list scrolls to the palette opened.
+     - Accept: UI tests for each; a non-headless screenshot at 1280x800 with the full toolbar.
  Then the "Later milestones" list.
 
-Explicitly out of scope until the later milestones: tilesets, preview rolls, z-level linking, update_mapgen,
+Explicitly out of scope until the later milestones: tilesets, preview rolls, z-level linking (Stage 10), update_mapgen,
 lua mapgen, and editing terrain/furniture definitions themselves.
 
 Reference: plan written against Cataclysm-BN commit 39f4883093 (2026-09-26).

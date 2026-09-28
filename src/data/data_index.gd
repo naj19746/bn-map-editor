@@ -152,6 +152,66 @@ class MapgenRef:
 		return -Vector2i.ONE
 
 
+## A city_building or overmap_special (BN loads both as overmap specials):
+## which overmap terrains it places where, floors included.
+class Building:
+	var id := ""
+	## "city_building" or "overmap_special".
+	var type := ""
+	## The definition in effect (the last one loaded).
+	var source: Source
+	## A "subtype": "mutable" special: placed by rules, so its tiles have no
+	## fixed point (BuildingTile.placed is false).
+	var mutable := false
+	## Every tile, in the order the definition lists them.
+	var tiles: Array[BuildingTile] = []
+	## The definition whose "overmaps" list is in effect (the building's own,
+	## or the one it copies from); null when none has one.
+	var overmaps_source: Source
+
+	## The z-levels that have a tile, lowest first.
+	func levels() -> PackedInt32Array:
+		var out := PackedInt32Array()
+		for t in tiles:
+			if t.placed and not out.has(t.point.z):
+				out.append(t.point.z)
+		out.sort()
+		return out
+
+	## The tiles on level [param z].
+	func level(z: int) -> Array[BuildingTile]:
+		var out: Array[BuildingTile] = []
+		for t in tiles:
+			if t.placed and t.point.z == z:
+				out.append(t)
+		return out
+
+	## The tile at [param p], or null (the last one wins, as in BN).
+	func at(p: Vector3i) -> BuildingTile:
+		for i in range(tiles.size() - 1, -1, -1):
+			if tiles[i].placed and tiles[i].point == p:
+				return tiles[i]
+		return null
+
+
+## One "overmaps" entry of a Building.
+class BuildingTile:
+	## The Building's id (not the object: that would be a reference cycle).
+	var building := ""
+	var point := Vector3i.ZERO
+	## False for a mutable special's overmaps, which have no fixed point.
+	var placed := true
+	## The overmap terrain type, rotation suffix stripped: the id its
+	## om_terrain mapgen is registered under ("" when the entry names none).
+	var oter := ""
+	## The rotation it is placed with ("north", "east", "south", "west"), or
+	## "" for a terrain named without one (it doesn't rotate).
+	var dir := ""
+
+
+## Rotation suffixes of overmap terrain ids (BN's om_direction names).
+const DIRECTIONS := ["north", "east", "south", "west"]
+
 ## om_terrain ids ending in one of these belong to the LINEAR overmap_terrain
 ## without the suffix (BN's om_lines::mapgen_suffixes).
 const LINEAR_SUFFIXES := ["_straight", "_curved", "_end", "_tee", "_four_way"]
@@ -193,6 +253,11 @@ var update := {}
 var mapgens: Array[MapgenRef] = []
 ## overmap_terrain id -> Source of its last definition. Abstracts aren't ids.
 var overmap_terrain := {}
+## city_building / overmap_special id -> Building (copy-from applied).
+var buildings := {}
+## Overmap terrain type (as BuildingTile.oter) -> Array[BuildingTile]: the
+## buildings that place it, in building load order.
+var building_tiles := {}
 ## Kind (a value of ID_TYPES) -> {id: Source of its last definition}.
 var ids := {}
 ## om_terrain mapgen ids something other than an overmap_terrain uses: map
@@ -206,6 +271,9 @@ var file_count := 0
 var _abstracts := {TYPE_TERRAIN: {}, TYPE_FURNITURE: {}}
 ## [kind, object, Source] triples waiting for their copy-from base.
 var _deferred: Array = []
+## Building id -> Array of [object, Source], in load order; resolved once
+## everything (overmap_terrain included) has loaded.
+var _building_defs := {}
 
 
 ## Loads the core mod plus [param selected] mods (in load order, with their
@@ -241,6 +309,7 @@ func _load_all() -> void:
 			for file in data_files(dir, false, _overlay(dir)):
 				_load_file(mod, file)
 	_finish_deferred()
+	_finish_buildings()
 
 
 ## The workspace folder mirroring [param dir] (a folder in the BN checkout).
@@ -379,6 +448,12 @@ func _add_object(o: Dictionary, src: Source) -> void:
 		"overmap_terrain":
 			for id in _tags(o.get("id", [])):
 				overmap_terrain[id] = src
+		"city_building", "overmap_special":
+			var id := str(o.get("id", ""))
+			if id:
+				if not _building_defs.has(id):
+					_building_defs[id] = []
+				_building_defs[id].append([o, src])
 		"map_extra":
 			var gen: Variant = o.get("generator", o)
 			if gen is Dictionary and gen.get("generator_method") == "mapgen" and gen.get("generator_id") is String:
@@ -575,6 +650,134 @@ func _finish_deferred() -> void:
 		errors.append("%s %s: copy-from \"%s\" not found (%s)" % [
 			entry[0], o.get("id", o.get("abstract", "?")), o.get("copy-from"), entry[2]])
 	_deferred = []
+
+
+## Builds [member buildings] and [member building_tiles] from the loaded
+## definitions. A copy-from without its own "overmaps" keeps its base's (the
+## previous definition when it copies its own id, as mods overriding a
+## special's flags do).
+func _finish_buildings() -> void:
+	for id: String in _building_defs:
+		var defs: Array = _building_defs[id]
+		var got := _building_data(id, defs.size() - 1, 0)
+		var b := Building.new()
+		b.id = id
+		b.type = str(defs[-1][0].get("type"))
+		b.source = defs[-1][1]
+		b.mutable = got[0] == "mutable"
+		b.overmaps_source = got[2]
+		buildings[id] = b
+		_set_tiles(b, got[1])
+	_building_defs = {}
+
+
+## Puts [param b]'s tiles (and their building_tiles entries) as
+## [param overmaps] (an "overmaps" value) lists them.
+func _set_tiles(b: Building, overmaps: Variant) -> void:
+	for t in b.tiles:
+		if building_tiles.has(t.oter):
+			building_tiles[t.oter].erase(t)
+			if building_tiles[t.oter].is_empty():
+				building_tiles.erase(t.oter)
+	b.tiles.clear()
+	if b.mutable and overmaps is Dictionary:
+		for key: String in overmaps:
+			var e: Variant = overmaps[key]
+			if e is Dictionary and e.get("overmap") is String:
+				b.tiles.append(_building_tile(b.id, e.overmap, Vector3i.ZERO, false))
+	elif not b.mutable and overmaps is Array:
+		for e: Variant in overmaps:
+			if not e is Dictionary or not e.get("overmap") is String:
+				continue
+			var p: Variant = e.get("point")
+			if p is Array and p.size() == 3 and p.all(func(v: Variant) -> bool: return v is float or v is int):
+				b.tiles.append(_building_tile(b.id, e.overmap, Vector3i(int(p[0]), int(p[1]), int(p[2]))))
+	for t in b.tiles:
+		if t.oter:
+			if not building_tiles.has(t.oter):
+				building_tiles[t.oter] = []
+			building_tiles[t.oter].append(t)
+
+
+## Reads the tiles again for every building whose "overmaps" come from
+## the definition at [param src], now [param overmaps] (e.g. edited, or back
+## as on disk). Returns the buildings changed.
+func set_building_overmaps(src: Source, overmaps: Variant) -> Array[Building]:
+	var out: Array[Building] = []
+	for id: String in buildings:
+		var b: Building = buildings[id]
+		var from := b.overmaps_source
+		if from and from.path == src.path and from.index == src.index:
+			_set_tiles(b, overmaps)
+			out.append(b)
+	return out
+
+
+## Adds a building the editor created from [param o] (its own "overmaps",
+## no copy-from), defined at [param src].
+func add_building(o: Dictionary, src: Source) -> Building:
+	var b := Building.new()
+	b.id = str(o.get("id", ""))
+	b.type = str(o.get("type", ""))
+	b.source = src
+	b.mutable = o.get("subtype") == "mutable"
+	b.overmaps_source = src
+	buildings[b.id] = b
+	_set_tiles(b, o.get("overmaps"))
+	return b
+
+
+## Takes out a building add_building() added.
+func remove_building(b: Building) -> void:
+	_set_tiles(b, null)
+	buildings.erase(b.id)
+
+
+## [subtype, overmaps, Source of the definition giving the overmaps] of
+## definition [param k] of building [param id], following copy-from for what
+## it doesn't say itself.
+func _building_data(id: String, k: int, depth: int) -> Array:
+	var o: Dictionary = _building_defs[id][k][0]
+	var subtype: Variant = o.get("subtype")
+	var overmaps: Variant = o.get("overmaps")
+	var from_src: Source = _building_defs[id][k][1] if overmaps != null else null
+	var base := str(o.get("copy-from", ""))
+	if (subtype == null or overmaps == null) and base and depth < 32:
+		var from: Array = []
+		if base == id and k > 0:
+			from = _building_data(id, k - 1, depth + 1)
+		elif base != id and _building_defs.has(base):
+			from = _building_data(base, _building_defs[base].size() - 1, depth + 1)
+		if not from.is_empty():
+			if subtype == null:
+				subtype = from[0]
+			if overmaps == null:
+				overmaps = from[1]
+				from_src = from[2]
+	return [subtype if subtype is String else "fixed", overmaps, from_src]
+
+
+func _building_tile(building: String, oter_id: String, point: Vector3i, placed := true) -> BuildingTile:
+	var t := BuildingTile.new()
+	t.building = building
+	t.point = point
+	t.placed = placed
+	t.oter = oter_id
+	for dir: String in DIRECTIONS:
+		if oter_id.ends_with("_" + dir) and not overmap_terrain.has(oter_id):
+			t.oter = oter_id.trim_suffix("_" + dir)
+			t.dir = dir
+			break
+	return t
+
+
+## The building tiles that place overmap terrain [param oter_id] (with or
+## without a rotation suffix).
+func buildings_using(oter_id: String) -> Array[BuildingTile]:
+	var out: Array[BuildingTile] = []
+	out.assign(building_tiles.get(oter_id, building_tiles.get(
+			_building_tile("", oter_id, Vector3i.ZERO).oter, [])))
+	return out
 
 
 ## Indexes the mapgen object [param o] (also used for mapgens the editor

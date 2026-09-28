@@ -7,16 +7,16 @@ extends RefCounted
 ## Messages are read with BnJson, so an int id stays an int, and written with
 ## BnJson.stringify, which never puts a raw newline inside a message.
 ##
-## run() reads stdin until it closes. OS.read_buffer_from_stdin returns the
-## bytes available (blocking until there are some) and none at EOF; lines
-## are cut from those bytes, so a UTF-8 character split between two reads
-## is joined again. (OS.read_string_from_stdin strips the newline, so an
-## empty line would look like EOF.)
+## run() reads stdin until it closes, one byte per read:
+## OS.read_buffer_from_stdin is a blocking fread that returns only when the
+## whole size asked for has arrived (or at EOF), so a larger read would wait
+## forever on a client that keeps stdin open. Lines are cut from those bytes,
+## so a UTF-8 character is decoded whole. (OS.read_string_from_stdin strips
+## the newline, so an empty line would look like EOF.)
 
 const PROTOCOL_VERSIONS := ["2025-06-18", "2025-03-26", "2024-11-05"]
 const SERVER_NAME := "bn-map-editor"
 const SERVER_VERSION := "0.9"
-const READ_SIZE := 65536
 
 const PARSE_ERROR := -32700
 const INVALID_REQUEST := -32600
@@ -26,7 +26,12 @@ const INTERNAL_ERROR := -32603
 
 const INSTRUCTIONS := "Browse, validate and edit Cataclysm-BN JSON mapgen through the BN Map Editor. " \
 		+ "Start with search_maps, then get_map. Coordinates are x (column) and y (row) from the " \
-		+ "top-left cell, 0-based. Nothing is ever written into the BN checkout."
+		+ "top-left cell, 0-based; placements are named by member and 0-based index (finding texts count " \
+		+ "from 1: place_items #1 is index 0). Edits (paint_*, add_symbol, add_placement, ...) stay in memory, one undo " \
+		+ "step per call, until save writes the file to the workspace; nothing is ever written into the BN " \
+		+ "checkout (a person pushes workspace files into BN from the editor). A building's floors are " \
+		+ "separate om_terrain maps stacked by a city_building / overmap_special: get_map's levels and " \
+		+ "get_building show them, create_mapgen's level adds one."
 
 var tools: McpTools
 ## Where replies go; stdout by default. Tests collect them instead.
@@ -41,17 +46,14 @@ func _init(p_tools: McpTools) -> void:
 func run() -> void:
 	var buffer := PackedByteArray()
 	while true:
-		var chunk := OS.read_buffer_from_stdin(READ_SIZE)
-		if chunk.is_empty():
+		var byte := OS.read_buffer_from_stdin(1)
+		if byte.is_empty():
 			break
-		buffer.append_array(chunk)
-		var start := 0
-		var nl := buffer.find(10)
-		while nl >= 0:
-			_answer(buffer.slice(start, nl).get_string_from_utf8())
-			start = nl + 1
-			nl = buffer.find(10, start)
-		buffer = buffer.slice(start)
+		if byte[0] == 10:
+			_answer(buffer.get_string_from_utf8())
+			buffer.clear()
+		else:
+			buffer.append(byte[0])
 	if not buffer.is_empty():
 		_answer(buffer.get_string_from_utf8())
 

@@ -18,6 +18,13 @@ extends RefCounted
 
 ## Where a stub overmap_terrain copies from: an abstract city building in core.
 const OVERMAP_STUB_BASE := "generic_city_building"
+## Stub bases for a new roof and basement (core's house levels copy these).
+const ROOF_STUB_BASE := "generic_city_house_roof"
+const BASEMENT_STUB_BASE := "generic_city_house_basement"
+## The city lists of a region_settings "city" object that name buildings
+## (regional_settings.cpp load_building_types).
+const CITY_LISTS := ["houses", "urban_houses", "shops", "urban_shops", "parks", "finales"]
+const REGION_SETTINGS_FILE := "data/json/regional_map_settings.json"
 const DEFAULT_FILL := "t_grass"
 
 var index: DataIndex
@@ -39,6 +46,11 @@ var last_notes := PackedStringArray()
 var _new_refs := {}
 var _new_overmap := {}
 var _new_palettes := {}
+## rel path -> Array of DataIndex.Building the editor created there.
+var _new_buildings := {}
+## rel path of a map file -> the building files a new level of it edited,
+## released with it (see add_level_tiles).
+var _linked := {}
 
 
 func _init(p_index: DataIndex, p_workspace: Workspace, p_formatter: JsonFormatter = null) -> void:
@@ -66,7 +78,7 @@ func get_file(rel: String) -> JsonFile:
 		return null
 	f.in_workspace = index.in_workspace(rel)
 	if not f.in_workspace:
-		f.base_sha256 = FileAccess.get_sha256(abs_path)
+		f.base_sha256 = f.disk_sha256
 	files[rel] = f
 	return f
 
@@ -290,6 +302,9 @@ func save(rel: String) -> String:
 			return _fail("%s: %s" % [d.ref.title(), blocked[0]])
 	if not formatter.is_available():
 		return _fail("can't save without json_formatter: %s isn't built (run tools/build_json_formatter.sh)" % formatter.executable)
+	var stale := check_on_disk(rel)
+	if stale:
+		return _fail(stale)
 	var formatted := formatter.format(f.compose())
 	if not formatted.ok():
 		return _fail(formatted.error)
@@ -297,7 +312,7 @@ func save(rel: String) -> String:
 	if err:
 		return _fail(err)
 	last_notes = f.lossy_warnings()
-	f.mark_saved()
+	f.mark_saved(workspace.path(rel), JsonFile.sha256_at(workspace.path(rel)))
 	objects.forget(rel)
 	_new_refs.erase(rel)
 	_new_overmap.erase(rel)
@@ -305,12 +320,38 @@ func save(rel: String) -> String:
 	return ""
 
 
+## Why saving open file [param rel] would overwrite something it didn't
+## read, or "": the file it was read from changed (or went) since, or a
+## workspace copy appeared over a file read from BN. Only another program
+## does that, e.g. the editor and the MCP server on one workspace.
+func check_on_disk(rel: String) -> String:
+	var f: JsonFile = files.get(rel)
+	if f == null:
+		return ""
+	var target := workspace.path(rel)
+	if f.changed_on_disk() or (f.disk_path != target and FileAccess.file_exists(target)):
+		return "%s changed on disk since it was read (saved by another editor or MCP server?); " % rel \
+				+ "reload the data to see it (unsaved edits to it are lost)"
+	return ""
+
+
+## Open files whose file on disk changed since they were read (see
+## check_on_disk).
+func changed_on_disk() -> PackedStringArray:
+	var out := PackedStringArray()
+	for rel: String in files:
+		if check_on_disk(rel):
+			out.append(rel)
+	return out
+
+
 ## [param rel] was pushed into BN and its workspace copy deleted. An open
 ## copy now counts as read from BN, so its next save records BN's new file
 ## as the base instead of marking the file new.
 func mark_pushed(rel: String) -> void:
 	if files.has(rel):
-		files[rel].mark_pushed(FileAccess.get_sha256(workspace.bn_path.path_join(rel)))
+		var bn_file := workspace.bn_path.path_join(rel)
+		files[rel].mark_pushed(FileAccess.get_sha256(bn_file), bn_file)
 
 
 ## Saves every file with changes. Returns the errors.
@@ -332,6 +373,22 @@ func close(doc: MapDocument) -> void:
 	_release_file(doc.file.rel_path)
 
 
+## Closes every map and palette of file [param rel], dropping its unsaved
+## changes (see _release_file). Returns the titles closed.
+func discard(rel: String) -> PackedStringArray:
+	var closed := PackedStringArray()
+	for d in docs_for(rel):
+		closed.append(d.ref.title())
+		close(d)
+	for d in palette_docs.duplicate():
+		if d.file.rel_path == rel:
+			closed.append("palette " + d.id)
+			close_palette(d)
+	# A file read without a document (a palette shown, not edited).
+	_release_file(rel)
+	return closed
+
+
 ## Drops file [param rel] once nothing has it open. Unsaved changes are
 ## thrown away, and the index is put back as the file on disk has it.
 func _release_file(rel: String) -> void:
@@ -344,9 +401,12 @@ func _release_file(rel: String) -> void:
 		index.overmap_terrain.erase(id)
 	for def: DataIndex.Definition in _new_palettes.get(rel, []):
 		index.remove_palette(def)
+	for b: DataIndex.Building in _new_buildings.get(rel, []):
+		index.remove_building(b)
 	_new_refs.erase(rel)
 	_new_overmap.erase(rel)
 	_new_palettes.erase(rel)
+	_new_buildings.erase(rel)
 	files.erase(rel)
 	objects.forget(rel)
 	if dirty:
@@ -354,10 +414,14 @@ func _release_file(rel: String) -> void:
 		# Chunks or palettes from the file are back as on disk.
 		for d in docs:
 			d.refresh_overlay()
+	for other: String in _linked.get(rel, []):
+		_release_file(other)
+	_linked.erase(rel)
 
 
-## Palette data and maps' palette and chunk lists of [param rel] as the file
-## on disk has them (the editor changed them in place).
+## Palette data, maps' palette and chunk lists and buildings' tiles of
+## [param rel] as the file on disk has them (the editor changed them in
+## place).
 func _reindex_from_disk(rel: String) -> void:
 	var json := JSON.new()
 	var path := index.file_path(rel)
@@ -369,6 +433,13 @@ func _reindex_from_disk(rel: String) -> void:
 		for def: DataIndex.Definition in index.palettes[id]:
 			if def.source.path == rel and def.source.index < on_disk.size() and on_disk[def.source.index] is Dictionary:
 				def.data = on_disk[def.source.index]
+	var seen := {}
+	for id: String in index.buildings:
+		var src: DataIndex.Source = index.buildings[id].overmaps_source
+		if src and src.path == rel and not seen.has(src.index):
+			seen[src.index] = true
+			var o: Variant = on_disk[src.index] if src.index < on_disk.size() else null
+			index.set_building_overmaps(src, o.get("overmaps") if o is Dictionary else null)
 	for ref in index.mapgens:
 		if ref.source.path == rel and ref.source.index < on_disk.size() and on_disk[ref.source.index] is Dictionary:
 			var obj: Variant = on_disk[ref.source.index].get("object")
@@ -414,7 +485,7 @@ func create_palette(rel: String, id: String) -> PaletteDocument:
 		return null
 	var f := get_file(rel) if _file_exists(rel) else null
 	if f == null:
-		f = JsonFile.create(rel)
+		f = JsonFile.create_at(rel, workspace.path(rel))
 		files[rel] = f
 	var o := {"type": "palette", "id": id}
 	var i := f.append(o)
@@ -453,9 +524,31 @@ class NewMapgen:
 	## Set for a nested chunk: its mapgensize, 1-24 cells each way. A chunk
 	## gets no fill_ter (BN ignores it there) and no overmap_terrain.
 	var chunk_size := Vector2i.ZERO
+	## What new overmap_terrain entries copy from ("": OVERMAP_STUB_BASE).
+	var overmap_base := ""
+	## Set for a new level of a building: its tiles are added to the
+	## building's "overmaps" (see add_level_tiles).
+	var level: LevelTarget
 
 	func is_chunk() -> bool:
 		return chunk_size != Vector2i.ZERO
+
+
+## Where a new map goes in a building: its top-left tile at [member origin]
+## of building [member building], the others to the east and south, each
+## placed with rotation [member dir].
+class LevelTarget:
+	var building := ""
+	var origin := Vector3i.ZERO
+	var dir := "north"
+
+	## [point, "overmap" value] per tile of the om_terrain grid [param ids].
+	func entries(ids: Array[PackedStringArray]) -> Array:
+		var out := []
+		for y in ids.size():
+			for x in ids[y].size():
+				out.append([origin + Vector3i(x, y, 0), ids[y][x] + ("_" + dir if dir else "")])
+		return out
 
 
 ## The default om_terrain grid for [param base]: the id itself for 1x1,
@@ -499,6 +592,10 @@ func check_new_mapgen(spec: NewMapgen) -> String:
 	for p in spec.palettes:
 		if index.palette(p) == null:
 			return "Unknown palette \"%s\"." % p
+	if spec.level and not spec.is_chunk():
+		var level_problem := check_level_tiles(spec.level.building, spec.level.entries(spec.ids))
+		if level_problem:
+			return level_problem
 	if _file_exists(rel):
 		var f := get_file(rel)
 		if f == null:
@@ -516,7 +613,7 @@ func create_mapgen(spec: NewMapgen) -> MapDocument:
 	var rel := spec.rel_path
 	var f := get_file(rel) if _file_exists(rel) else null
 	if f == null:
-		f = JsonFile.create(rel)
+		f = JsonFile.create_at(rel, workspace.path(rel))
 		files[rel] = f
 	var mapgen := _new_mapgen_object(spec)
 	var i := f.append(mapgen)
@@ -525,7 +622,15 @@ func create_mapgen(spec: NewMapgen) -> MapDocument:
 	var doc := MapDocument.open(index, f, i, ref)
 	_add_doc(doc)
 	if spec.add_overmap_terrain and not spec.is_chunk():
-		add_missing_overmap_terrain(doc)
+		add_missing_overmap_terrain(doc, spec.overmap_base)
+	if spec.level and not spec.is_chunk():
+		var err := add_level_tiles(spec.level.building, spec.level.entries(spec.ids))
+		if err:
+			_fail(err)
+		else:
+			var b_rel: String = index.buildings[spec.level.building].overmaps_source.path
+			if b_rel != rel:
+				_remember(_linked, rel, b_rel)
 	return doc
 
 
@@ -555,13 +660,14 @@ static func _new_mapgen_object(spec: NewMapgen) -> Dictionary:
 
 
 ## Appends a minimal overmap_terrain for [param doc]'s om_terrain ids that
-## have none, next to the map in its file. Returns the ids added.
-func add_missing_overmap_terrain(doc: MapDocument) -> PackedStringArray:
+## have none, next to the map in its file, copying [param base] ("":
+## OVERMAP_STUB_BASE). Returns the ids added.
+func add_missing_overmap_terrain(doc: MapDocument, base := "") -> PackedStringArray:
 	var missing := doc.missing_overmap_terrain()
 	if missing.is_empty():
 		return missing
 	var rel := doc.file.rel_path
-	var i := doc.file.append(overmap_stub(missing))
+	var i := doc.file.append(overmap_stub(missing, base))
 	var src := DataIndex.Source.new(index.mod_for_path(rel), rel, i)
 	for id in missing:
 		index.overmap_terrain[id] = src
@@ -572,15 +678,204 @@ func add_missing_overmap_terrain(doc: MapDocument) -> PackedStringArray:
 
 
 ## A minimal overmap_terrain for [param ids]: a city building named after
-## the first id. Rotatable, so BN adds the _north/_east/... variants itself.
-static func overmap_stub(ids: PackedStringArray) -> Dictionary:
+## the first id, copying [param base] ("": OVERMAP_STUB_BASE). Rotatable,
+## so BN adds the _north/_east/... variants itself.
+static func overmap_stub(ids: PackedStringArray, base := "") -> Dictionary:
 	return {
 		"type": "overmap_terrain",
 		"id": ids[0] if ids.size() == 1 else Array(ids),
-		"copy-from": OVERMAP_STUB_BASE,
+		"copy-from": base if base else OVERMAP_STUB_BASE,
 		"name": ids[0].replace("_", " "),
 		"color": "light_gray",
 	}
+
+
+# --- Building levels -----------------------------------------------------------
+
+## What a new level's overmap_terrain copies: the copy-from of the
+## overmap_terrain at another level of [param building]'s point
+## ([param at], z ignored) on the same side of the ground (nearest first),
+## else core's generic by z: a roof ([param roof]) the house roof, below
+## ground the house basement, else OVERMAP_STUB_BASE.
+func level_stub_base(building: String, at: Vector3i, roof := false) -> String:
+	var b: DataIndex.Building = index.buildings.get(building)
+	var best := ""
+	var best_d := 0
+	if b:
+		for t in b.tiles:
+			if not t.placed or t.point.x != at.x or t.point.y != at.y or t.point.z == at.z:
+				continue
+			if signi(t.point.z) != signi(at.z) or not index.overmap_terrain.has(t.oter):
+				continue
+			var base: Variant = index.read_object(index.overmap_terrain[t.oter]).get("copy-from")
+			var d := absi(t.point.z - at.z)
+			if base is String and base and (best.is_empty() or d < best_d):
+				best = base
+				best_d = d
+	if best:
+		return best
+	if roof:
+		return ROOF_STUB_BASE
+	return BASEMENT_STUB_BASE if at.z < 0 else OVERMAP_STUB_BASE
+
+
+## Why [param entries] ([point, "overmap" value] pairs) can't be added to
+## building [param id]'s "overmaps", or "".
+func check_level_tiles(id: String, entries: Array) -> String:
+	var b: DataIndex.Building = index.buildings.get(id)
+	if b == null:
+		return "Unknown building %s." % id
+	if b.mutable:
+		return "%s is a mutable special (placed by rules, no fixed points); add levels to it by hand." % id
+	var src := b.overmaps_source
+	if src == null:
+		return "%s has no \"overmaps\" list to add to." % id
+	for e: Array in entries:
+		var t := b.at(e[0])
+		if t:
+			return "%s already has %s at %s." % [id, t.oter, e[0]]
+	var f := get_file(src.path)
+	if f == null:
+		return "Can't open %s: %s" % [src.path, last_error]
+	var o: Variant = f.objects[src.index] if src.index < f.objects.size() else null
+	if not (o is Dictionary and o.get("overmaps") is Array):
+		return "%s #%d no longer has the \"overmaps\" list of %s." % [src.path, src.index, id]
+	return ""
+
+
+## Where add_level_tiles() writes for building [param id], as a sentence
+## ("" if it can't).
+func level_tiles_note(id: String) -> String:
+	var b: DataIndex.Building = index.buildings.get(id)
+	if b == null or b.overmaps_source == null:
+		return ""
+	var src := b.overmaps_source
+	var text := "Adds the new tiles to the \"overmaps\" of %s in %s" % [id, src.path]
+	if src.path != b.source.path or src.index != b.source.index:
+		var o := index.read_object(src)
+		text += " (the definition of %s it copies them from)" % str(o.get("id", "?"))
+	var sharing := PackedStringArray()
+	for other: String in index.buildings:
+		var ob: DataIndex.Building = index.buildings[other]
+		if other != id and ob.overmaps_source and ob.overmaps_source.path == src.path \
+				and ob.overmaps_source.index == src.index:
+			sharing.append(other)
+	if not sharing.is_empty():
+		text += "; %s get%s them too" % [", ".join(sharing), "s" if sharing.size() == 1 else ""]
+	return text + "."
+
+
+## Adds [param entries] ([point, "overmap" value] pairs) to building
+## [param id]'s "overmaps", in the definition that supplies the list (its
+## own, or the one it copies from; see level_tiles_note), and indexes them.
+## A new entry copies "locations" from an entry at the same x, y if one has
+## it. Not undoable: discarding the building's file takes it back. Returns
+## an error, or "".
+func add_level_tiles(id: String, entries: Array) -> String:
+	var problem := check_level_tiles(id, entries)
+	if problem:
+		return _fail(problem)
+	var src: DataIndex.Source = index.buildings[id].overmaps_source
+	var f := get_file(src.path)
+	f.touch(src.index)
+	var list: Array = f.objects[src.index].overmaps
+	for e: Array in entries:
+		var p: Vector3i = e[0]
+		var entry := {"point": [p.x, p.y, p.z], "overmap": e[1]}
+		for other: Variant in list:
+			if other is Dictionary and other.has("locations") and other.get("point") is Array \
+					and other.point.size() == 3 and int(other.point[0]) == p.x and int(other.point[1]) == p.y:
+				entry["locations"] = other.locations.duplicate(true)
+				break
+		list.append(entry)
+	index.set_building_overmaps(src, list)
+	for d in docs:
+		d.forget_findings()
+	return ""
+
+
+## Adds a city_building [param id] to [param rel] (created if new) placing
+## [param entries] ([point, "overmap" value] pairs), on "land" like core's.
+## With [param city_list] (one of CITY_LISTS), also names it in that list
+## with [param weight] (see add_to_city_list). Returns an error, or "".
+func create_building(rel: String, id: String, entries: Array, city_list := "", weight := 100) -> String:
+	last_error = ""
+	var problem := check_new_building(rel, id, city_list)
+	if problem:
+		return _fail(problem)
+	var f := get_file(rel) if _file_exists(rel) else null
+	if f == null:
+		f = JsonFile.create_at(rel, workspace.path(rel))
+		files[rel] = f
+	var overmaps := []
+	for e: Array in entries:
+		overmaps.append({"point": [e[0].x, e[0].y, e[0].z], "overmap": e[1]})
+	var o := {"type": "city_building", "id": id, "locations": ["land"], "overmaps": overmaps}
+	var i := f.append(o)
+	var b := index.add_building(o, DataIndex.Source.new(index.mod_for_path(rel), rel, i))
+	_remember(_new_buildings, rel, b)
+	if city_list:
+		return add_to_city_list(rel, id, city_list, weight)
+	return ""
+
+
+## Why a city_building [param id] can't be created in [param rel] (and put
+## in [param city_list]), or "".
+func check_new_building(rel: String, id: String, city_list := "") -> String:
+	var path_problem := _check_new_path(rel)
+	if path_problem:
+		return path_problem
+	if id.is_empty() or id.contains(" ") or id.contains("\""):
+		return "\"%s\" isn't a valid building id." % id
+	if index.buildings.has(id):
+		return "%s already exists (%s); a second definition would replace it." % [id, index.buildings[id].source]
+	if city_list and not CITY_LISTS.has(city_list):
+		return "Unknown city list \"%s\" (one of %s)." % [city_list, ", ".join(CITY_LISTS)]
+	if _file_exists(rel) and get_file(rel) == null:
+		return "Can't add to %s: %s" % [rel, last_error]
+	return ""
+
+
+## Where add_to_city_list() names a building of [param rel], as a sentence.
+func city_list_note(rel: String) -> String:
+	if index.catalog.get_mod(index.mod_for_path(rel)).core:
+		return "Adds it to the \"default\" region's city list in %s (a region_overlay in core may load before the regions it changes)." % REGION_SETTINGS_FILE
+	return "Adds a region_overlay naming it for every region, next to it in %s." % rel
+
+
+## Names building [param id] (defined in [param rel]) in city list
+## [param list] with [param weight], so cities spawn it: in a mod, a
+## region_overlay for "all" regions appended to [param rel] (BN applies
+## overlays as it loads them, after core's regions); in core, the region
+## settings of REGION_SETTINGS_FILE (every region_settings there with a
+## "city"). Returns an error, or "".
+func add_to_city_list(rel: String, id: String, list: String, weight: int) -> String:
+	if index.catalog.get_mod(index.mod_for_path(rel)).core:
+		var f := get_file(REGION_SETTINGS_FILE)
+		if f == null:
+			return _fail("Can't open %s: %s" % [REGION_SETTINGS_FILE, last_error])
+		var done := 0
+		for i in f.objects.size():
+			var o: Variant = f.objects[i]
+			if o is Dictionary and o.get("type") == "region_settings" and o.get("city") is Dictionary:
+				f.touch(i)
+				if not o.city.get(list) is Dictionary:
+					o.city[list] = {}
+				o.city[list][id] = weight
+				done += 1
+		if done == 0:
+			return _fail("%s has no region_settings with a \"city\" object." % REGION_SETTINGS_FILE)
+		_remember(_linked, rel, REGION_SETTINGS_FILE)
+		return ""
+	var f := get_file(rel)
+	f.append({"type": "region_overlay", "regions": ["all"], "city": {list: {id: weight}}})
+	return ""
+
+
+## The files a new level or building made from map file [param rel]
+## edited (its building's, the region settings), which go with it.
+func linked_files(rel: String) -> PackedStringArray:
+	return PackedStringArray(_linked.get(rel, []))
 
 
 func _remember(table: Dictionary, rel: String, value: Variant) -> void:

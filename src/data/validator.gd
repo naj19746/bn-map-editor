@@ -45,6 +45,7 @@ enum Code {
 	DROPPED, DROPPED_SET, ITEMS_CHANCE, COMPUTER_IGNORED, NO_OPTIONS, NO_STAND, NO_DOOR,
 	DISABLED, SPANS_BACK, OUTSIDE_CHUNK, CHUNK_ROTATION, OVERHANG, CONDITIONAL, UNUSED_KEY_ID,
 	DOOR_ELSEWHERE, OTHER_LOCKED, SHARED_DOOR, EDGE_CONSOLE, CHUNK_CONSOLE, CONSOLE_OVERHANG,
+	STAIRS, STAIRS_OFFSET, STAIRS_NO_TILE,
 }
 
 const NOT_CHECKED := "Not checked yet: sign and graffiti snippets, zone types and factions, mapgen " \
@@ -76,6 +77,7 @@ const ID_KINDS := {
 const CONVERTED := ["terrain", "furniture", "trap", "field_type"]
 ## Gas pumps take only these (jmapgen_gaspump::check).
 const FUELS := ["null", "gasoline", "diesel", "jp8", "avgas"]
+const OMT_CELLS := MapgenResolver.OMT_SIZE
 
 ## Per mapping kind (and the place_* list using the same piece): the fields
 ## holding ids, as [field, id kind]. Terrain, furniture and traps are
@@ -148,6 +150,8 @@ class Finding:
 					return "it does nothing in game"
 				if code == Code.CONSOLE_OVERHANG:
 					return "BN crashes if that tile isn't generated yet"
+				if code == Code.STAIRS:
+					return "the stairs lead nowhere"
 				return "BN silently skips it"
 		return "works, but oddly"
 
@@ -176,12 +180,19 @@ var _console_texts := {}
 ## Every finding for map [param mapgen] (a whole mapgen object) of
 ## [param ref], resolved as [param resolved], with [param placements] and
 ## its chunk [param overlay] (null to skip the chunk checks). Palettes it
-## uses are left to validate_palette().
+## uses are left to validate_palette(). With [param stairs], its stairs are
+## paired with the levels above and below in every building placing it
+## (see _check_stairs); share one Stairs between maps to look each other
+## level up once.
 static func validate_map(p_index: DataIndex, ref: DataIndex.MapgenRef, mapgen: Dictionary,
-		resolved: ResolvedMapgen, placements: Array[Placement], overlay: ChunkOverlay) -> Array[Finding]:
+		resolved: ResolvedMapgen, placements: Array[Placement], overlay: ChunkOverlay,
+		stairs: Stairs = null) -> Array[Finding]:
 	var v := Validator.new()
 	v.index = p_index
 	v._check_map(ref, mapgen, resolved, placements, overlay)
+	if stairs and ref and not ref.disabled and ref.kind == DataIndex.MapgenRef.OM_TERRAIN \
+			and mapgen.get("object") is Dictionary:
+		v._check_stairs(ref, stairs.grid_of(mapgen, resolved, overlay), stairs)
 	return v.findings
 
 
@@ -1026,6 +1037,110 @@ static func id_candidates(index: DataIndex, kind: String) -> PackedStringArray:
 ## mod that isn't loaded is unknown here.
 func _mods_note() -> String:
 	return " in the loaded mods" if index.mods.size() > 1 else ""
+
+
+# --- Stairs between levels ------------------------------------------------------
+
+## Each overmap tile's stairs against the tile above (GOES_UP) and below
+## (GOES_DOWN) in every building placing the map, as game::find_stairs
+## pairs them (see Stairs): the other tile has no stairs back at all (or no
+## mapgen draws it), a WARNING: BN drops the player at the same x,y; none of
+## them at the same cells, a NOTE: the player arrives at the nearest one;
+## the building has no tile there, a NOTE: what the overmap puts there
+## (another special, a lab) decides. A finding names the first place and
+## counts the others with the same text. Every enabled mapgen of the other tile is paired (each is a
+## finding of its own, named). Levels are compared in world orientation:
+## each tile turned by its rotation in the building.
+func _check_stairs(ref: DataIndex.MapgenRef, grid: Stairs.Grid, stairs: Stairs) -> void:
+	## text -> [Finding, buildings]
+	var seen := {}
+	for place in BuildingLevels.places(index, ref):
+		for id in ref.ids:
+			var at := ref.position_of(id)
+			var bt := place.building.at(place.origin + Vector3i(at.x, at.y, 0))
+			if bt == null or bt.oter != id:
+				continue
+			for dz: int in [1, -1]:
+				var mine := grid.cells(at, Stairs.UP if dz > 0 else Stairs.DOWN)
+				if mine.is_empty():
+					continue
+				for pair in _stair_pairs(id, ref.ids.size() > 1, at * OMT_CELLS, bt, dz, mine, place, stairs):
+					var text: String = pair[1]
+					if seen.has(text):
+						seen[text][1].append(place.label())
+						continue
+					_to(Target.CELL, "")
+					_cell_target(at * OMT_CELLS + mine[0])
+					seen[text] = [_add(pair[0], pair[2], text), [place.label()]]
+	for text: String in seen:
+		var f: Finding = seen[text][0]
+		var where: Array = seen[text][1]
+		f.text = "in %s%s: %s" % [where[0], " and %d other place%s" % [where.size() - 1,
+				"" if where.size() == 2 else "s"] if where.size() > 1 else "", text]
+
+
+## [severity, text, code] for the stairs [param mine] (tile-local cells) of tile
+## [param bt] ([param id]) against the tile [param dz] levels away.
+## [param offset] is the tile's first cell in the map ([param multi]: one
+## of several tiles); texts give map cells.
+func _stair_pairs(id: String, multi: bool, offset: Vector2i, bt: DataIndex.BuildingTile, dz: int, mine: Array[Vector2i],
+		place: BuildingLevels.Place, stairs: Stairs) -> Array:
+	var out := []
+	var what := "stairs %s at %s%s" % ["up" if dz > 0 else "down", _cells_text(mine, offset),
+			" (tile %s)" % id if multi else ""]
+	var other := place.building.at(bt.point + Vector3i(0, 0, dz))
+	var level := "the tile %s (z %d)" % ["above" if dz > 0 else "below", bt.point.z + dz]
+	if other == null:
+		out.append([Severity.NOTE, "%s: %s has no tile %s (z %d); they connect only if what the overmap puts there (another special, a lab, ...) has stairs %s" % [
+				what, place.building.id, "above" if dz > 0 else "below", bt.point.z + dz, "down" if dz > 0 else "up"], Code.STAIRS_NO_TILE])
+		return out
+	var refs: Array[DataIndex.MapgenRef] = []
+	for r in BuildingLevels.mapgens(index, other.oter):
+		if not r.disabled:
+			refs.append(r)
+	if refs.is_empty():
+		out.append([Severity.WARNING, "%s: no mapgen draws %s, %s, so it has no stairs back" % [
+				what, other.oter, level], Code.STAIRS])
+		return out
+	var turns := _turns(other.dir) - _turns(bt.dir)
+	for i in refs.size():
+		var g := stairs.grid_for(refs[i])
+		if g == null:
+			continue
+		var theirs := {}
+		for c in g.cells(refs[i].position_of(other.oter), Stairs.LANDING if dz > 0 else Stairs.UP):
+			theirs[ChunkOverlay.rotate(c, turns, Vector2i(OMT_CELLS, OMT_CELLS))] = true
+		var name := other.oter
+		if refs.size() > 1:
+			name += " (mapgen %d of %d, weight %d)" % [i + 1, refs.size(), refs[i].weight]
+		if theirs.is_empty():
+			out.append([Severity.WARNING, "%s: %s, %s, has no stairs %s anywhere in the tile; BN drops the player at the same x,y" % [
+					what, name, level, "down" if dz > 0 else "up"], Code.STAIRS])
+		elif not mine.any(func(c: Vector2i) -> bool: return theirs.has(c)):
+			var near: Vector2i = theirs.keys()[0]
+			for c: Vector2i in theirs:
+				if _dist(c, mine[0]) < _dist(near, mine[0]):
+					near = c
+			out.append([Severity.NOTE, "%s: %s, %s, has its stairs %s elsewhere, e.g. over (%d, %d); BN takes the player to the nearest" % [
+					what, name, level, "down" if dz > 0 else "up", offset.x + near.x, offset.y + near.y], Code.STAIRS_OFFSET])
+	return out
+
+
+static func _turns(dir: String) -> int:
+	return maxi(0, DataIndex.DIRECTIONS.find(dir))
+
+
+static func _dist(a: Vector2i, b: Vector2i) -> int:
+	return maxi(absi(a.x - b.x), absi(a.y - b.y))
+
+
+## "(3, 4)" or "(3, 4) and 2 more cells": [param cells] moved by
+## [param offset].
+static func _cells_text(cells: Array[Vector2i], offset: Vector2i) -> String:
+	var t := "(%d, %d)" % [offset.x + cells[0].x, offset.y + cells[0].y]
+	if cells.size() > 1:
+		t += " and %d more cell%s" % [cells.size() - 1, "" if cells.size() == 2 else "s"]
+	return t
 
 
 # --- Adding findings -----------------------------------------------------------

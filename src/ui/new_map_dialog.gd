@@ -5,6 +5,8 @@ extends ConfirmationDialog
 ## existing one). Offers to add overmap_terrain entries for new ids, without
 ## which BN never generates the map. Or creates a nested chunk: its
 ## nested_mapgen_id and mapgensize (1-24 cells each way), palettes and file.
+## A new level of a building ([member level]) also goes into the building's
+## "overmaps".
 
 signal map_created(doc: MapDocument)
 
@@ -28,6 +30,11 @@ var _session: EditSession
 var _ids_touched := false
 var _path_touched := false
 var _filling := false
+## Set for a new level of a building (see EditSession.NewMapgen.level);
+## setup() clears it.
+var level: EditSession.LevelTarget
+## What new overmap_terrain entries copy ("": EditSession's default).
+var overmap_base := ""
 
 
 func _init() -> void:
@@ -112,6 +119,27 @@ func set_kind(kind: int) -> void:
 	_autofill()
 
 
+## Starts the fields from om_terrain / nested id [param base] and, unless
+## empty, file [param rel_path], fill_ter [param fill], [param palettes]
+## and the size in tiles [param tiles].
+func prefill(base: String, rel_path := "", fill := "", palettes := PackedStringArray(),
+		tiles := Vector2i.ZERO) -> void:
+	_filling = true
+	if tiles.x > 0:
+		width.value = tiles.x
+		height.value = tiles.y
+	if fill:
+		fill_edit.text = fill
+	if not palettes.is_empty():
+		palettes_edit.text = " ".join(palettes)
+	_filling = false
+	base_edit.text = base
+	if rel_path:
+		path_edit.text = rel_path
+		_path_touched = true
+	_autofill()
+
+
 func is_chunk() -> bool:
 	return kind_picker.selected == Kind.CHUNK
 
@@ -120,6 +148,8 @@ func setup(session: EditSession) -> void:
 	_session = session
 	_ids_touched = false
 	_path_touched = false
+	level = null
+	overmap_base = ""
 	_autofill()
 
 
@@ -143,6 +173,8 @@ func spec() -> EditSession.NewMapgen:
 	for p in palettes_edit.text.replace(",", " ").split(" ", false):
 		s.palettes.append(p)
 	s.add_overmap_terrain = overmap_check.button_pressed
+	s.level = level
+	s.overmap_base = overmap_base
 	return s
 
 
@@ -181,6 +213,9 @@ func _validate() -> void:
 					lines.append("\"%s\" already has a mapgen; this adds a variant (picked by weight)." % id)
 		if s.is_chunk():
 			lines.append("Place it in a map with place_nested (Placements tab) or a \"nested\" symbol mapping.")
+		elif s.level:
+			lines.append("%s New overmap_terrain entries copy %s." % [_session.level_tiles_note(s.level.building),
+					overmap_base if overmap_base else EditSession.OVERMAP_STUB_BASE])
 	_info.text = "\n".join(lines)
 	_info.modulate = Color(1, 0.6, 0.6) if problem else Color(0.8, 0.8, 0.85)
 

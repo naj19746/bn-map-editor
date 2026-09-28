@@ -5,6 +5,7 @@ extends "res://tests/support/test_case.gd"
 
 const TempTree := preload("res://tests/support/temp_tree.gd")
 const HOUSE := "data/json/mapgen/house.json"
+const PALETTES := "data/json/palettes.json"
 
 var _root := ""
 var _ws := ""
@@ -110,7 +111,9 @@ func test_protocol() -> void:
 		names.append(t.name)
 		check(t.description is String and t.inputSchema.type == "object", "tool %s has a schema" % t.name)
 	check_eq(names, ["search_maps", "get_map", "get_palette", "validate_map", "validate_palette", "lookup_id",
-		"list_mods", "sync_status"])
+		"list_mods", "sync_status", "paint_cells", "paint_rect", "paint_line", "fill", "paint_rows", "add_symbol",
+		"remove_symbol", "undo", "redo", "save", "discard", "reload", "add_placement", "update_placement",
+		"remove_placement", "set_map_palettes", "set_symbol_mapping", "create_mapgen", "get_building", "create_building"])
 	check_eq(reply.call('{"jsonrpc":"2.0","id":4,"method":"nope"}').error.code, McpServer.METHOD_NOT_FOUND)
 	check_eq(reply.call('{"jsonrpc":"2.0","id":5,"method":').error.code, McpServer.PARSE_ERROR)
 	check_eq(reply.call('{"id":6,"method":"ping"}').error.code, McpServer.INVALID_REQUEST, "no jsonrpc member")
@@ -127,6 +130,8 @@ func test_protocol() -> void:
 	check(bad.result.content[0].text.contains("Missing argument \"id\""), bad.result.content[0].text)
 	bad = reply.call(call % ['"lookup_id"', '{"kind":"spaceship"}'])
 	check(bad.result.content[0].text.contains("must be one of terrain"), bad.result.content[0].text)
+	bad = reply.call(call % ['"paint_cells"', '{"key":"x","cells":[1,2]}'])
+	check(bad.result.content[0].text.contains("\"cells\" must be a list of lists"), bad.result.content[0].text)
 	bad = reply.call(call % ['"search_maps"', "{}"])
 	check(bad.result.content[0].text.contains("No BN data loaded"), "without a loader: %s" % bad.result.content[0].text)
 
@@ -286,12 +291,7 @@ func test_sync_status() -> void:
 		skip("json_formatter not built (tools/build_json_formatter.sh)")
 		_cleanup()
 		return
-	# Formatter-clean, as BN's files are, so a save only differs where edited.
-	var path := _root.path_join(HOUSE)
-	var clean := JsonFormatter.new().format(BnJson.stringify(BnJson.parse(FileAccess.get_file_as_string(path)).value)).text
-	var f := FileAccess.open(path, FileAccess.WRITE)
-	f.store_string(clean)
-	f.close()
+	_format_in_place(_root.path_join(HOUSE))
 	_call("get_map", {"id": "house"})
 	var doc := _tools.session.docs[0]
 	doc.paint([Vector2i(3, 3)], "x")
@@ -303,6 +303,276 @@ func test_sync_status() -> void:
 		"changes": ["changed mapgen house"]}])
 	check_eq(_call("get_map", {"id": "house"}).rows[3].substr(3, 1), "x", "the open map")
 	_cleanup()
+
+
+const NONE := {"errors": 0, "warnings": 0, "notes": 0}
+
+
+## Stage 9c: the paint tools, symbols, undo/redo.
+func test_paint_tools() -> void:
+	_setup()
+	var house := {"id": "house"}
+	check_eq(_call("paint_cells", house.merged({"key": "x", "cells": [[3, 3], [4, 3], [3, 3]]})),
+			{"changed": 2, "undo": "Paint 'x'", "problems": NONE, "dirty": true}, "a cell listed twice counts once")
+	check_eq(_call("get_map", house).rows[3], "#..xx" + ".".repeat(18) + "#")
+	var outside := _call("paint_cells", house.merged({"key": "#", "cells": [[30, 1], [1, 1]]}))
+	check_eq(outside.get("changed"), 1)
+	check(str(outside.get("outside")).contains("1 cell(s) outside the 24x24 map"), str(outside))
+	check_eq(_call("paint_rect", house.merged({"key": "h", "x": 3, "y": 6, "x2": 1, "y2": 5})).get("changed"), 6,
+			"corners in any order")
+	check_eq(_call("paint_rect", house.merged({"key": "h", "x": 1, "y": 8, "x2": 4, "y2": 10, "filled": false}))
+			.get("changed"), 10, "outline")
+	check_eq(_call("paint_line", house.merged({"key": "x", "x": 1, "y": 12, "x2": 4, "y2": 12})).get("undo"), "Line 'x'")
+	var filled := _call("fill", house.merged({"key": "x", "x": 2, "y": 5}))
+	check_eq([filled.get("changed"), filled.get("undo")], [6, "Fill 'x'"], "the 3x2 'h' block")
+	var rows: Array = _call("get_map", house).rows
+	check_eq([rows[5].substr(1, 4), rows[9].substr(1, 4), rows[12].substr(1, 4)], ["xxx.", "h..h", "xxxx"])
+	_fails("paint_cells", house.merged({"key": "Z", "cells": [[1, 1]]}), "'Z' isn't defined in house")
+	_fails("paint_cells", house.merged({"key": "ab", "cells": [[1, 1]]}), "one character wide")
+	_fails("paint_cells", house.merged({"key": "x", "cells": [[1]]}), "Each cell is [x, y]")
+	_fails("fill", house.merged({"key": "x", "x": 24, "y": 0}), "outside the 24x24 map")
+	_fails("paint_cells", {"key": "x", "cells": []}, "Pass \"id\"")
+
+	# paint_rows: text over the rows, skip leaving cells alone, ' ' painted.
+	var laid := _call("paint_rows", house.merged({"x": 5, "y": 17, "rows": ["x_x", "_x_"], "skip": "_"}))
+	check_eq([laid.get("changed"), laid.get("undo")], [3, "Paint rows"])
+	check_eq(_call("paint_rows", house.merged({"x": 5, "y": 20, "rows": ["x x"]})).get("changed"), 3)
+	_fails("paint_rows", house.merged({"y": 19, "rows": ["xQ"]}), "Not defined in house: 'Q'")
+	_fails("paint_rows", house.merged({"rows": ["x"], "skip": "ab"}), "skip is one character")
+	rows = _call("get_map", house).rows
+	check_eq([rows[17].substr(5, 3), rows[18].substr(5, 3), rows[19], rows[20].substr(5, 3)],
+			["x.x", ".x.", "#" + ".".repeat(22) + "#", "x x"], "nothing painted by the refused call")
+
+	# Symbols.
+	check_eq(_call("add_symbol", house.merged({"key": "Z", "terrain": "t_dirt"})).get("symbol"),
+			{"Z": {"terrain": {"value": "t_dirt", "from": "map"}}})
+	_fails("add_symbol", house.merged({"key": "Z", "terrain": "t_dirt"}), "already defined")
+	_fails("add_symbol", house.merged({"key": "h", "furniture": "f_chair"}), "already defined by palette pal")
+	_fails("add_symbol", house.merged({"key": "Y", "terrain": "t_nope"}), "Unknown terrain")
+	check_eq(_call("add_symbol", house.merged({"terrain": "t_grass"})).get("symbol"),
+			{",": {"terrain": {"value": "t_grass", "from": "map"}}}, "no key: the terrain's own symbol")
+	check_eq(_call("add_symbol", house.merged({"terrain": "t_grass"})).get("symbol", {}).keys(), ["a"],
+			"else the first free one")
+	_call("undo", house)
+	_call("undo", house)
+	check_eq(_call("paint_cells", house.merged({"key": "Z", "cells": [[2, 21]]})).get("changed"), 1)
+	var removed := _call("remove_symbol", house.merged({"key": "Z"}))
+	check_eq([removed.get("symbol"), removed.get("cells_using_it"), removed.problems.errors], [{"Z": null}, 1, 1])
+	_fails("remove_symbol", house.merged({"key": "h"}), "isn't in the map's own terrain/furniture")
+
+	# Undo / redo.
+	var undone := _call("undo", house)
+	check_eq([undone.get("undone"), undone.get("redo"), undone.problems], ["Remove 'Z' from the map",
+		"Remove 'Z' from the map", NONE])
+	check_eq(_call("redo", house).get("redone"), "Remove 'Z' from the map")
+	_fails("redo", house, "Nothing to redo")
+	for i in 20:
+		if not _tools.session.docs[0].can_undo():
+			break
+		_call("undo", house)
+	_fails("undo", house, "Nothing to undo")
+	check_eq(_call("get_map", house).rows[3], "#" + ".".repeat(22) + "#", "all undone")
+	check_eq(_call("get_map", house).get("dirty"), false)
+	_cleanup()
+
+
+## Stage 9c: saving to the workspace.
+func test_save_tool() -> void:
+	_setup()
+	if not JsonFormatter.new().is_available():
+		skip("json_formatter not built (tools/build_json_formatter.sh)")
+		_cleanup()
+		return
+	_format_in_place(_root.path_join(HOUSE))
+	check_eq(_call("save"), {"saved": [], "note": "Nothing to save."})
+	_call("paint_cells", {"id": "house", "key": "x", "cells": [[3, 3]]})
+	check_eq(_call("sync_status").get("unsaved"), [HOUSE])
+	_fails("save", {"file": "data/json/nope.json"}, "isn't open")
+	check_eq(_call("save", {"file": PALETTES}), {"saved": [], "note": PALETTES + " has no unsaved edits."},
+			"read for its palettes, not edited")
+	var saved := _call("save")
+	check_eq(saved.get("saved"), [{"file": HOUSE, "state": "modified", "summary": "1 changed",
+		"changes": ["changed mapgen house"]}])
+	check_eq(saved.get("workspace"), _ws)
+	check(not FileAccess.file_exists(_ws.path_join(PALETTES)), "only the edited file")
+	var sync := WorkspaceSync.new(Workspace.open(_ws, _root))
+	check_eq(sync.status(HOUSE).unchanged, 2, "the other two objects byte-identical")
+	check_eq(Workspace.open(_ws, _root).files[HOUSE].get("base_sha256"), FileAccess.get_sha256(_root.path_join(HOUSE)))
+	var got := BnJson.parse(FileAccess.get_file_as_string(_ws.path_join(HOUSE)))
+	check(got.ok() and got.value[0].object.rows[3] == "#..x" + ".".repeat(19) + "#", "the painted cell saved")
+	check_eq(got.value[0].object.place_loot[0].chance, 50, "ints stay ints")
+	check_eq(_call("get_map", {"id": "house"}).get("dirty"), false)
+	# Undone and saved again: the file is BN's again.
+	_call("undo", {"id": "house"})
+	check_eq(_call("save", {"file": HOUSE}).saved[0].state, "same as BN")
+	_cleanup()
+
+
+## Stage 9c: two processes on one workspace (the editor and the server).
+func test_save_guards() -> void:
+	_setup()
+	if not JsonFormatter.new().is_available():
+		skip("json_formatter not built (tools/build_json_formatter.sh)")
+		_cleanup()
+		return
+	var house := {"id": "house"}
+	var ws_house := _ws.path_join(HOUSE)
+	_call("paint_cells", house.merged({"key": "x", "cells": [[3, 3]]}))
+	check_eq(_call("save").get("saved", []).size(), 1)
+	# The editor saves the workspace copy after this process read it.
+	_call("paint_cells", house.merged({"key": "x", "cells": [[4, 4]]}))
+	_write(ws_house, FileAccess.get_file_as_string(ws_house).replace("#..x", "#..h"))
+	_fails("save", {}, HOUSE + " changed on disk since it was read")
+	check(str(_call("get_map", house).get("changed_on_disk")).contains("changed on disk"), "get_map says so")
+	check_eq(_call("sync_status").get("changed_on_disk"), [HOUSE])
+	_fails("reload", {}, "Unsaved edits in " + HOUSE)
+	check_eq(_call("reload", {"discard": true}).get("discarded"), [HOUSE])
+	var m := _call("get_map", house)
+	check_eq([m.rows[3].substr(3, 1), m.get("changed_on_disk")], ["h", null], "reloaded: the editor's save")
+
+	# The manifest: an entry the other process added since stays.
+	var other := Workspace.open(_ws, _root)
+	check_eq(other.set_entry("data/json/other.json", {"new": true}), "")
+	_call("paint_cells", house.merged({"key": "x", "cells": [[5, 5]]}))
+	check_eq(_call("save").get("saved", []).size(), 1)
+	var files := Workspace.open(_ws, _root).files
+	check(files.has("data/json/other.json") and files.has(HOUSE), "both entries: %s" % [files])
+	# ... and one it removed stays removed.
+	check_eq(other.set_entry("data/json/other.json", null), "")
+	_call("paint_cells", house.merged({"key": "x", "cells": [[6, 6]]}))
+	_call("save")
+	check(not Workspace.open(_ws, _root).files.has("data/json/other.json"), "removed")
+
+	# Read from BN, and a workspace copy appears.
+	_call("paint_cells", {"id": "broken", "key": "x", "cells": [[5, 5]]})
+	_write(_ws.path_join("data/json/mapgen/broken.json"), "[]\n")
+	_fails("save", {"file": "data/json/mapgen/broken.json"}, "changed on disk")
+	# A new file, and another process writes one at that path first.
+	_call("create_mapgen", {"file": "data/json/mapgen/new.json", "om_terrain": "n_1"})
+	_write(_ws.path_join("data/json/mapgen/new.json"), "[]\n")
+	_fails("save", {"file": "data/json/mapgen/new.json"}, "changed on disk")
+	check_eq(FileAccess.get_file_as_string(_ws.path_join("data/json/mapgen/new.json")), "[]\n", "not overwritten")
+	_cleanup()
+
+
+## Stage 9d: placements, palettes and symbol mappings.
+func test_placement_tools() -> void:
+	_setup()
+	var house := {"id": "house"}
+	var loot := house.merged({"member": "place_loot"})
+	_fails("add_placement", loot.merged({"entry": {"group": "stuff", "x": [20, 30], "y": 1}}), "place_loot")
+	_fails("add_placement", loot.merged({"entry": {"group": "stuff", "x": 30, "y": 1}}), "place_loot")
+	_fails("add_placement", loot.merged({"entry": {"group": "stuff"}}), "x and y")
+	var added := _call("add_placement", loot.merged({"entry": {"group": "nope", "x": 2, "y": [2, 3]}}))
+	var p: Dictionary = added.get("placement", {})
+	check_eq([p.get("index"), p.get("entry")], [1, {"group": "nope", "x": 2, "y": [2, 3]}])
+	check_eq(p.get("findings", [{}])[0].get("code"), "UNKNOWN_ID", "an unknown id is reported, not refused")
+	check_eq([added.problems.errors, added.undo], [1, "Add place_loot"])
+
+	var moved := _call("update_placement", loot.merged({"index": 0, "move_to": [10, 10], "fields": {"chance": null}}))
+	check_eq(moved.get("placement", {}).get("entry"), {"group": "stuff", "x": 10, "y": [10, 12]}, "range kept")
+	check_eq(moved.get("undo"), "Edit place_loot #1", "one undo step")
+	_fails("update_placement", loot.merged({"index": 0, "move_to": [23, 22]}), "place_loot")
+	_fails("update_placement", loot.merged({"index": 5, "fields": {"chance": 1}}), "no place_loot entry #5")
+	_fails("update_placement", loot.merged({"index": 0, "move_to": [1, 1], "fields": {"x": 1}}), "not both")
+	_fails("update_placement", loot.merged({"index": 0}), "Pass fields")
+	check_eq(_call("update_placement", loot.merged({"index": 0, "fields": {"chance": 5}})).placement.entry.chance, 5)
+
+	var removed := _call("remove_placement", loot.merged({"index": 0}))
+	check_eq(removed.get("removed"), {"group": "stuff", "x": 10, "y": [10, 12], "chance": 5})
+	check(str(removed.get("note")).contains("1 later place_loot"), str(removed.get("note")))
+	var placements: Array = _call("get_map", house).placements
+	check_eq(placements[0].entry, {"group": "nope", "x": 2, "y": [2, 3]}, "moved down to #0")
+
+	_fails("set_map_palettes", house.merged({"palettes": ["nope"]}), "Unknown palette \"nope\"")
+	var none := _call("set_map_palettes", house.merged({"palettes": []}))
+	check(none.problems.errors > 1, "'#', '.' and 'h' undefined now")
+	check(not _call("get_map", house).has("palettes"), "member removed")
+	check_eq(_call("set_map_palettes", house.merged({"palettes": ["pal"]})).get("palettes"), ["pal"])
+
+	var mapped := _call("set_symbol_mapping", house.merged({"key": "x", "kind": "items",
+		"value": {"item": "stuff", "chance": 10}}))
+	check_eq(mapped.get("symbol"), {"x": {"terrain": {"value": "t_dirt", "from": "map"},
+		"items": [{"value": {"item": "stuff", "chance": 10}, "from": "map"}]}})
+	check_eq(_call("get_map", house).legend.x.items[0].value.chance, 10)
+	_fails("set_symbol_mapping", house.merged({"key": "x", "kind": "items", "value": "stuff"}), "an object or a list")
+	_fails("set_symbol_mapping", house.merged({"key": "x", "kind": "traps", "value": null}), "must be one of")
+	check_eq(_call("set_symbol_mapping", house.merged({"key": "x", "kind": "items", "value": null})).symbol,
+			{"x": {"terrain": {"value": "t_dirt", "from": "map"}}})
+	_cleanup()
+
+
+## Stage 9d: new maps and chunks, saved and read back, or discarded.
+func test_create_mapgen() -> void:
+	_setup()
+	var formatter := JsonFormatter.new().is_available()
+	if formatter:
+		_format_in_place(_root.path_join(HOUSE))
+	var rel := "data/json/mapgen/new.json"
+	var m := _call("create_mapgen", {"file": rel, "om_terrain": [["n_1", "n_2"]], "palettes": ["pal"]})
+	check_eq([m.get("ids"), m.get("size"), m.get("palettes"), m.get("fill_ter"), m.get("dirty")],
+			[["n_1", "n_2"], [48, 24], ["pal"], "t_grass", true])
+	check_eq(m.get("overmap_terrain_added"), ["n_1", "n_2"])
+	check_eq(m.get("problems"), NONE)
+	check_eq(_call("search_maps", {"query": "n_2"}).get("total"), 1, "in the index at once")
+	_call("paint_rows", {"id": "n_2", "x": 24, "rows": ["#..#"]})
+	var chunk := _call("create_mapgen", {"file": HOUSE, "nested_id": "chunk_b", "mapgensize": [3, 3]})
+	check_eq([chunk.get("index"), chunk.get("size"), chunk.get("rows")], [3, [3, 3], ["   ", "   ", "   "]])
+	check(not chunk.has("overmap_terrain_added"), "a chunk needs none")
+	_fails("create_mapgen", {"file": rel}, "Pass om_terrain")
+	_fails("create_mapgen", {"file": rel, "om_terrain": "a", "nested_id": "b"}, "Pass om_terrain")
+	_fails("create_mapgen", {"file": rel, "om_terrain": ["a", "b"]}, "a grid")
+	_fails("create_mapgen", {"file": "../x.json", "om_terrain": "a"}, "relative .json path")
+	_fails("create_mapgen", {"file": "data/elsewhere/x.json", "om_terrain": "a"}, "isn't inside a loaded mod")
+	_fails("create_mapgen", {"file": rel, "om_terrain": "a", "palettes": ["nope"]}, "Unknown palette")
+	_fails("create_mapgen", {"file": rel, "nested_id": "c"}, "needs mapgensize")
+	_fails("create_mapgen", {"file": rel, "nested_id": "c", "mapgensize": [3, 3], "fill_ter": "t_dirt"}, "no fill_ter")
+	_fails("create_mapgen", {"file": rel, "nested_id": "c", "mapgensize": [30, 3]}, "1-24")
+
+	# Discarded: gone from the index again.
+	_call("create_mapgen", {"file": "data/json/mapgen/other.json", "nested_id": "chunk_c", "mapgensize": [2, 2]})
+	check_eq(_call("search_maps", {"query": "chunk_c"}).get("total"), 1)
+	check_eq(_call("discard", {"file": "data/json/mapgen/other.json"}), {"file": "data/json/mapgen/other.json",
+		"discarded_edits": true, "closed": ["chunk_c"]})
+	check_eq(_call("search_maps", {"query": "chunk_c"}).get("total"), 0)
+	_fails("discard", {"file": "data/json/mapgen/other.json"}, "isn't open")
+
+	if not formatter:
+		skip("json_formatter not built (tools/build_json_formatter.sh)")
+		_cleanup()
+		return
+	var saved: Array = _call("save").get("saved", [])
+	var by_file := {}
+	for e: Dictionary in saved:
+		by_file[e.file] = e
+	check_eq(by_file.get(HOUSE, {}).get("changes"), ["added mapgen chunk_b"])
+	check_eq(WorkspaceSync.new(Workspace.open(_ws, _root)).status(HOUSE).unchanged, 3, "the others byte-identical")
+	check_eq(by_file.get(rel, {}).get("state"), "new")
+	check_eq(by_file.get(rel, {}).get("changes"), ["added mapgen n_1, n_2", "added overmap_terrain n_1, n_2"])
+	# Read back from the workspace, as a fresh session would.
+	check_eq(_call("reload").get("discarded"), null)
+	var back := _call("get_map", {"id": "n_1"})
+	check_eq([back.get("file"), back.get("in_workspace"), back.get("size"), back.get("palettes")],
+			[rel, true, [48, 24], ["pal"]])
+	check_eq(back.rows[0].substr(24, 4), "#..#", "n_2's tile holds the painted row")
+	check_eq(back.get("problems"), NONE)
+	check_eq(_call("get_map", {"id": "chunk_b"}).get("index"), 3)
+	check_eq(_call("lookup_id", {"kind": "oter_type", "query": "n_2"}).get("known"), true)
+	_cleanup()
+
+
+## Rewrites [param path] as json_formatter would, as BN's files are, so a
+## save only differs where edited.
+static func _format_in_place(path: String) -> void:
+	var clean := JsonFormatter.new().format(BnJson.stringify(BnJson.parse(FileAccess.get_file_as_string(path)).value)).text
+	_write(path, clean)
+
+
+static func _write(path: String, text: String) -> void:
+	DirAccess.make_dir_recursive_absolute(path.get_base_dir())
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	f.store_string(text)
+	f.close()
 
 
 ## The real process: requests piped in, one reply per request on stdout,
@@ -345,7 +615,7 @@ func test_stdio() -> void:
 		return
 	check_eq(replies.map(func(r: Dictionary) -> Variant: return r.get("id")), [1, 2, 3, 4])
 	check_eq(replies[0].result.serverInfo.name, "bn-map-editor")
-	check_eq(replies[1].result.tools.size(), 8)
+	check_eq(replies[1].result.tools.size(), 28)
 	var found: Dictionary = BnJson.parse(replies[2].result.content[0].text).value
 	check_eq(found.maps[0].ids, ["chunk_a"])
 	var m: Dictionary = BnJson.parse(replies[3].result.content[0].text).value

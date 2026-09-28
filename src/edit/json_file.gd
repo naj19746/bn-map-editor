@@ -23,6 +23,11 @@ var base_sha256 := ""
 var in_workspace := false
 ## True for a file created in the editor and not saved yet.
 var is_new := false
+## The file this was read from or last written to (absolute), and the
+## sha256 of its bytes then ("" when there was no file: a new one). Saving
+## refuses when that file no longer matches (see EditSession.save).
+var disk_path := ""
+var disk_sha256 := ""
 var warnings := PackedStringArray()
 
 var _raw := PackedByteArray()
@@ -58,7 +63,28 @@ static func load_file(abs_path: String, rel: String, error_out: Array = []) -> J
 		f.single_object = true
 		f._spans = [Vector2i(0, bytes.size())]
 	f._saved_count = f.objects.size()
+	f.disk_path = abs_path
+	f.disk_sha256 = sha256_of(bytes)
 	return f
+
+
+static func sha256_of(bytes: PackedByteArray) -> String:
+	var ctx := HashingContext.new()
+	ctx.start(HashingContext.HASH_SHA256)
+	ctx.update(bytes)
+	return ctx.finish().hex_encode()
+
+
+## The sha256 of the file at [param path], or "" if there is none.
+static func sha256_at(path: String) -> String:
+	return FileAccess.get_sha256(path) if FileAccess.file_exists(path) else ""
+
+
+## True when the file this was read from (or last written to) isn't as it
+## was then: another program (e.g. the editor next to the MCP server) wrote,
+## deleted or created it.
+func changed_on_disk() -> bool:
+	return not disk_path.is_empty() and sha256_at(disk_path) != disk_sha256
 
 
 ## A file that doesn't exist yet.
@@ -66,6 +92,14 @@ static func create(rel: String) -> JsonFile:
 	var f := JsonFile.new()
 	f.rel_path = rel
 	f.is_new = true
+	return f
+
+
+## A new file goes to [param abs_path], where nothing may appear before it
+## is saved.
+static func create_at(rel: String, abs_path: String) -> JsonFile:
+	var f := create(rel)
+	f.disk_path = abs_path
 	return f
 
 
@@ -131,8 +165,12 @@ func lossy_warnings() -> PackedStringArray:
 	return out
 
 
-## Records the current state as saved.
-func mark_saved() -> void:
+## Records the current state as saved to [param abs_path], whose bytes now
+## hash to [param sha256].
+func mark_saved(abs_path := "", sha256 := "") -> void:
+	if abs_path:
+		disk_path = abs_path
+		disk_sha256 = sha256
 	in_workspace = true
 	is_new = false
 	_saved_count = objects.size()
@@ -143,7 +181,11 @@ func mark_saved() -> void:
 
 
 ## The saved file was pushed into BN (and the workspace copy deleted):
-## [param sha256] is BN's file now, the base for the next save.
-func mark_pushed(sha256: String) -> void:
+## [param sha256] is BN's file at [param bn_file] now, the base for the
+## next save.
+func mark_pushed(sha256: String, bn_file := "") -> void:
 	in_workspace = false
 	base_sha256 = sha256
+	if bn_file:
+		disk_path = bn_file
+		disk_sha256 = sha256

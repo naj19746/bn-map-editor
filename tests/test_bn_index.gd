@@ -59,6 +59,49 @@ func test_core_index() -> void:
 	check_eq(index.furniture["f_null"].source.path, "", "built-in")
 
 
+
+## Stage 10a: city_building / overmap_special z-stacks in core.
+func test_core_buildings() -> void:
+	var index := _core_index()
+	if index == null:
+		return
+	var b: DataIndex.Building = index.buildings.get("2Story02")
+	if check(b != null, "2Story02"):
+		check_eq(b.levels(), PackedInt32Array([-1, 0, 1, 2]))
+		var ids := PackedStringArray()
+		for z in b.levels():
+			ids.append(b.at(Vector3i(0, 0, z)).oter)
+		check_eq(ids, PackedStringArray(["2Story02_basement", "2Story02_1", "2Story02_2", "2Story02_roof"]))
+		for id in ids:
+			check(not index.mapgens_for(id).is_empty(), "a mapgen for " + id)
+	var roof := index.buildings_using("2Story02_roof")
+	check_eq(roof.size(), 1)
+	check_eq(roof[0].building, "2Story02")
+	check_eq(roof[0].point, Vector3i(0, 0, 2))
+	# house_04_roof tops several houses.
+	var users := PackedStringArray()
+	for t in index.buildings_using("house_04_roof"):
+		users.append(t.building)
+	check(users.has("house_04") and users.has("house_05"), str(users))
+	# Counts (2026-09-28): 406 city_building + 237 overmap_special, 10 mutable.
+	var mutable := 0
+	var multi_z := 0
+	for id: String in index.buildings:
+		var bld: DataIndex.Building = index.buildings[id]
+		mutable += int(bld.mutable)
+		multi_z += int(bld.levels().size() > 1)
+	check(index.buildings.size() >= 600, "buildings: %d" % index.buildings.size())
+	check(mutable >= 8, "mutable: %d" % mutable)
+	check(multi_z >= 500, "multi-level: %d" % multi_z)
+	# Every placed tile's terrain is a known overmap_terrain once its suffix is gone
+	# (linear ones like subway_ns keep their line suffix: BN's om_lines).
+	var unknown := PackedStringArray()
+	for oter: String in index.building_tiles:
+		var linear := oter.substr(0, oter.rfind("_"))
+		if not index.has_overmap_terrain(oter) and not index.has_overmap_terrain(linear):
+			unknown.append(oter)
+	check_eq(unknown.slice(0, MAX_REPORTED), PackedStringArray(), "unknown overmap terrains")
+
 func test_apartments_mod_tower() -> void:
 	var index := _core_index()
 	if index == null:

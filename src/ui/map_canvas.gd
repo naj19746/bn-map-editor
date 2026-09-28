@@ -15,6 +15,12 @@ extends Control
 ## reported as cell_pressed / cell_dragged / cell_released for the drawing
 ## tools; a right click that doesn't move (or Shift+F10, or the Menu key,
 ## on the hovered cell) as cell_context.
+## Around the map, the rest of its building's level (LevelNav.Neighbor) is
+## drawn dimmed and read-only, each piece labelled; a tile no mapgen draws
+## is hatched. Double-clicking one reports neighbor_activated.
+## Under both, a ghost level (the level below or above, LevelNav.ghosts) is
+## drawn dimmed where the map is see-through (AsciiMap.see_through: open
+## air), and its stairs to this level are marked over everything.
 
 ## The cell under the mouse changed; (-1, -1) when it left the map.
 signal cell_hovered(cell: Vector2i)
@@ -28,6 +34,10 @@ signal cell_released(cell: Vector2i, shift: bool)
 ## A cell menu was asked for on [param cell], at [param at] (this
 ## control's coordinates).
 signal cell_context(cell: Vector2i, at: Vector2)
+## The mouse moved onto neighbor [param i] (-1: off every neighbor).
+signal neighbor_hovered(i: int)
+## Neighbor [param i] was double-clicked.
+signal neighbor_activated(i: int)
 
 const OMT := MapgenResolver.OMT_SIZE
 const RULER := 28.0
@@ -50,6 +60,19 @@ const PLACEMENT_PROBLEM := Color(1.0, 0.15, 0.25)
 const LABEL_BG := Color(0, 0, 0, 0.65)
 const OVERHANG := Color(1.0, 0.15, 0.25, 0.22)
 const FOCUS := Color(1.0, 0.3, 1.0)
+## How far a neighbor's colors fade towards the background.
+const NEIGHBOR_DIM := 0.55
+const NEIGHBOR_LINE := Color(1.0, 0.75, 0.2, 0.35)
+const NEIGHBOR_HOVER := Color(1.0, 0.75, 0.2, 0.9)
+const NEIGHBOR_TEXT := Color8(220, 200, 150)
+const NEIGHBOR_FLAT := Color(1.0, 0.75, 0.2, 0.08)
+## How far a ghost level's colors fade towards the background (when
+## dimmed).
+const GHOST_DIM := 0.7
+const GHOST_STAIRS := Color(0.3, 0.9, 1.0, 0.9)
+## Below this cell size neighbors are flat boxes: a big special's level
+## would be hundreds of thousands of cells.
+const NEIGHBOR_CELLS_MIN := 7.0
 ## Console reach: stand cells, the reach outline, doors reached (faded when
 ## only some stand cells reach them), other locked doors.
 const REACH_STAND := Color(0.35, 0.65, 1.0)
@@ -130,6 +153,27 @@ var spots: Array[Vector2i] = []:
 	set(v):
 		spots = v
 		queue_redraw()
+## The rest of the map's building level, drawn around it (cells relative
+## to the map's top-left).
+var neighbors: Array[LevelNav.Neighbor] = []:
+	set(v):
+		neighbors = v
+		hovered_neighbor = -1
+		queue_redraw()
+## The neighbor under the mouse, or -1.
+var hovered_neighbor := -1
+## The level below or above, drawn under the map and its neighbors.
+var ghosts: Array[LevelNav.Neighbor] = []:
+	set(v):
+		ghosts = v
+		queue_redraw()
+## Draw the ghost level faded (else at full color).
+var ghost_dim := true:
+	set(v):
+		ghost_dim = v
+		queue_redraw()
+## True when the ghost is the level above (its stairs lead down here).
+var ghost_above := false
 var cell_size := 18.0
 ## Screen position of cell (0, 0)'s top-left corner.
 var origin := Vector2(RULER + 8, RULER + 8)
@@ -184,14 +228,35 @@ func center_on(rect: Rect2i) -> void:
 	queue_redraw()
 
 
-## Fits the whole map in view, capped at a readable size.
+## Fits the whole map and its neighbors in view, capped at a readable size.
 func fit() -> void:
 	if ascii == null or size.x <= RULER or size.y <= RULER:
 		return
 	var avail := size - Vector2(RULER, RULER) - Vector2(16, 16)
-	cell_size = clampf(floorf(minf(avail.x / ascii.size.x, avail.y / ascii.size.y)), MIN_CELL, 24.0)
-	origin = Vector2(RULER + 8, RULER + 8)
+	var whole := bounds()
+	var fits := floorf(minf(avail.x / whole.size.x, avail.y / whole.size.y))
+	if fits < NEIGHBOR_CELLS_MIN:
+		# Too big to show whole: the map alone.
+		whole = Rect2i(Vector2i.ZERO, ascii.size)
+		fits = floorf(minf(avail.x / whole.size.x, avail.y / whole.size.y))
+	cell_size = clampf(fits, MIN_CELL, 24.0)
+	origin = Vector2(RULER + 8, RULER + 8) - Vector2(whole.position) * cell_size
 	queue_redraw()
+
+
+## The cells the map and its neighbors cover.
+func bounds() -> Rect2i:
+	var whole := Rect2i(Vector2i.ZERO, ascii.size if ascii else Vector2i.ONE)
+	for n in neighbors:
+		whole = whole.merge(n.rect())
+	return whole
+
+
+## The neighbor at a point in this control's coordinates, or -1.
+func neighbor_at_point(pos: Vector2) -> int:
+	if neighbors.is_empty() or pos.x < RULER or pos.y < RULER:
+		return -1
+	return LevelNav.neighbor_at(neighbors, Vector2i(((pos - origin) / cell_size).floor()))
 
 
 func zoom_at(pos: Vector2, factor: float) -> void:
@@ -225,7 +290,11 @@ func _gui_input(event: InputEvent) -> void:
 						cell_context.emit(c, mb.position)
 			accept_event()
 		elif mb.button_index == MOUSE_BUTTON_LEFT:
-			if mb.pressed:
+			if mb.pressed and mb.double_click and cell_at(mb.position).x < 0:
+				var n := neighbor_at_point(mb.position)
+				if n >= 0:
+					neighbor_activated.emit(n)
+			elif mb.pressed:
 				var c := cell_at(mb.position)
 				if c.x >= 0:
 					_dragging = true
@@ -243,6 +312,11 @@ func _gui_input(event: InputEvent) -> void:
 			if _right_press.x >= 0 and mm.position.distance_to(_right_press) > CLICK_SLOP:
 				_right_press = -Vector2.ONE
 		_set_hovered(cell_at(mm.position))
+		var n := neighbor_at_point(mm.position) if hovered.x < 0 else -1
+		if n != hovered_neighbor:
+			hovered_neighbor = n
+			queue_redraw()
+			neighbor_hovered.emit(n)
 		if _dragging:
 			var c := cell_at_clamped(mm.position)
 			if c != _drag_cell:
@@ -261,6 +335,9 @@ func _gui_input(event: InputEvent) -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_MOUSE_EXIT:
 		_set_hovered(-Vector2i.ONE)
+		if hovered_neighbor >= 0:
+			hovered_neighbor = -1
+			neighbor_hovered.emit(-1)
 		_panning = false
 	elif what == NOTIFICATION_FOCUS_EXIT and _dragging:
 		_dragging = false
@@ -293,6 +370,14 @@ func _draw() -> void:
 	var descent := _font.get_descent(font_size) if draw_text else 0.0
 	var baseline := (cs + ascent - descent) / 2.0
 
+	for g in ghosts:
+		if g.ascii:
+			_draw_cells(g.ascii, origin + Vector2(g.cell) * cs, GHOST_DIM if ghost_dim else 0.0,
+					font_size, baseline, false)
+	var through := not ghosts.is_empty()
+	for i in neighbors.size():
+		_draw_neighbor(neighbors[i], i == hovered_neighbor, font_size, baseline, through)
+
 	for y in range(y0, y1):
 		var row: PackedStringArray = ascii.resolved.cells[y]
 		for x in range(x0, x1):
@@ -301,6 +386,13 @@ func _draw() -> void:
 			var rect := Rect2(p, Vector2(cs, cs))
 			var state := ascii.states[i]
 			var back: Color = ascii.bg[i]
+			if through and not show_keys and ascii.see_through[i]:
+				# The ghost level shows here: only tint it.
+				if highlight_key and row[x] == highlight_key:
+					draw_rect(rect, Color(HIGHLIGHT, 0.3))
+				if layer_mask and cs >= 6.0 and ascii.look_for(row[x]).layers & layer_mask:
+					_draw_mark(rect, ascii.look_for(row[x]).layers & layer_mask)
+				continue
 			if state == AsciiMap.State.EMPTY and back == BnColors.BLACK:
 				back = EMPTY_BG
 			elif state == AsciiMap.State.UNDEFINED or state == AsciiMap.State.NO_TERRAIN \
@@ -310,6 +402,8 @@ func _draw() -> void:
 				back = back.lerp(HIGHLIGHT, 0.6)
 			if back != BnColors.BLACK:
 				draw_rect(rect, back)
+			elif through:
+				draw_rect(rect, CANVAS_BG)  # Hides the ghost.
 			if layer_mask and cs >= 6.0:
 				var marks: int = ascii.look_for(row[x]).layers & layer_mask
 				if marks:
@@ -329,6 +423,7 @@ func _draw() -> void:
 						HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, ascii.fg[i])
 
 	_draw_preview(font_size, baseline, draw_text)
+	_draw_ghost_stairs()
 	_draw_grid(x0, y0, x1, y1)
 	_draw_reach()
 	_draw_spots()
@@ -339,6 +434,97 @@ func _draw() -> void:
 	if hovered.x >= 0:
 		draw_rect(Rect2(origin + Vector2(hovered) * cs, Vector2(cs, cs)), HOVER, false, 2.0)
 	_draw_rulers(x0, y0, x1, y1)
+
+
+## A neighbor's cells, faded, with its outline and label; with
+## [param through], its see-through cells are left for the ghost level.
+func _draw_neighbor(n: LevelNav.Neighbor, is_hovered: bool, font_size: int, baseline: float,
+		through := false) -> void:
+	var cs := cell_size
+	var r := n.rect()
+	var box := Rect2(origin + Vector2(r.position) * cs, Vector2(r.size) * cs)
+	if not box.intersects(Rect2(Vector2(RULER, RULER), size)):
+		return
+	var a := n.ascii
+	if a and cs < NEIGHBOR_CELLS_MIN:
+		draw_rect(box, NEIGHBOR_FLAT)
+	elif a:
+		_draw_cells(a, box.position, NEIGHBOR_DIM, font_size, baseline, through)
+	else:
+		# No mapgen draws this tile: hatch it.
+		var step := maxf(cs * 3.0, 12.0)
+		var d := 0.0
+		while d < box.size.x + box.size.y:
+			var p0 := box.position + Vector2(minf(d, box.size.x), maxf(0.0, d - box.size.x))
+			var p1 := box.position + Vector2(maxf(0.0, d - box.size.y), minf(d, box.size.y))
+			draw_line(p0, p1, NEIGHBOR_LINE)
+			d += step
+	draw_rect(box, NEIGHBOR_HOVER if is_hovered else NEIGHBOR_LINE, false, 2.0 if is_hovered else 1.0)
+	if box.size.x < 60.0 and not is_hovered:
+		return
+	var fs := 12
+	var label := n.label()
+	var tw := _font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
+	while tw > box.size.x - 10.0 and label.length() > 4 and not is_hovered:
+		label = label.left(-4) + "…"
+		tw = _font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
+	draw_rect(Rect2(box.position + Vector2(2, 2), Vector2(tw + 6, fs + 6)), LABEL_BG)
+	draw_string(_font, box.position + Vector2(5, fs + 4), label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs,
+			NEIGHBOR_TEXT)
+
+
+## The visible cells of [param a] with its top-left at [param at], colors
+## faded [param dim] towards the background; see-through cells skipped
+## when [param through].
+func _draw_cells(a: AsciiMap, at: Vector2, dim: float, font_size: int, baseline: float, through: bool) -> void:
+	var cs := cell_size
+	if cs < NEIGHBOR_CELLS_MIN:
+		return
+	var x0 := maxi(0, floori((RULER - at.x) / cs))
+	var y0 := maxi(0, floori((RULER - at.y) / cs))
+	var x1 := mini(a.size.x, ceili((size.x - at.x) / cs))
+	var y1 := mini(a.size.y, ceili((size.y - at.y) / cs))
+	for y in range(y0, y1):
+		for x in range(x0, x1):
+			var i := y * a.size.x + x
+			if through and a.see_through[i]:
+				continue
+			var rect := Rect2(at + Vector2(x, y) * cs, Vector2(cs, cs))
+			var back: Color = a.bg[i]
+			if back != BnColors.BLACK:
+				draw_rect(rect, back.lerp(CANVAS_BG, dim))
+			elif through:
+				draw_rect(rect, CANVAS_BG)
+			var ch := a.chars[i]
+			if ch == " " or ch.is_empty():
+				continue
+			var fg: Color = a.fg[i].lerp(CANVAS_BG, dim)
+			var sides: Variant = LINES.get(ch)
+			if sides != null:
+				_draw_line_glyph(rect, sides, fg)
+			else:
+				var tw := _font.get_string_size(ch, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
+				draw_string(_font, Vector2(rect.position.x + (cs - tw) / 2.0, rect.position.y + baseline),
+						ch, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, fg)
+
+
+## The ghost level's stairs to this level: an outlined cell with a
+## triangle pointing the way they lead (up from below, down from above).
+func _draw_ghost_stairs() -> void:
+	var cs := cell_size
+	if cs < 4.0:
+		return
+	for g in ghosts:
+		for c in g.stairs:
+			var rect := Rect2(origin + Vector2(g.cell + c) * cs, Vector2(cs, cs))
+			if not rect.intersects(Rect2(Vector2(RULER, RULER), size)):
+				continue
+			draw_rect(rect.grow(-1.0), GHOST_STAIRS, false, 2.0)
+			var m := rect.position + Vector2(cs, cs) * 0.5
+			var h := cs * 0.22
+			var tip := -h if not ghost_above else h
+			draw_colored_polygon(PackedVector2Array([m + Vector2(0, tip), m + Vector2(-h, -tip), m + Vector2(h, -tip)]),
+					GHOST_STAIRS)
 
 
 func _draw_preview(font_size: int, baseline: float, draw_text: bool) -> void:

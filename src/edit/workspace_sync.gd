@@ -319,10 +319,7 @@ func remove_copy(rel: String) -> String:
 		if err != OK:
 			return "can't delete %s: %s" % [path, error_string(err)]
 		_remove_empty_dirs(path.get_base_dir())
-	if workspace.files.has(rel):
-		workspace.files.erase(rel)
-		return workspace.save_manifest()
-	return ""
+	return workspace.set_entry(rel, null)
 
 
 ## Deletes [param dir] and its parents while they are empty, up to the

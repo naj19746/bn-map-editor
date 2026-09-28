@@ -27,12 +27,19 @@ enum State {
 }
 
 const AUTO_WALL := "AUTO_WALL_SYMBOL"
+const NO_FLOOR := "NO_FLOOR"
 
 ## Connected sides (N=8, E=2, S=1, W=4, as in BN) -> line character.
 ## A lone neighbour draws a straight line through it, like BN.
 const WALL_LINES := {
 	15: "┼", 7: "┬", 13: "┤", 5: "┐", 14: "┴", 6: "─", 12: "┘", 4: "─",
 	11: "├", 3: "┌", 9: "│", 1: "│", 10: "└", 2: "─", 8: "│",
+}
+
+## Line characters after a quarter turn clockwise.
+const TURNED_LINES := {
+	"│": "─", "─": "│", "┌": "┐", "┐": "┘", "┘": "└", "└": "┌",
+	"├": "┬", "┬": "┤", "┤": "┴", "┴": "├",
 }
 
 ## What a symbol looks like, before wall joining.
@@ -65,6 +72,9 @@ var chars := PackedStringArray()
 var fg := PackedColorArray()
 var bg := PackedColorArray()
 var states := PackedByteArray()
+## 1 where the level below shows through: NO_FLOOR terrain (t_open_air)
+## with no furniture drawn, or nothing placed.
+var see_through := PackedByteArray()
 
 ## key -> Look, for the keys in use (and "" for cells with no key).
 var looks := {}
@@ -98,6 +108,7 @@ func refresh() -> void:
 	fg.resize(n)
 	bg.resize(n)
 	states.resize(n)
+	see_through.resize(n)
 	_cell_looks.resize(n)
 	for y in size.y:
 		for x in size.x:
@@ -120,6 +131,44 @@ func update_cells(points: Array[Vector2i]) -> void:
 		_join_wall(q.x, q.y)
 
 
+## A copy for display only, turned [param turns] quarter turns clockwise, as
+## BN turns a map placed with a rotation (point::rotate: east is 1 turn).
+## It has the chars, colors and states; [member resolved] stays the
+## unturned map's, so don't look cells up by key in it.
+func rotated(turns: int) -> AsciiMap:
+	turns = posmod(turns, 4)
+	var m := AsciiMap.new()
+	m.index = index
+	m.resolved = resolved
+	m.season = season
+	m.show_furniture = show_furniture
+	m.size = size if turns % 2 == 0 else Vector2i(size.y, size.x)
+	var n := size.x * size.y
+	m.chars.resize(n)
+	m.fg.resize(n)
+	m.bg.resize(n)
+	m.states.resize(n)
+	m.see_through.resize(n)
+	for y in size.y:
+		for x in size.x:
+			var to := Vector2i(x, y)
+			match turns:
+				1: to = Vector2i(size.y - y - 1, x)
+				2: to = Vector2i(size.x - x - 1, size.y - y - 1)
+				3: to = Vector2i(y, size.x - x - 1)
+			var i := y * size.x + x
+			var j := to.y * m.size.x + to.x
+			var ch := chars[i]
+			for t in turns:
+				ch = TURNED_LINES.get(ch, ch)
+			m.chars[j] = ch
+			m.fg[j] = fg[i]
+			m.bg[j] = bg[i]
+			m.states[j] = states[i]
+			m.see_through[j] = see_through[i]
+	return m
+
+
 func _set_look(x: int, y: int, look: Look) -> void:
 	var i := y * size.x + x
 	_cell_looks[i] = look
@@ -127,6 +176,8 @@ func _set_look(x: int, y: int, look: Look) -> void:
 	fg[i] = look.colors.fg
 	bg[i] = look.colors.bg
 	states[i] = look.state
+	see_through[i] = 1 if look.state == State.EMPTY or (look.terrain and look.terrain.has_flag(NO_FLOOR)
+			and not (show_furniture and look.furniture)) else 0
 
 
 func state_at(x: int, y: int) -> State:

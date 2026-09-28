@@ -117,7 +117,8 @@ func test_main_scene_opens_map() -> void:
 	if check(m != null, "opened"):
 		check_eq(main.maps.size(), 1)
 		check_eq(m.ascii.size, Vector2i(48, 48))
-		check_eq(main._problems_button.text, "No problems")
+		# The stairs above are 3 cells off (BN's data; Stage 10c).
+		check_eq(main._problems_button.text, "1 note")
 		# Opening the same entry again reuses its tab.
 		main.open_id("apartments_mod_tower_SE")
 		check_eq(main.maps.size(), 1, "same entry, same tab")
@@ -220,5 +221,43 @@ func test_main_scene_edits_map() -> void:
 	check_eq(main.maps.size(), 2, "new map opened in a tab")
 	check_eq(main.current_map().doc.size(), Vector2i(48, 24))
 	check_eq(main.current_map().doc.problems(), PackedStringArray())
+	main.free()
+	TempTree.remove(ws)
+
+
+## Stage 10b: level up / down and the level around a map, on core data.
+func test_main_levels_bn() -> void:
+	var index := _core_index()
+	if index == null:
+		return
+	var main: Control = load("res://main.tscn").instantiate()
+	main.auto_start = false
+	main._ready()
+	var ws := TempTree.make({})
+	main._workspace_override = ws
+	main.load_index(index.bn_path)
+	var m: Variant = main.open_id("2Story02_1")
+	if check(m != null and m.place != null, "2Story02_1 has a building"):
+		check_eq(m.place.building.id, "2Story02")
+		var titles := PackedStringArray()
+		var asked := 0
+		for dz in [1, 1, -1, -1, -1]:
+			var got: Variant = main.level_step(dz)
+			if got == null and main._level_menu.item_count > 1:
+				asked += 1
+				got = main.open_level_tile(main._level_tile, 0)
+			titles.append(got.ref.title() if got else main._status.text)
+		check_eq(titles, PackedStringArray(["2Story02_2", "2Story02_roof", "2Story02_2", "2Story02_1",
+				"2Story02_basement"]))
+		check_eq(asked, 2, "asked for 2Story02_2 and the basement (two mapgens each), once each")
+		check_eq(main.level_step(-1), null, "no z -2")
+	# mansion_entry: 3x3 tiles, each its own mapgen, corners and sides turned.
+	var e: Variant = main.open_id("mansion_entry")
+	if check(e != null and e.place != null, "mansion_entry has a building"):
+		var n: Array = e.canvas.neighbors
+		check_eq(n.size(), 8)
+		check(n.all(func(x: LevelNav.Neighbor) -> bool: return x.ascii != null), "all drawn")
+		check(n.any(func(x: LevelNav.Neighbor) -> bool: return x.turns() > 0), "some turned")
+		check_eq(e.canvas.bounds().size, Vector2i(72, 72))
 	main.free()
 	TempTree.remove(ws)

@@ -23,8 +23,16 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
 {"mcpServers": {"bn-map-editor": {"command": "/abs/path/to/bn_map_editor/tools/mcp_server.sh", "args": []}}}
 ```
 
-- Tools so far (read-only): search_maps, get_map, get_palette, validate_map, validate_palette,
-  lookup_id, list_mods, sync_status. Stage 9 in PLAN.MD lists what comes next.
+- Read tools: search_maps, get_map, get_palette, validate_map, validate_palette, lookup_id,
+  list_mods, sync_status, get_building. Edit tools (in memory, one undo step per call): paint_cells/rect/line,
+  fill, paint_rows, add_symbol, remove_symbol, undo, redo, add/update/remove_placement,
+  set_map_palettes, set_symbol_mapping, create_mapgen (with "level": a building's new floor);
+  save (workspace only; a map's file also saves its linked building file), discard, reload.
+  Levels: get_map's "levels", get_building, create_building. Stage 9 in PLAN.MD lists what comes
+  next (9e: palettes).
+- The editor and the server may share a workspace: a save refuses when the file changed on disk
+  since it was read (`EditSession.check_on_disk`), and manifest changes go through
+  `Workspace.set_entry`, which re-reads manifest.json first.
 - Only MCP messages may reach stdout: never `print()` in src/ (errors go to stderr).
 - A handler returns a Dictionary or an `McpTools.Failure`; tests call them via `call_tool`, which
   checks the arguments against the tool's schema. Output values must be JSON types
@@ -38,7 +46,12 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
 - `src/json/json_formatter.gd` (`JsonFormatter`): runs BN's json_formatter via a temp file.
 - `src/data/`: read-only BN index. `ModCatalog` (mods, load order), `DataIndex` (terrain/furniture with
   copy-from, palettes, groups, mapgen refs by id), `MapgenResolver` -> `ResolvedMapgen` (a map's cells
-  and what each symbol means, with sources), `CellText` (rows -> cells, BN's wcwidth rule),
+  and what each symbol means, with sources), `DataIndex.buildings` (city_building / overmap_special
+  z-stacks: `Building`, `BuildingTile`, `buildings_using(oter)`; `overmaps_source`, the definition
+  whose "overmaps" list is in effect), `BuildingLevels` (a map's places in buildings, each level's
+  tiles and mapgens, the step up/down; new level ids and fill suggestions), `Stairs` (cells that may
+  hold stairs: every id choice, place_terrain/"set", every chunk pick; the Validator pairs them
+  with the levels above/below as game::find_stairs does), `CellText` (rows -> cells, BN's wcwidth rule),
   `Placement` (one place_*/"set" entry read BN's way: first-value anchor, dropped/crossing/reversed
   ranges, "set" in every OMT; `IntRange` keeps how a jmapgen_int is written), `ChunkOverlay` (the
   nested chunks a map places, laid over its cells in BN's order, rotation and recursion; footprints,
@@ -48,7 +61,7 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   can place), `Computer` (one computer's JSON:
   action/failure tables, presets, form-keeping setters, reach geometry).
 - `src/edit/`: editing, no nodes. `EditSession` (open files/maps, save, new mapgen, overmap_terrain
-  stubs), `MapDocument` (one mapgen: paint, new symbol, placements, undo/redo, writes straight
+  stubs, a building's new level tiles and new buildings with their city list entry), `MapDocument` (one mapgen: paint, new symbol, placements, undo/redo, writes straight
   into the BnJson object), `JsonFile` (a parsed file; untouched top-level objects are written back as their
   original text), `Workspace` (workspace folder + manifest.json, never inside BN), `WorkspaceSync`
   (workspace vs BN status, object summary, push into BN), `MapTool`
@@ -61,11 +74,12 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
 - `src/mcp/`: the MCP server, no nodes. `McpServer` (JSON-RPC 2.0 over stdio lines: initialize,
   tools/list, tools/call), `McpTools` (tool name -> schema -> handler, loading the session on first use).
 - `src/view/`: display logic without nodes, testable headless. `AsciiMap` (what each cell looks like,
-  wall joining, hover text), `BnColors` (BN color names -> RGB), `ConsoleReachView` (what the canvas
+  wall joining, hover text), `BnColors` (BN color names -> RGB), `LevelNav` (the rest of a
+  map's level drawn around it, and the ghost level under it), `ConsoleReachView` (what the canvas
   draws for a selected computer: stand cells, reach outline, doors reached; where a new door
   console could go).
 - `src/ui/`: controls built in code (`MapCanvas`, `LegendPanel`, `MapBrowser`, `ModsDialog`,
-  `NewSymbolDialog`, `NewMapDialog`, `SyncDialog`, `PaletteEditor`, `PlacementsPanel`,
+  `NewSymbolDialog`, `NewMapDialog`, `NewBuildingDialog`, `SyncDialog`, `PaletteEditor`, `PlacementsPanel`,
   `ProblemsPanel`, `ComputerEditor`, `ComputerDialog`, `IdCompleter`: an id dropdown under a
   LineEdit, `WeightedIdList`: rows of id + weight for "chunks" and monster lists, `PieceEditor`:
   one piece's fields, used by PlacementsPanel and `SymbolPieces`: a symbol's "nested", "monster", "items", ...
@@ -119,4 +133,6 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
 - `MapDocument.begin_group()`/`end_group()` make several edits one undo step.
 - `OS.execute` joins its arguments into one shell command, so a quoted `sh -c` script gets mangled;
   write a script file and run that (see `tests/test_mcp.gd::test_stdio`).
+- `main.settings_file` is where main saves settings (ghost level, Dim); UI tests set it to "" before
+  `_ready()` so they never write the user's settings.
 - Commit the `*.uid` and `*.import` files Godot generates next to scripts and assets.

@@ -16,6 +16,14 @@ extends Control
 ## t_door_metal_locked symbol) and, unless a console already unlocks it,
 ## offers the cells where a Door control console would reach it.
 ##
+## A map that a city_building / overmap_special places has a level: the
+## toolbar picks the building (when several use the map) and the z-level;
+## PgUp / PgDn go a level up / down. The rest of the level is drawn around
+## the map (dimmed); double-click a piece to open it. Where a level has
+## several mapgens a menu asks which; where none draws a tile, a new map is
+## offered. The level below (or above: the toolbar's ghost picker) shows
+## through the map's open air, with its stairs to this level marked.
+##
 ## Command line (after "--"): --bn <path> overrides the BN checkout,
 ## --workspace <path> the workspace folder, and --open <id> opens a mapgen by
 ## om_terrain / nested id once loaded.
@@ -30,6 +38,7 @@ enum Menu {
 	NEW_MAP, NEW_CHUNK, SAVE, SAVE_ALL, WORKSPACE,
 	UNDO, REDO, NEW_SYMBOL, NEW_COMPUTER, ADD_OVERMAP, PALETTES, CHUNK_PARENTS,
 	SYNC,
+	LEVEL_UP, LEVEL_DOWN, NEW_LEVEL_UP, NEW_ROOF, NEW_LEVEL_DOWN, NEW_BUILDING,
 	CELL_PICK, CELL_EDIT_COMPUTER, CELL_DOOR_COMPUTER,
 }
 
@@ -38,6 +47,10 @@ const LOCKED_DOOR := "t_door_metal_locked"
 ## Findings about a console: selecting one shows its reach.
 const CONSOLE_CODES := [Validator.Code.NO_STAND, Validator.Code.NO_DOOR, Validator.Code.DOOR_ELSEWHERE,
 		Validator.Code.OTHER_LOCKED, Validator.Code.SHARED_DOOR, Validator.Code.EDGE_CONSOLE]
+
+## Findings about stairs between levels: selecting one shows the level
+## they lead to as the ghost.
+const STAIR_CODES := [Validator.Code.STAIRS, Validator.Code.STAIRS_OFFSET, Validator.Code.STAIRS_NO_TILE]
 
 const SEASONS := ["Spring", "Summer", "Autumn", "Winter"]
 ## Tool button hotkeys, by MapTool.Kind.
@@ -71,6 +84,9 @@ class OpenMap:
 	var problem_view: ConsoleReachView
 	## The door a new console is being placed for; x < 0 when not.
 	var console_door := -Vector2i.ONE
+	## The building and point this map is seen at (null: no building
+	## places it).
+	var place: BuildingLevels.Place
 
 
 ## False to skip loading on _ready (tests call load_index themselves).
@@ -138,10 +154,26 @@ var _after_unsaved := Callable()
 var _bn_override := ""
 var _workspace_override := ""
 var _open_on_load := ""
+var _level_picker: OptionButton
+var _z_spin: SpinBox
+## Asks which mapgen to open for a level tile with several.
+var _level_menu: PopupMenu
+## The tile _level_menu or _new_level_dialog is about.
+var _level_tile: BuildingLevels.Tile
+var _new_level_dialog: ConfirmationDialog
+var _updating_levels := false
+var _level_menu_bar: PopupMenu
+var _new_building_dialog: NewBuildingDialog
+## The building level the New map dialog is creating (null: none).
+var _pending_level: EditSession.LevelTarget
+var _ghost_picker: OptionButton
+var _dim_button: Button
+## Where settings are kept; "" keeps them in memory only (tests).
+var settings_file := AppSettings.DEFAULT_FILE
 
 
 func _ready() -> void:
-	settings = AppSettings.load_from()
+	settings = AppSettings.load_from(settings_file) if settings_file else AppSettings.new()
 	_parse_args()
 	_build_ui()
 	tool.picked.connect(_on_picked)
@@ -262,6 +294,8 @@ func _add_tab(doc: MapDocument) -> OpenMap:
 	var m := OpenMap.new()
 	m.ref = doc.ref
 	m.doc = doc
+	var places := BuildingLevels.places(index, doc.ref)
+	m.place = places[0] if not places.is_empty() else null
 	m.ascii = AsciiMap.build(index, doc.resolved, season, show_furniture,
 			doc.chunk_overlay() if show_chunks else null)
 	m.canvas = MapCanvas.new()
@@ -276,9 +310,12 @@ func _add_tab(doc: MapDocument) -> OpenMap:
 	m.canvas.cell_dragged.connect(_on_cell_dragged.bind(m))
 	m.canvas.cell_released.connect(_on_cell_released.bind(m))
 	m.canvas.cell_context.connect(_on_cell_context.bind(m))
+	m.canvas.neighbor_hovered.connect(_on_neighbor_hovered.bind(m))
+	m.canvas.neighbor_activated.connect(_on_neighbor_activated.bind(m))
 	doc.cells_changed.connect(_on_doc_cells_changed.bind(m))
 	doc.changed.connect(_on_doc_changed.bind(m))
 	doc.overlay_changed.connect(_on_overlay_changed.bind(m))
+	_update_neighbors(m)
 	_canvas_area.add_child(m.canvas)
 	maps.append(m)
 	_tabs.add_tab("")
@@ -507,6 +544,375 @@ func _on_computer_added(key: String, door_key: String) -> void:
 
 
 ## Shows [param tab] in the side drawer.
+# --- Levels --------------------------------------------------------------------
+
+## Shows [param m] at [param place] (a building and point), with the rest of
+## that level drawn around it.
+func set_place(m: OpenMap, place: BuildingLevels.Place) -> void:
+	m.place = place
+	_update_neighbors(m)
+	m.canvas.fit()
+	if m == current_map():
+		_update_level_controls()
+
+
+## Sees the current map as placed by building [param i] of the toolbar's list.
+func set_level_place(i: int) -> void:
+	var m := current_map()
+	if m == null or _updating_levels:
+		return
+	var places := BuildingLevels.places(index, m.ref)
+	if i >= 0 and i < places.size():
+		set_place(m, places[i])
+
+
+## Goes [param dz] levels up (+) or down (-). See go_to_level.
+func level_step(dz: int) -> OpenMap:
+	var m := current_map()
+	if m == null:
+		return null
+	if m.place == null:
+		_status.text = "No city_building / overmap_special places %s, so it has no levels." % m.ref.title()
+		return null
+	return go_to_level(m.place.origin.z + dz)
+
+
+## Goes to level [param z] of the current map's building: the map at the
+## same point, else the nearest tile of that level. Returns the map shown,
+## or null when the building has no such level or a menu / dialog asks
+## first (see open_level_tile).
+func go_to_level(z: int) -> OpenMap:
+	var m := current_map()
+	if m == null or m.place == null or _updating_levels:
+		return null
+	if z == m.place.origin.z:
+		return m
+	var tile := BuildingLevels.step(index, m.place, m.ref.size_omt(), z)
+	if tile == null:
+		_status.text = "%s has no level z %d (it has z %s)." % [m.place.building.id, z,
+				", ".join(Array(m.place.building.levels()).map(str))]
+		_update_level_controls()
+		return null
+	return open_level_tile(tile)
+
+
+## Opens the map for level tile [param tile]: its mapgen [param which]. With
+## several mapgens and no [param which], one already open is used, else a
+## menu asks which; with none, a new map is offered. Returns the map shown,
+## or null.
+func open_level_tile(tile: BuildingLevels.Tile, which := -1) -> OpenMap:
+	_level_tile = tile
+	var t := tile.tile
+	if tile.missing():
+		_new_level_dialog.dialog_text = "No mapgen draws %s, at %s of %s.\nCreate a map for it?" % [
+				t.oter, t.point, t.building]
+		_status.text = "No mapgen for %s (%s %s)." % [t.oter, t.building, t.point]
+		if is_inside_tree():
+			_new_level_dialog.popup_centered()
+		_update_level_controls()
+		return null
+	if which < 0 and tile.refs.size() > 1:
+		# One of them already open: go there, as picked before.
+		for om in maps:
+			which = maxi(which, tile.refs.find(om.ref))
+	if which < 0 and tile.refs.size() > 1:
+		_level_menu.clear()
+		for i in tile.refs.size():
+			var r := tile.refs[i]
+			_level_menu.add_item("%s   %s #%d   weight %d%s" % [t.oter, r.source.path, r.source.index,
+					r.weight, "   (never used: disabled)" if r.disabled else ""], i)
+		_status.text = "%s has %d mapgens; pick one." % [t.oter, tile.refs.size()]
+		if is_inside_tree():
+			_level_menu.position = Vector2i(get_global_mouse_position()) + get_window().position
+			_level_menu.popup()
+		_update_level_controls()
+		return null
+	var ref := tile.refs[clampi(which, 0, tile.refs.size() - 1)]
+	var m := open_ref(ref)
+	if m:
+		set_place(m, BuildingLevels.place_of(index, t, ref))
+		_status.text = "%s: z %d of %s" % [ref.title(), t.point.z, t.building]
+		if m.place.turn_note():
+			_status.text += " (%s)" % m.place.turn_note()
+	return m
+
+
+## Offers a new map for level tile [param tile], in the current map's file.
+func new_level_map(tile: BuildingLevels.Tile) -> void:
+	var m := current_map()
+	_level_tile = tile
+	_new_map_dialog.setup(session)
+	_new_map_dialog.set_kind(NewMapDialog.Kind.MAP)
+	var z := tile.tile.point.z
+	var fill := ""
+	if m and m.doc.object() is Dictionary:
+		fill = str(m.doc.object().get("fill_ter", ""))
+	var defaults := BuildingLevels.new_level_defaults(index, z, tile.tile.oter.ends_with("_roof"), fill,
+			m.place.origin.z if m and m.place else 0)
+	_new_map_dialog.prefill(tile.tile.oter, m.ref.source.path if m else "", defaults[0], defaults[1])
+	if is_inside_tree():
+		_new_map_dialog.popup_centered()
+
+
+## Offers a new map for the level [param dz] above (1) or below (-1) the
+## current map, under its whole footprint, for a building that has no tiles
+## there yet: the New map dialog starts with a level id, the map's size and
+## file, suggested fill_ter and palettes (BuildingLevels.new_level_defaults)
+## and an overmap_terrain base like the point's other levels'. Creating it
+## also adds its tiles to the building's "overmaps". Where the building
+## already has a tile there, goes to it instead (see go_to_level).
+func new_level(dz: int, roof := false) -> void:
+	var m := current_map()
+	if m == null or session == null:
+		return
+	if m.place == null:
+		_status.text = "No city_building / overmap_special places %s: File > New building from this map first." % m.ref.title()
+		return
+	var target := EditSession.LevelTarget.new()
+	target.building = m.place.building.id
+	target.origin = m.place.origin + Vector3i(0, 0, dz)
+	target.dir = m.place.dir
+	var size := m.ref.size_omt()
+	for y in size.y:
+		for x in size.x:
+			if m.place.building.at(target.origin + Vector3i(x, y, 0)):
+				_status.text = "%s already has z %d here; going there." % [target.building, target.origin.z]
+				go_to_level(target.origin.z)
+				return
+	var problem := session.check_level_tiles(target.building, [])
+	if problem:
+		_status.text = problem
+		return
+	var obj: Variant = m.doc.object()
+	var fill := str(obj.get("fill_ter", "")) if obj is Dictionary else ""
+	var defaults := BuildingLevels.new_level_defaults(index, target.origin.z, roof, fill, m.place.origin.z)
+	_new_map_dialog.setup(session)
+	_new_map_dialog.set_kind(NewMapDialog.Kind.MAP)
+	_new_map_dialog.prefill(BuildingLevels.new_level_id(index, m.ref.title(), dz, roof), m.ref.source.path,
+			defaults[0], defaults[1], size)
+	_new_map_dialog.level = target
+	_new_map_dialog.title = "New %s: z %d of %s" % ["roof" if roof else "level", target.origin.z, target.building]
+	_new_map_dialog.overmap_base = session.level_stub_base(target.building, target.origin, roof)
+	_new_map_dialog._validate()
+	_pending_level = target
+	if is_inside_tree():
+		_new_map_dialog.popup_centered()
+
+
+## Offers a city_building placing the current map (NewBuildingDialog).
+func new_building() -> void:
+	var m := current_map()
+	if m == null or session == null:
+		return
+	if m.ref.kind != DataIndex.MapgenRef.OM_TERRAIN:
+		_status.text = "Only an om_terrain map can be a building's level."
+		return
+	_new_building_dialog.setup(session, m.ref)
+	if is_inside_tree():
+		_new_building_dialog.popup_centered()
+
+
+func _on_map_created(doc: MapDocument) -> void:
+	var m := _add_tab(doc)
+	if _level_tile and doc.ref.ids.has(_level_tile.tile.oter):
+		set_place(m, BuildingLevels.place_of(index, _level_tile.tile, doc.ref))
+	elif _pending_level and _new_map_dialog.level == _pending_level:
+		for p in BuildingLevels.places(index, doc.ref):
+			if p.building.id == _pending_level.building and p.origin == _pending_level.origin:
+				set_place(m, p)
+		_status.text = "%s: z %d of %s. %s Unsaved: File > Save all." % [doc.ref.title(),
+				_pending_level.origin.z, _pending_level.building,
+				session.level_tiles_note(_pending_level.building).replace("Adds", "Added")]
+		if not index.buildings[_pending_level.building].at(_pending_level.origin):
+			_status.text = "Created %s, but not added to %s: %s" % [doc.ref.title(), _pending_level.building,
+					session.last_error]
+	_level_tile = null
+	_pending_level = null
+	_browser.refresh()
+
+
+func _on_building_created(id: String) -> void:
+	var m := current_map()
+	if m:
+		for p in BuildingLevels.places(index, m.ref):
+			if p.building.id == id:
+				set_place(m, p)
+	_status.text = "Created city_building %s. Unsaved: File > Save all.%s" % [id,
+			" " + session.last_error if session.last_error else ""]
+
+
+func _update_level_menu() -> void:
+	var m := current_map()
+	var placed := m != null and m.place != null
+	for id in [Menu.LEVEL_UP, Menu.LEVEL_DOWN, Menu.NEW_LEVEL_UP, Menu.NEW_ROOF, Menu.NEW_LEVEL_DOWN]:
+		_level_menu_bar.set_item_disabled(_level_menu_bar.get_item_index(id), not placed)
+	_level_menu_bar.set_item_disabled(_level_menu_bar.get_item_index(Menu.NEW_BUILDING),
+			m == null or m.ref.kind != DataIndex.MapgenRef.OM_TERRAIN)
+
+
+## Fills the toolbar's building list and z for the current map.
+func _update_level_controls() -> void:
+	var m := current_map()
+	_updating_levels = true
+	_level_picker.clear()
+	var places: Array[BuildingLevels.Place] = []
+	if m:
+		places = BuildingLevels.places(index, m.ref)
+	var at := -1
+	for i in places.size():
+		var p := places[i]
+		_level_picker.add_item(p.label())
+		if m.place and p.building == m.place.building and p.origin == m.place.origin:
+			at = i
+	if m and m.place and at < 0:
+		_level_picker.add_item(m.place.label())
+		at = _level_picker.item_count - 1
+	if _level_picker.item_count == 0:
+		_level_picker.add_item("no building")
+	_level_picker.select(maxi(at, 0))
+	_level_picker.disabled = places.size() < 2
+	var has := m != null and m.place != null
+	_z_spin.editable = has
+	if has:
+		var levels := m.place.building.levels()
+		_z_spin.min_value = levels[0]
+		_z_spin.max_value = levels[-1]
+		_z_spin.set_value_no_signal(m.place.origin.z)
+		_level_picker.tooltip_text = "%s (%s), levels z %s. The map's top-left tile is at %s." % [
+				m.place.building.id, m.place.building.type, ", ".join(Array(levels).map(str)),
+				m.place.origin]
+		if m.place.turn_note():
+			_level_picker.tooltip_text += " It is " + m.place.turn_note() + "."
+	else:
+		_z_spin.set_value_no_signal(0)
+		_level_picker.tooltip_text = "No city_building / overmap_special places this map." if m else ""
+	_updating_levels = false
+
+
+## Lays the rest of [param m]'s level around it, and the ghost level under
+## it.
+func _update_neighbors(m: OpenMap) -> void:
+	_update_ghosts(m)
+	if m.place == null:
+		m.canvas.neighbors = [] as Array[LevelNav.Neighbor]
+		return
+	var list := LevelNav.neighbors(index, m.place, m.ref, _open_refs())
+	# Big specials repeat a few generic maps (fields, forest) many times.
+	var drawn := {}
+	for n in list:
+		if n.ref:
+			if not drawn.has(n.ref):
+				drawn[n.ref] = _render_ref(n.ref)
+			n.ascii = drawn[n.ref]
+			if n.ascii and n.turns():
+				n.ascii = n.ascii.rotated(n.turns())
+	m.canvas.neighbors = list
+
+
+## The mapgens open in tabs.
+func _open_refs() -> Array:
+	return session.docs.map(func(d: MapDocument) -> DataIndex.MapgenRef: return d.ref) if session else []
+
+
+## Draws the ghost level (settings.ghost) under [param m]: the whole level
+## below or above, with the stairs that lead to [param m]'s level.
+func _update_ghosts(m: OpenMap) -> void:
+	var list: Array[LevelNav.Neighbor] = []
+	var dz := settings.ghost
+	if m.place and dz != 0 and m.place.building.levels().has(m.place.origin.z + dz):
+		list = LevelNav.ghosts(index, m.place, m.ref, m.place.origin.z + dz, _open_refs())
+		var stairs := Stairs.new(index, session.objects.object_for)
+		var drawn := {}
+		for n in list:
+			if n.ref == null:
+				continue
+			if not drawn.has(n.ref):
+				drawn[n.ref] = _render_ref(n.ref)
+			n.ascii = drawn[n.ref]
+			if n.ascii and n.turns():
+				n.ascii = n.ascii.rotated(n.turns())
+			var grid := stairs.grid_for(n.ref) if n.ref.method == "json" else null
+			if grid == null:
+				continue
+			var bit := Stairs.UP if dz < 0 else Stairs.LANDING
+			for t in n.tiles:
+				var at := n.ref.position_of(t.tile.oter)
+				for c in grid.cells(at, bit):
+					var cell := at * MapgenResolver.OMT_SIZE + c
+					n.stairs.append(ChunkOverlay.rotate(cell, n.turns(), n.size))
+	m.canvas.ghost_above = dz > 0
+	m.canvas.ghost_dim = settings.ghost_dim
+	m.canvas.ghosts = list
+
+
+## Shows the level below (-1), above (1) or no ghost (0) under every map.
+func set_ghost(dz: int) -> void:
+	settings.ghost = clampi(dz, -1, 1)
+	_ghost_picker.select(_ghost_picker.get_item_index(settings.ghost + 1))
+	_save_settings()
+	for m in maps:
+		_update_ghosts(m)
+
+
+## Draws the ghost level faded or at full color.
+func set_ghost_dim(on: bool) -> void:
+	settings.ghost_dim = on
+	_dim_button.set_pressed_no_signal(on)
+	_save_settings()
+	for m in maps:
+		m.canvas.ghost_dim = on
+
+
+func _save_settings() -> void:
+	if settings_file:
+		settings.save_to(settings_file)
+
+
+## Draws again the neighbors of [param m] that are open (and may have been
+## edited) in other tabs, and its ghost level.
+func _refresh_open_neighbors(m: OpenMap) -> void:
+	_update_ghosts(m)
+	for n in m.canvas.neighbors:
+		if n.ref and session.docs.any(func(d: MapDocument) -> bool: return d.ref == n.ref):
+			n.ascii = _render_ref(n.ref)
+			if n.ascii and n.turns():
+				n.ascii = n.ascii.rotated(n.turns())
+	m.canvas.queue_redraw()
+
+
+## How [param ref] looks, with the open document's edits if it is open.
+func _render_ref(ref: DataIndex.MapgenRef) -> AsciiMap:
+	for d in session.docs:
+		if d.ref == ref:
+			return AsciiMap.build(index, d.resolved, season, show_furniture,
+					d.chunk_overlay() if show_chunks else null)
+	if ref.method != "json":
+		return null
+	var mapgen := session.objects.object_for(ref)
+	if mapgen.is_empty():
+		return null
+	var resolved := MapgenResolver.resolve(index, mapgen)
+	var overlay := ChunkOverlay.build(index, mapgen, resolved, session.objects.object_for) \
+			if show_chunks else null
+	return AsciiMap.build(index, resolved, season, show_furniture, overlay)
+
+
+func _on_neighbor_hovered(i: int, m: OpenMap) -> void:
+	if i < 0 or i >= m.canvas.neighbors.size():
+		return
+	var n := m.canvas.neighbors[i]
+	var pts := PackedStringArray()
+	for t in n.tiles:
+		pts.append("%s %s" % [t.tile.oter, t.tile.point])
+	_status.text = "%s   |   %s   |   double-click to %s" % [n.label(), ", ".join(pts),
+			"create it" if n.ref == null else "open it"]
+
+
+func _on_neighbor_activated(i: int, m: OpenMap) -> void:
+	if i >= 0 and i < m.canvas.neighbors.size():
+		open_level_tile(m.canvas.neighbors[i].tiles[0])
+
+
 func show_drawer_tab(tab: Control) -> void:
 	_drawer.current_tab = tab.get_index()
 	if drawer_tab != tab:
@@ -779,7 +1185,12 @@ func save_current() -> String:
 	var m := current_map()
 	if m == null:
 		return ""
-	return _save_files(PackedStringArray([m.doc.file.rel_path]))
+	var rels := PackedStringArray([m.doc.file.rel_path])
+	# A new level's building and city list edits go with the map.
+	for rel in session.linked_files(m.doc.file.rel_path):
+		if session.is_dirty(rel) and not rels.has(rel):
+			rels.append(rel)
+	return _save_files(rels)
 
 
 func save_all() -> String:
@@ -940,6 +1351,9 @@ func show_finding(f: Validator.Finding) -> void:
 			elif f.target == Validator.Target.PLACEMENT and f.member == "place_computers":
 				m.problem_console = ["", f.index]
 		_update_reach(m)
+		if f.code in STAIR_CODES and settings.ghost != (1 if f.text.contains(": stairs up at") else -1):
+			# Show the level the stairs lead to, with its stairs marked.
+			set_ghost(1 if f.text.contains(": stairs up at") else -1)
 	if f.target == Validator.Target.PALETTE_KEY:
 		open_palette_editor(f.palette)
 		if f.key:
@@ -1014,6 +1428,7 @@ func _refresh_maps() -> void:
 		m.ascii.show_furniture = show_furniture
 		_update_overlay(m)
 		m.ascii.refresh()
+		_update_neighbors(m)
 		m.canvas.queue_redraw()
 	var cur := current_map()
 	if cur:
@@ -1044,6 +1459,14 @@ func _on_tab_changed(i: int) -> void:
 				MapBrowser.entry_text(m.ref)[1], ", ".join(r.palettes) if r.palettes.size() else "none"]
 		if m.doc.chunk_id():
 			_status.text += "   (a nested chunk: Edit > Maps placing this chunk)"
+		elif BuildingLevels.places(index, m.ref).size() > 1:
+			_status.text += "   (placed by several buildings: pick one in the toolbar)"
+		_refresh_open_neighbors(m)
+		if m.place:
+			# The stair check reads the other levels, which may have been
+			# edited in their own tabs.
+			m.doc.forget_findings()
+	_update_level_controls()
 	_update_problems()
 	_update_brush_label()
 	if m:
@@ -1114,6 +1537,9 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif k.keycode == KEY_Z and k.ctrl_pressed and k.shift_pressed:
 		redo()
 		accept_event()
+	elif (k.keycode == KEY_PAGEUP or k.keycode == KEY_PAGEDOWN) and current_map():
+		level_step(1 if k.keycode == KEY_PAGEUP else -1)
+		accept_event()
 
 
 func _on_menu(id: int) -> void:
@@ -1162,6 +1588,18 @@ func _on_menu(id: int) -> void:
 		Menu.SYNC:
 			if session:
 				_sync_dialog.open(session)
+		Menu.LEVEL_UP:
+			level_step(1)
+		Menu.LEVEL_DOWN:
+			level_step(-1)
+		Menu.NEW_LEVEL_UP:
+			new_level(1)
+		Menu.NEW_ROOF:
+			new_level(1, true)
+		Menu.NEW_LEVEL_DOWN:
+			new_level(-1)
+		Menu.NEW_BUILDING:
+			new_building()
 		Menu.SHOW_FURNITURE:
 			set_show_furniture(not show_furniture)
 		Menu.SHOW_KEYS:
@@ -1277,6 +1715,17 @@ func _build_ui() -> void:
 		["Maps placing this chunk...", Menu.CHUNK_PARENTS, 0],
 	])
 	_edit_menu.about_to_popup.connect(_update_edit_menu)
+	_level_menu_bar = _menu(menu_bar, "Level", [
+		["Level up (PgUp)", Menu.LEVEL_UP, 0],
+		["Level down (PgDn)", Menu.LEVEL_DOWN, 0],
+		[],
+		["New level above...", Menu.NEW_LEVEL_UP, 0],
+		["New roof above...", Menu.NEW_ROOF, 0],
+		["New level below...", Menu.NEW_LEVEL_DOWN, 0],
+		[],
+		["New building from this map...", Menu.NEW_BUILDING, 0],
+	])
+	_level_menu_bar.about_to_popup.connect(_update_level_menu)
 	_view_menu = _menu(menu_bar, "View", [
 		["Find map...", Menu.FIND, KEY_MASK_CTRL | KEY_P],
 		["Fit map to window", Menu.FIT, KEY_MASK_CTRL | KEY_0],
@@ -1336,6 +1785,32 @@ func _build_ui() -> void:
 	fit.tooltip_text = "Fit the map to the window (Ctrl+0)"
 	fit.pressed.connect(_on_menu.bind(Menu.FIT))
 	top.add_child(fit)
+	top.add_child(VSeparator.new())
+	top.add_child(_label("Level:"))
+	_level_picker = OptionButton.new()
+	_level_picker.fit_to_longest_item = false
+	_level_picker.custom_minimum_size = Vector2(150, 0)
+	_level_picker.clip_text = true
+	_level_picker.item_selected.connect(set_level_place)
+	top.add_child(_level_picker)
+	_z_spin = SpinBox.new()
+	_z_spin.prefix = "z"
+	_z_spin.min_value = -10
+	_z_spin.max_value = 10
+	_z_spin.tooltip_text = "The level shown: the map at this z of the same building (PgUp / PgDn)"
+	_z_spin.value_changed.connect(func(v: float) -> void: go_to_level(int(v)))
+	top.add_child(_z_spin)
+	_ghost_picker = OptionButton.new()
+	# Ids are settings.ghost + 1.
+	_ghost_picker.add_item("Ghost: below", 0)
+	_ghost_picker.add_item("Ghost: none", 1)
+	_ghost_picker.add_item("Ghost: above", 2)
+	_ghost_picker.select(_ghost_picker.get_item_index(settings.ghost + 1))
+	_ghost_picker.tooltip_text = "The level drawn under the map, through its open air, with its stairs to this level marked"
+	_ghost_picker.item_selected.connect(func(i: int) -> void: set_ghost(_ghost_picker.get_item_id(i) - 1))
+	top.add_child(_ghost_picker)
+	_dim_button = _toggle("Dim", settings.ghost_dim, "Draw the ghost level faded (off: at full color)", set_ghost_dim)
+	top.add_child(_dim_button)
 
 	_split = HSplitContainer.new()
 	_split.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -1444,11 +1919,20 @@ func _build_ui() -> void:
 	_computer_dialog.computer_edited.connect(func(key: String) -> void:
 		_status.text = "Changed the computer of '%s'." % key)
 	add_child(_computer_dialog)
+	_level_menu = PopupMenu.new()
+	_level_menu.id_pressed.connect(func(i: int) -> void: open_level_tile(_level_tile, i))
+	add_child(_level_menu)
+	_new_level_dialog = ConfirmationDialog.new()
+	_new_level_dialog.title = "Missing level"
+	_new_level_dialog.ok_button_text = "New map..."
+	_new_level_dialog.confirmed.connect(func() -> void: new_level_map(_level_tile))
+	add_child(_new_level_dialog)
 	_new_map_dialog = NewMapDialog.new()
-	_new_map_dialog.map_created.connect(func(doc: MapDocument) -> void:
-		_add_tab(doc)
-		_browser.refresh())
+	_new_map_dialog.map_created.connect(_on_map_created)
 	add_child(_new_map_dialog)
+	_new_building_dialog = NewBuildingDialog.new()
+	_new_building_dialog.building_created.connect(_on_building_created)
+	add_child(_new_building_dialog)
 	_palette_editor = PaletteEditor.new()
 	_palette_editor.files_changed.connect(_on_palette_files_changed)
 	_palette_editor.open_map_requested.connect(func(ref: DataIndex.MapgenRef) -> void: open_ref(ref))

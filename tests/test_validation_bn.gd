@@ -14,6 +14,8 @@ extends "res://tests/support/test_case.gd"
 ## with door options) reaches its doors, no console lands past its tile,
 ## and the 27 door consoles of chunks opened alone reach theirs, as an
 ## independent Python pass over every json mapgen counts (pick by pick).
+## Stairs between levels (Stage 10c): warnings where the next level has none
+## back, notes for pairs in other cells and stairs leaving the building.
 
 const BnEnv := preload("res://tests/support/bn_env.gd")
 const MAX_REPORTED := 20
@@ -36,6 +38,7 @@ func test_core_validates() -> void:
 	if index == null:
 		return
 	var objects := MapgenObjects.new(index)
+	var stairs := Stairs.new(index, objects.object_for)
 	var t := Time.get_ticks_msec()
 	var errors := PackedStringArray()
 	var counts := {}
@@ -49,7 +52,7 @@ func test_core_validates() -> void:
 		var resolved := MapgenResolver.resolve(index, mapgen)
 		var placements := Placement.read_all(mapgen, resolved.size)
 		var overlay := ChunkOverlay.build(index, mapgen, resolved, objects.object_for)
-		for f in Validator.validate_map(index, ref, mapgen, resolved, placements, overlay):
+		for f in Validator.validate_map(index, ref, mapgen, resolved, placements, overlay, stairs):
 			var code: String = Validator.Code.keys()[f.code]
 			counts[code] = counts.get(code, 0) + 1
 			if f.code == Validator.Code.DROPPED_SET:
@@ -85,3 +88,9 @@ func test_core_validates() -> void:
 	check_eq(counts.get("SHARED_DOOR", 0), 15, "console pairs sharing doors")
 	check_eq(counts.get("DOOR_ELSEWHERE", 0), 0, "door options relying on set/place_terrain")
 	check_eq(counts.get("EDGE_CONSOLE", 0), 0, "chunk consoles standable only outside the chunk")
+	# Stairs (Stage 10c): the editor's own count, not an independent one;
+	# spot-checked (house_31 has no stairs down to its basement, and
+	# apartments_mod_tower_NW's stairs up are 3 cells off the floor above's).
+	check_eq(counts.get("STAIRS", 0), 20, "stairs with none back on the next level (warnings)")
+	check_eq(counts.get("STAIRS_OFFSET", 0), 249, "stairs paired with stairs elsewhere in the tile")
+	check_eq(counts.get("STAIRS_NO_TILE", 0), 4, "stairs out of the building")

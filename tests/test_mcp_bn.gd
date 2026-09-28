@@ -76,5 +76,59 @@ func test_core_reads() -> void:
 			break
 	if lua != null:
 		check(lua is McpTools.Failure and lua.message.contains("only json mapgen"), "a lua map is refused")
+	# Stage 10e: a floor's building and its neighbours above and below.
+	var floor1: Variant = tools.call_tool("get_map", {"id": "2Story02_1"})
+	if check(floor1 is Dictionary, "get_map 2Story02_1"):
+		var place: Dictionary = {}
+		for e: Dictionary in floor1.levels:
+			if e.building == "2Story02":
+				place = e
+		check_eq(place.get("origin"), [0, 0, 0])
+		check_eq(place.get("above", {}).get("tiles", [{}])[0].get("om_terrain"), "2Story02_2")
+		check_eq(place.get("below", {}).get("tiles", [{}])[0].get("om_terrain"), "2Story02_basement")
+	var b: Variant = tools.call_tool("get_building", {"id": "2Story02"})
+	if check(b is Dictionary, "get_building 2Story02"):
+		check_eq(b.levels.size(), 4)
+		check_eq(b.levels[3].tiles[0].om_terrain, "2Story02_roof")
 	check(not DirAccess.dir_exists_absolute(ws) or DirAccess.get_files_at(ws).is_empty(), "nothing written")
 	TempTree.remove(ws)
+
+
+## Stage 9c/9d on core data: edit house_01 through the tools (paint rows, a
+## new symbol, a placement), save into a temp workspace, and every other
+## object of its file stays byte-identical; BN is untouched.
+func test_core_edit_and_save() -> void:
+	var ws := TempTree.make({})
+	var tools := _tools(ws)
+	if tools == null:
+		return
+	if not JsonFormatter.new().is_available():
+		skip("json_formatter not built (tools/build_json_formatter.sh)")
+		TempTree.remove(ws)
+		return
+	var m: Dictionary = tools.call_tool("get_map", {"id": "house_01"})
+	var rel: String = m.file
+	var bn_file := tools.session.index.bn_path.path_join(rel)
+	var bn_sha := FileAccess.get_sha256(bn_file)
+	var key: String = m.legend.keys()[0]
+	var r: Variant = tools.call_tool("paint_rows", {"id": "house_01", "x": 1, "y": 1, "rows": [key.repeat(3)]})
+	check(r is Dictionary, "paint_rows: %s" % [r.message if r is McpTools.Failure else ""])
+	r = tools.call_tool("add_symbol", {"id": "house_01", "terrain": "t_dirt", "furniture": "f_chair"})
+	if check(r is Dictionary, "add_symbol: %s" % [r.message if r is McpTools.Failure else ""]):
+		var new_key: String = r.symbol.keys()[0]
+		r = tools.call_tool("paint_cells", {"id": "house_01", "key": new_key, "cells": [[2, 2]]})
+		check(r is Dictionary and r.changed == 1, "paint the new symbol: %s" % [r])
+	r = tools.call_tool("add_placement", {"id": "house_01", "member": "place_loot",
+		"entry": {"group": "trash", "x": [2, 4], "y": 2, "chance": 30}})
+	check(r is Dictionary and r.problems.errors == 0, "add_placement: %s" % [r.message if r is McpTools.Failure else r])
+	var saved: Variant = tools.call_tool("save", {})
+	if check(saved is Dictionary, "save: %s" % [saved.message if saved is McpTools.Failure else ""]):
+		check_eq(saved.saved[0].changes, ["changed mapgen house_01"])
+	var s := WorkspaceSync.new(tools.session.workspace).status(rel)
+	var objects: Array = BnJson.parse(FileAccess.get_file_as_string(bn_file)).value
+	check_eq(s.unchanged, objects.size() - 1, "every other object byte-identical")
+	check_eq(FileAccess.get_sha256(bn_file), bn_sha, "BN untouched")
+	var back: Variant = tools.call_tool("validate_map", {"id": "house_01"})
+	check(back is Dictionary and back.errors == 0, "still valid: %s" % [back])
+	TempTree.remove(ws)
+

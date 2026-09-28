@@ -23,14 +23,23 @@ static func open(p_root: String, p_bn_path: String) -> Workspace:
 	var ws := Workspace.new()
 	ws.root = p_root.simplify_path()
 	ws.bn_path = p_bn_path.simplify_path()
-	var path := ws.root.path_join(MANIFEST)
-	if FileAccess.file_exists(path):
-		var parsed := BnJson.parse(FileAccess.get_file_as_string(path))
-		if parsed.ok() and parsed.value is Dictionary and parsed.value.get("files") is Dictionary:
-			ws.files = parsed.value.files
-		else:
-			ws.error = "can't read %s: %s" % [path, parsed.error if not parsed.ok() else "no \"files\""]
+	ws.reload_manifest()
 	return ws
+
+
+## Reads manifest.json again (another process, e.g. the editor next to the
+## MCP server, may have written it). Keeps [member files] if it can't be read.
+func reload_manifest() -> void:
+	var path := root.path_join(MANIFEST)
+	error = ""
+	if not FileAccess.file_exists(path):
+		files = {}
+		return
+	var parsed := BnJson.parse(FileAccess.get_file_as_string(path))
+	if parsed.ok() and parsed.value is Dictionary and parsed.value.get("files") is Dictionary:
+		files = parsed.value.files
+	else:
+		error = "can't read %s: %s" % [path, parsed.error if not parsed.ok() else "no \"files\""]
 
 
 ## The workspace default: a folder in the editor's user data.
@@ -75,15 +84,30 @@ func write_file(rel: String, text: String, base_sha256: String) -> String:
 		return "can't write %s: %s" % [target, error_string(FileAccess.get_open_error())]
 	f.store_string(text)
 	f.close()
+	reload_manifest()
 	if not files.has(rel):
-		if base_sha256:
-			files[rel] = {"base_sha256": base_sha256, "base_commit": bn_commit(bn_path)}
-		else:
-			files[rel] = {"new": true}
-		return save_manifest()
+		return set_entry(rel, {"base_sha256": base_sha256, "base_commit": bn_commit(bn_path)} if base_sha256 \
+				else {"new": true})
 	return ""
 
 
+## Sets [param rel]'s manifest entry to [param entry] (null removes it) and
+## writes the manifest, read again first so entries another process added
+## or removed since are kept as it left them. Returns an error or "".
+func set_entry(rel: String, entry: Variant) -> String:
+	reload_manifest()
+	if error:
+		return error
+	if entry == null:
+		if not files.has(rel):
+			return ""
+		files.erase(rel)
+	else:
+		files[rel] = entry
+	return save_manifest()
+
+
+## Writes [member files] as they are; set_entry() is the safe way to change one.
 func save_manifest() -> String:
 	var keys: Array = files.keys()
 	keys.sort()

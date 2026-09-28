@@ -223,6 +223,13 @@ func check_new_key(key: String) -> String:
 	return ""
 
 
+## True when painting [param key] places something BN knows: the map or a
+## palette defines it (any option of a palette choice counts: BN adds every
+## option's keys), or it is " " / "." (left undefined on purpose).
+func defines_key(key: String) -> bool:
+	return key == " " or key == "." or resolved.symbols.has(key) or _option_keys.has(key)
+
+
 ## Why [param key] can't be a symbol at all (in a map or a palette), or "".
 static func check_key_shape(key: String) -> String:
 	if key.is_empty():
@@ -1050,7 +1057,9 @@ func missing_overmap_terrain() -> PackedStringArray:
 ## once per change.
 func findings(with_palettes := true) -> Array[Validator.Finding]:
 	if not _findings_built:
-		_findings = Validator.validate_map(index, ref, mapgen(), resolved, _placements, chunk_overlay())
+		var overlay := chunk_overlay()
+		_findings = Validator.validate_map(index, ref, mapgen(), resolved, _placements, overlay,
+				Stairs.new(index, objects.object_for))
 		_findings_built = true
 	var out := _findings.duplicate()
 	if with_palettes and not ref.disabled:

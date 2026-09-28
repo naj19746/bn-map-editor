@@ -134,3 +134,80 @@ func test_cell_split() -> void:
 	check_eq(CellText.split_row(""), PackedStringArray())
 	check_eq(CellText.starts_cell(0x0331), false)
 	check_eq(CellText.starts_cell(0x4E00), true)
+
+
+## Stage 10a: city_building / overmap_special "overmaps" as z-stacks.
+func test_buildings() -> void:
+	var root := TempTree.make({
+		"data/mods/bn/modinfo.json": _mod("bn", [], {"core": true, "path": "../../json"}),
+		"data/mods/mod_a/modinfo.json": _mod("mod_a"),
+		"data/json/oter.json": [
+			{"type": "overmap_terrain", "id": ["tall_1", "tall_2", "tall_roof", "tall_basement"]},
+			{"type": "overmap_terrain", "id": "wide_w"}, {"type": "overmap_terrain", "id": "wide_e"},
+			{"type": "overmap_terrain", "id": "shared_roof"},
+			# Doesn't rotate: registered under its own id, which happens to end in a direction.
+			{"type": "overmap_terrain", "id": "gate_north", "flags": ["NO_ROTATE"]},
+		],
+		"data/json/buildings.json": [
+			{"type": "city_building", "id": "tall", "overmaps": [
+				{"point": [0, 0, -1], "overmap": "tall_basement_north"},
+				{"point": [0, 0, 0], "overmap": "tall_1_north"},
+				{"point": [0, 0, 1], "overmap": "tall_2_north"},
+				{"point": [0, 0, 2], "overmap": "shared_roof_north"},
+			]},
+			{"type": "overmap_special", "id": "wide", "occurrences": [0, 1], "overmaps": [
+				{"point": [0, 0, 0], "overmap": "wide_w_north"},
+				{"point": [1, 0, 0], "overmap": "wide_e_south"},
+				{"point": [0, 0, 1], "overmap": "shared_roof_north"},
+				{"point": [1, 0, 1], "overmap": "gate_north"},
+				{"point": [2, 0, 0], "locations": ["land"]},
+			]},
+			{"type": "overmap_special", "id": "ants", "subtype": "mutable", "overmaps": {
+				"surface": {"overmap": "anthill_north"}, "tunnel": {"overmap": "ants_nesw"}}},
+		],
+		# A mod overrides a flag of "wide" (keeping its overmaps) and copies "tall".
+		"data/mods/mod_a/b.json": [
+			{"type": "overmap_special", "id": "wide", "copy-from": "wide", "occurrences": [0, 0]},
+			{"type": "city_building", "id": "tall_copy", "copy-from": "tall"},
+		],
+	})
+	var index := DataIndex.load_bn(root, PackedStringArray(["mod_a"]))
+	check_eq(index.errors, PackedStringArray())
+	var tall: DataIndex.Building = index.buildings.get("tall")
+	if check(tall != null, "tall indexed"):
+		check_eq(tall.type, "city_building")
+		check_eq(tall.levels(), PackedInt32Array([-1, 0, 1, 2]))
+		check_eq(tall.at(Vector3i(0, 0, -1)).oter, "tall_basement")
+		check_eq(tall.at(Vector3i(0, 0, 2)).oter, "shared_roof")
+		check_eq(tall.at(Vector3i(0, 0, 2)).dir, "north")
+		check_eq(tall.at(Vector3i(1, 0, 0)), null)
+
+	var wide: DataIndex.Building = index.buildings.get("wide")
+	if check(wide != null, "wide indexed"):
+		check_eq(wide.source.mod, "mod_a", "the override is in effect")
+		check_eq(wide.tiles.size(), 4, "copy-from kept the overmaps; the empty point is left out")
+		check_eq(wide.level(0).size(), 2)
+		check_eq(wide.at(Vector3i(1, 0, 0)).oter, "wide_e")
+		check_eq(wide.at(Vector3i(1, 0, 0)).dir, "south")
+		check_eq(wide.at(Vector3i(1, 0, 1)).oter, "gate_north", "a terrain named with its suffix")
+		check_eq(wide.at(Vector3i(1, 0, 1)).dir, "")
+	var copy: DataIndex.Building = index.buildings.get("tall_copy")
+	if check(copy != null, "tall_copy indexed"):
+		check_eq(copy.levels(), PackedInt32Array([-1, 0, 1, 2]))
+		check_eq(copy.tiles[0].building, "tall_copy")
+
+	var ants: DataIndex.Building = index.buildings.get("ants")
+	if check(ants != null, "ants indexed"):
+		check(ants.mutable, "mutable")
+		check_eq(ants.levels(), PackedInt32Array())
+		check_eq(ants.tiles.size(), 2)
+		check(not ants.tiles[0].placed, "no fixed point")
+
+	var users := PackedStringArray()
+	for t in index.buildings_using("shared_roof"):
+		users.append("%s %s" % [t.building, t.point])
+	check_eq(users, PackedStringArray(["tall (0, 0, 2)", "wide (0, 0, 1)", "tall_copy (0, 0, 2)"]))
+	check_eq(index.buildings_using("shared_roof_north").size(), 3, "with the suffix")
+	check_eq(index.buildings_using("anthill")[0].building, "ants")
+	check_eq(index.buildings_using("nowhere").size(), 0)
+	TempTree.remove(root)
