@@ -37,7 +37,7 @@ enum Menu {
 const LOCKED_DOOR := "t_door_metal_locked"
 ## Findings about a console: selecting one shows its reach.
 const CONSOLE_CODES := [Validator.Code.NO_STAND, Validator.Code.NO_DOOR, Validator.Code.DOOR_ELSEWHERE,
-		Validator.Code.OTHER_LOCKED, Validator.Code.SHARED_DOOR]
+		Validator.Code.OTHER_LOCKED, Validator.Code.SHARED_DOOR, Validator.Code.EDGE_CONSOLE]
 
 const SEASONS := ["Spring", "Summer", "Autumn", "Winter"]
 ## Tool button hotkeys, by MapTool.Kind.
@@ -66,6 +66,9 @@ class OpenMap:
 	## The console whose reach the Problems tab shows: [key, place_computers
 	## index] (see MapDocument.reach_view), or [].
 	var problem_console := []
+	## The reach of a chunk's console the Problems tab shows (a finding's
+	## Validator.Finding.view), or null.
+	var problem_view: ConsoleReachView
 	## The door a new console is being placed for; x < 0 when not.
 	var console_door := -Vector2i.ONE
 
@@ -410,6 +413,7 @@ func _on_doc_cells_changed(cells: Array[Vector2i], m: OpenMap) -> void:
 ## (cells_changed); a [param full] change redraws every cell.
 func _on_doc_changed(full: bool, m: OpenMap) -> void:
 	m.ascii.resolved = m.doc.resolved
+	m.problem_view = null  # Its finding was made before the change.
 	if _update_overlay(m) or full:
 		m.ascii.refresh()
 	m.canvas.placements = m.doc.placements()
@@ -438,6 +442,7 @@ func _update_overlay(m: OpenMap) -> bool:
 
 ## A chunk (or a palette of one) this map draws changed elsewhere.
 func _on_overlay_changed(m: OpenMap) -> void:
+	m.problem_view = null
 	if _update_overlay(m):
 		m.ascii.refresh()
 	m.canvas.queue_redraw()
@@ -473,7 +478,8 @@ func new_computer() -> void:
 		_computer_dialog.open_new(m.doc)
 
 
-## Opens the computer of symbol [param key] of the current map.
+## Opens the computer of symbol [param key] of the current map: in the
+## computer dialog, or in the palette editor when a palette defines it.
 func edit_computer(key: String) -> void:
 	var m := current_map()
 	if m == null:
@@ -481,6 +487,13 @@ func edit_computer(key: String) -> void:
 	var why := _legend.computer_state(key)
 	if why:
 		_status.text = why
+		return
+	var pal := _legend.computer_palette(key)
+	if pal:
+		open_palette_editor(pal)
+		why = _palette_editor.edit_computer(key)
+		_status.text = why if why else "'%s''s computer is defined in palette %s: editing it changes every map painting '%s' from it." % [
+			LegendPanel._show_key(key), pal, LegendPanel._show_key(key)]
 		return
 	_computer_dialog.open_edit(m.doc, key)
 
@@ -514,6 +527,8 @@ func _update_reach(m: OpenMap) -> void:
 			view = m.doc.reach_view(m.brush)
 		elif tab == _placements_panel and m.sel_member == "place_computers":
 			view = m.doc.reach_view("", m.sel_index)
+		elif tab == _problems_panel and m.problem_view:
+			view = m.problem_view
 		elif tab == _problems_panel and not m.problem_console.is_empty():
 			view = m.doc.reach_view(m.problem_console[0], m.problem_console[1])
 	m.canvas.reach = view
@@ -907,6 +922,10 @@ func show_finding(f: Validator.Finding) -> void:
 	_status.text = f.describe()
 	if m:
 		m.problem_console = []
+		m.problem_view = null
+		if not f.view.is_empty():
+			m.problem_view = ConsoleReachView.build(index, f.view[0], f.view[1], f.view[2], f.view[3])
+			m.problem_view.lines.append("The chunk pick this finding is about is laid over the map here; the canvas still draws the usual pick.")
 		if f.code in CONSOLE_CODES:
 			if f.target == Validator.Target.CELL and f.key:
 				m.problem_console = [f.key, -1]

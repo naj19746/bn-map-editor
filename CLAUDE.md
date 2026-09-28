@@ -23,9 +23,10 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   `Placement` (one place_*/"set" entry read BN's way: first-value anchor, dropped/crossing/reversed
   ranges, "set" in every OMT; `IntRange` keeps how a jmapgen_int is written), `ChunkOverlay` (the
   nested chunks a map places, laid over its cells in BN's order, rotation and recursion; footprints,
-  overhang), `MapgenObjects` (a MapgenRef's object: open file live, else a cached parse),
+  overhang; chunk consoles per stamp; `forced` picks and `replay()` for judging other picks), `MapgenObjects` (a MapgenRef's object: open file live, else a cached parse),
   `Validator` (what BN would say about a map or palette: findings with severity, "won't load" vs
-  "reported on load", and a target to select; console reach), `Computer` (one computer's JSON:
+  "reported on load", and a target to select; console reach, also for every chunk pick a map
+  can place), `Computer` (one computer's JSON:
   action/failure tables, presets, form-keeping setters, reach geometry).
 - `src/edit/`: editing, no nodes. `EditSession` (open files/maps, save, new mapgen, overmap_terrain
   stubs), `MapDocument` (one mapgen: paint, new symbol, placements, undo/redo, writes straight
@@ -34,8 +35,8 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   (workspace vs BN status, object summary, push into BN), `MapTool`
   (Paint/Line/Rect/Fill/Pick on press/move/release), `PlacementTool` (Place: select/move/resize/add
   placements, kept inside one OMT), `Shapes`, `PaletteDocument` (one palette: a
-  key's terrain/furniture, includes, its own undo), `PaletteImpact` (which maps an edit changes,
-  including maps placing a changed chunk, "via" it),
+  key's terrain/furniture and computer, includes, its own undo), `PaletteImpact` (which maps an edit changes,
+  including maps placing a changed chunk, "via" it; where using maps paint a palette's console),
   `ObjectMembers` (member snapshots for undo).
 - `src/app/app_settings.gd` (`AppSettings`): settings in user://settings.cfg.
 - `src/view/`: display logic without nodes, testable headless. `AsciiMap` (what each cell looks like,
@@ -74,6 +75,9 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   and awaited frames never come. UI tests call `_ready()` directly (see `tests/test_viewer.gd`).
 - Core must validate with no errors (BN's CI loads it cleanly): an error `test_validation_bn`
   finds in core is a false positive in the Validator, not a data bug.
+- A validation test that loops or recurses forever fills Godot's log in
+  `~/.local/share/godot/app_userdata/BN Map Editor/logs` (tens of GB), and every later Godot start
+  then hangs rotating it. Delete the huge logs if Godot stops printing even its banner.
 - `_draw` never runs in tests, nor under `--headless` at all, so canvas drawing code is untested.
   After changing it, run a scratch `-s` script without `--headless` that adds main.tscn to `root`,
   opens a map, waits a few frames in `_process` and saves `root.get_texture().get_image()`.

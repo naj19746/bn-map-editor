@@ -1,6 +1,7 @@
 class_name ComputerDialog
 extends ConfirmationDialog
-## "New computer..." and "Edit computer..." for a map's own symbols.
+## "New computer..." and "Edit computer..." for a map's own symbols, and
+## for a palette's keys (setup_palette()).
 ##
 ## New: picks a free key (the console's own "6" if free), starts from the
 ## "Door control" preset, and on OK defines the key in the map itself as
@@ -9,12 +10,20 @@ extends ConfirmationDialog
 ## door it works on, it offers to add one too, so both can be painted
 ## right away. Edit: changes a copy of the key's computer and writes it on
 ## OK (MapDocument.set_computer), one undo step either way.
+##
+## Palette: edits (or adds) the computer of a palette key and hands it back
+## on OK (palette_computer_ready); the palette editor then checks which maps
+## change before committing. The reach list names the maps using the key,
+## with what each painted console reaches.
 
 ## The computer symbol [param key] was added; [param door_key] is the door
 ## symbol added with it, or "".
 signal computer_added(key: String, door_key: String)
 ## The computer of [param key] was changed.
 signal computer_edited(key: String)
+## OK in palette mode: [param data] is the computer for palette key
+## [param key] (nothing is written yet).
+signal palette_computer_ready(key: String, data: Dictionary)
 
 const INFO_COLOR := Color(0.8, 0.8, 0.85)
 const PROBLEM_COLOR := Color(1, 0.6, 0.6)
@@ -29,6 +38,9 @@ var _info: Label
 var reach_label: Label
 var _doc: MapDocument
 var _editing := ""
+## Palette mode: the palette, and PaletteImpact.palette_consoles() of the key.
+var _pal: PaletteDocument
+var _pal_consoles := []
 
 
 func _init() -> void:
@@ -90,6 +102,7 @@ func open_edit(doc: MapDocument, key: String) -> void:
 ## Like open_new() without showing the window (for tests).
 func setup_new(doc: MapDocument) -> void:
 	_doc = doc
+	_pal = null
 	_editing = ""
 	title = "New computer"
 	ok_button_text = "Add computer"
@@ -106,6 +119,7 @@ func setup_edit(doc: MapDocument, key: String) -> bool:
 	if data == null:
 		return false
 	_doc = doc
+	_pal = null
 	_editing = key
 	title = "Computer '%s'" % key
 	ok_button_text = "Apply"
@@ -114,6 +128,32 @@ func setup_edit(doc: MapDocument, key: String) -> bool:
 	editor.edit(data.duplicate(true))
 	_validate()
 	return true
+
+
+## Sets up the computer of palette [param pal]'s key [param key]: its own
+## computer, or a new Door control if it has none. False (see
+## PaletteDocument.check_computer) if it can't be edited here.
+func setup_palette(session: EditSession, pal: PaletteDocument, key: String) -> bool:
+	if pal.check_computer(key):
+		return false
+	var data: Variant = pal.computer(key)
+	_doc = null
+	_pal = pal
+	_editing = key
+	title = ("Computer '%s' in palette %s" if data else "New computer '%s' in palette %s") % [key, pal.id]
+	ok_button_text = "Apply" if data else "Add computer"
+	key_edit.editable = false
+	key_edit.text = key
+	_pal_consoles = PaletteImpact.palette_consoles(session, pal.id, key)
+	editor.edit(data.duplicate(true) if data else Computer.preset("door"))
+	_validate()
+	return true
+
+
+## Like setup_palette(), then shows the dialog.
+func open_palette(session: EditSession, pal: PaletteDocument, key: String) -> void:
+	if setup_palette(session, pal, key) and is_inside_tree():
+		popup_centered()
 
 
 ## The door terrain the edited computer's first door action works on, if
@@ -147,9 +187,9 @@ func door_key() -> String:
 
 
 func _validate() -> void:
-	if _doc == null:
+	if _doc == null and _pal == null:
 		return
-	var problem := _doc.check_new_computer(key_edit.text) if _editing.is_empty() else ""
+	var problem := _doc.check_new_computer(key_edit.text) if _editing.is_empty() and _doc else ""
 	var door := missing_door()
 	door_check.visible = not door.is_empty()
 	if door:
@@ -171,8 +211,11 @@ func _validate() -> void:
 
 
 ## One line per painted console of the edited key: what its door actions
-## reach. "" for a new computer or one without door actions.
+## reach. "" for a new computer or one without door actions. For a palette
+## key, the same per map using it.
 func reach_text() -> String:
+	if _pal:
+		return _palette_reach_text()
 	if _doc == null or _editing.is_empty():
 		return ""
 	var actions := Computer.of(editor.data).door_actions()
@@ -187,7 +230,33 @@ func reach_text() -> String:
 	return "\n".join(lines)
 
 
+## reach_text() for a palette key: each map's consoles (maps judge the
+## palette's computer where they paint it).
+func _palette_reach_text() -> String:
+	var maps: Array = _pal_consoles[0]
+	var total: int = _pal_consoles[1]
+	if total == 0:
+		return "No map using %s paints '%s' with this computer yet; each map that does is checked on its own." % [_pal.id, _editing]
+	var actions := Computer.of(editor.data).door_actions()
+	var lines := PackedStringArray(["Painted in %d map%s using %s (a change here changes all of them):" % [
+			total, "" if total == 1 else "s", _pal.id]])
+	for m: Array in maps:
+		var ref: DataIndex.MapgenRef = m[0]
+		if actions.is_empty():
+			lines.append("%s: %d console%s" % [ref.title(), m[3].size(), "" if m[3].size() == 1 else "s"])
+			continue
+		for at: Vector2i in m[3]:
+			var reach := Validator.console_reach(_pal.index, m[1], m[2], at, editor.data)
+			lines.append("%s: %s" % [ref.title(), ConsoleReachView.line(at, reach, actions)])
+	if total > maps.size():
+		lines.append("... and %d more map%s" % [total - maps.size(), "" if total - maps.size() == 1 else "s"])
+	return "\n".join(lines)
+
+
 func _on_confirmed() -> void:
+	if _pal:
+		palette_computer_ready.emit(_editing, editor.data.duplicate(true))
+		return
 	if _doc == null:
 		return
 	if _editing:

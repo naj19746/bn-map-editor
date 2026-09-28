@@ -1,21 +1,25 @@
 class_name PaletteDocument
 extends RefCounted
-## One palette definition opened for editing: the terrain/furniture of its
-## keys and its included palettes, with an undo history of its own. Every
+## One palette definition opened for editing: the terrain/furniture and
+## computers of its keys and its included palettes, with an undo history of
+## its own. Every
 ## change goes straight into the BnJson object in [member file], which is
 ## also the DataIndex definition's data while the palette is open, so maps
 ## resolved afterwards see the edit.
 ##
 ## Other per-key kinds (items, toilets, nested, ...) are shown but not edited
 ## here; they stay as written.
+##
+## A computer edit changes every map using the key: the palette editor
+## measures that with PaletteImpact before committing, as for tiles.
 
 ## The palette changed (an edit, undo or redo).
 signal changed
 
 ## Where a missing member goes, relative to the others.
-const MEMBER_ORDER := ["type", "id", "parameters", "palettes", "mapping", "terrain", "furniture"]
+const MEMBER_ORDER := ["type", "id", "parameters", "palettes", "mapping", "terrain", "furniture", "computers"]
 ## The members an edit can touch; each change snapshots all of them.
-const EDITED := ["palettes", "mapping", "terrain", "furniture"]
+const EDITED := ["palettes", "mapping", "terrain", "furniture", "computers"]
 const TILE_KINDS := ["terrain", "furniture"]
 
 
@@ -105,6 +109,71 @@ func tile_value(key: String, kind: String) -> Variant:
 	if mapping is Dictionary and mapping.get(key) is Dictionary and mapping[key].has(kind):
 		return mapping[key][kind]
 	return null
+
+
+## The palette's own computer for [param key] ("computers", else
+## "mapping"), the live object; null if it defines none, or a list of
+## several (edit those as JSON).
+func computer(key: String) -> Variant:
+	var member := _computer_member(key)
+	var v: Variant = null
+	if member == "computers":
+		v = palette().computers[key]
+	elif member == "mapping":
+		v = palette().mapping[key].computers
+	return v if v is Dictionary else null
+
+
+## True when the palette itself mentions a computer for [param key] (of any
+## shape).
+func has_computer(key: String) -> bool:
+	return not _computer_member(key).is_empty()
+
+
+func _computer_member(key: String) -> String:
+	var p := palette()
+	if p.get("computers") is Dictionary and p.computers.has(key):
+		return "computers"
+	var mapping: Variant = p.get("mapping")
+	if mapping is Dictionary and mapping.get(key) is Dictionary and mapping[key].has("computers"):
+		return "mapping"
+	return ""
+
+
+## Why build_set_computer([param key], ...) can't work, or "".
+func check_computer(key: String) -> String:
+	var shape := MapDocument.check_key_shape(key)
+	if shape:
+		return shape
+	if has_computer(key) and computer(key) == null:
+		return "'%s' places several computers; edit them as JSON." % key
+	var p := palette()
+	for member: String in ["computers", "terrain", "mapping"]:
+		if p.has(member) and not p[member] is Dictionary:
+			return "The palette's \"%s\" isn't an object." % member
+	return ""
+
+
+## A change giving [param key] computer [param data] (replaced where it's
+## written, else added to "computers"). A new computer on a key the palette
+## gives no terrain gets t_console too, so maps using it are valid without
+## fill_ter (BN puts a console there anyway). Null when nothing changes or
+## check_computer fails.
+func build_set_computer(key: String, data: Dictionary, name := "") -> Change:
+	if check_computer(key):
+		return null
+	var label := name if name else ("Edit computer '%s'" % key if has_computer(key) else "New computer '%s'" % key)
+	var copy := data.duplicate(true)
+	var is_new := not has_computer(key)
+	return _build(label, func(p: Dictionary) -> void:
+		if _computer_member(key) == "mapping":
+			p.mapping[key].computers = copy
+		else:
+			var defs: Dictionary = p.get("computers", {})
+			defs[key] = copy
+			ObjectMembers.set_member(p, "computers", defs, MEMBER_ORDER)
+		if is_new and tile_value(key, "terrain") == null:
+			_set_tile(p, key, "terrain", Computer.CONSOLE))
 
 
 ## The included palettes as written (ids, or distribution/param objects).

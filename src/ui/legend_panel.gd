@@ -5,8 +5,8 @@ extends VBoxContainer
 ## which palette). Symbols the rows don't use are listed separately.
 ## Selecting a symbol makes it the brush; "New symbol..." defines another.
 ## "New computer..." defines a console symbol, and "Edit computer..." (or a
-## double-click) edits the selected symbol's computer when the map itself
-## defines it.
+## double-click) edits the selected symbol's computer: in the map when the
+## map defines it, else in the palette editor at the palette defining it.
 
 ## A symbol was selected ("" when the selection was cleared).
 signal key_selected(key: String)
@@ -144,8 +144,8 @@ func select_key(key: String) -> void:
 	_selecting = false
 
 
-## Why [param key]'s computer can't be edited here ("" if it can): it
-## places none, a palette defines it, or it's a list of several.
+## Why [param key]'s computer can't be edited ("" if it can): it places
+## none, or it's a list of several.
 func computer_state(key: String) -> String:
 	if _ascii == null or not _editable:
 		return "Nothing to edit."
@@ -153,17 +153,29 @@ func computer_state(key: String) -> String:
 	if info == null or not info.extras.has("computers"):
 		return "'%s' places no computer." % key
 	var b: ResolvedMapgen.Binding = info.extras.computers[-1]
-	if b.from_palette():
-		return "'%s''s computer comes from %s; the palette editor can't edit computers yet." % [key, b.source_label()]
 	if not b.value is Dictionary:
 		return "'%s' places several computers; edit them as JSON." % key
 	return ""
 
 
+## The palette defining [param key]'s computer, or "" (the map's own, or
+## none).
+func computer_palette(key: String) -> String:
+	if _ascii == null:
+		return ""
+	var info: ResolvedMapgen.SymbolInfo = _ascii.resolved.symbols.get(key)
+	if info == null or not info.extras.has("computers"):
+		return ""
+	var b: ResolvedMapgen.Binding = info.extras.computers[-1]
+	return b.source if b.from_palette() else ""
+
+
 func _update_computer_button() -> void:
 	var why := computer_state(_selected) if _selected is String else "Select a computer symbol."
 	_edit_computer_button.disabled = not why.is_empty()
-	_edit_computer_button.tooltip_text = why if why else "Edit the selected symbol's computer (or double-click it)"
+	var pal := computer_palette(_selected) if _selected is String else ""
+	_edit_computer_button.tooltip_text = why if why else ("Edit the selected symbol's computer in palette %s (every map using it changes)" % pal \
+			if pal else "Edit the selected symbol's computer (or double-click it)")
 
 
 ## The palette defining the selected symbol's terrain (else furniture, else

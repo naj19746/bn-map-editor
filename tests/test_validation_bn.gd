@@ -9,7 +9,11 @@ extends "res://tests/support/test_case.gd"
 ## Computers (Stage 8): no console without options or a stand cell and no
 ## door option that reaches nothing (warnings); 17 consoles with other
 ## locked doors in reach and 15 console pairs sharing doors (notes), as an
-## independent Python pass over the om_terrain maps counts.
+## independent Python pass over the om_terrain maps counts. Chunk consoles
+## (Stage 8d): every pick of every placement (417 console placements, 118
+## with door options) reaches its doors, no console lands past its tile,
+## and the 27 door consoles of chunks opened alone reach theirs, as an
+## independent Python pass over every json mapgen counts (pick by pick).
 
 const BnEnv := preload("res://tests/support/bn_env.gd")
 const MAX_REPORTED := 20
@@ -67,7 +71,8 @@ func test_core_validates() -> void:
 	check_eq(counts.get("DROPPED_SET", 0), 209, "dropped set entries")
 	check_eq(set_maps.size(), 44, "maps with dropped set entries")
 	check_eq(counts.get("ITEMS_CHANCE", 0), 0, "place_items chances outside 1-100")
-	for code in ["NO_OPTIONS", "NO_STAND", "NO_DOOR", "COMPUTER_IGNORED", "palette NO_OPTIONS"]:
+	for code in ["NO_OPTIONS", "NO_STAND", "NO_DOOR", "COMPUTER_IGNORED", "palette NO_OPTIONS", "CHUNK_CONSOLE",
+			"CONSOLE_OVERHANG"]:
 		check_eq(counts.get(code, 0), 0, code)
 	# Notes.
 	check_eq(counts.get("SPANS_BACK", 0), 54, "reversed ranges reaching into the previous tile")
@@ -79,3 +84,4 @@ func test_core_validates() -> void:
 	check_eq(counts.get("OTHER_LOCKED", 0), 17, "consoles with other locked doors in reach")
 	check_eq(counts.get("SHARED_DOOR", 0), 15, "console pairs sharing doors")
 	check_eq(counts.get("DOOR_ELSEWHERE", 0), 0, "door options relying on set/place_terrain")
+	check_eq(counts.get("EDGE_CONSOLE", 0), 0, "chunk consoles standable only outside the chunk")

@@ -131,6 +131,45 @@ static func diff(refs: Array[DataIndex.MapgenRef], before: Array[Dictionary],
 	return out
 
 
+## Where the maps using palette [param palette_id] put down the palette's
+## computer for [param key]: [[[ref, size, tile grids, console cells], ...]
+## for the first [param limit] maps (by title), how many maps in all]. Only
+## maps whose rows use the key and take its computer from this palette
+## count (not maps defining their own). For the reach each console gets
+## (Validator.console_reach) whatever the computer's options become.
+static func palette_consoles(p_session: EditSession, palette_id: String, key: String,
+		limit := 12) -> Array:
+	var index := p_session.index
+	var refs := index.maps_using(palette_id)
+	refs.sort_custom(func(a: DataIndex.MapgenRef, b: DataIndex.MapgenRef) -> bool: return a.title() < b.title())
+	var out := []
+	var total := 0
+	for ref in refs:
+		var o := p_session.objects.object_for(ref)
+		var obj: Variant = o.get("object")
+		if not obj is Dictionary or not obj.get("rows") is Array \
+				or not (obj.rows as Array).any(func(row: Variant) -> bool: return str(row).contains(key)):
+			continue
+		var r := MapgenResolver.resolve(index, o)
+		var info: ResolvedMapgen.SymbolInfo = r.symbols.get(key)
+		if info == null or not info.extras.has("computers") or info.extras.computers[-1].source != palette_id:
+			continue
+		var consoles := Validator.console_cells(r, Placement.read_all(o, r.size))
+		var cells: Array[Vector2i] = []
+		for at: Vector2i in consoles:
+			if consoles[at][0] == key:
+				cells.append(at)
+		if cells.is_empty():
+			continue
+		total += 1
+		if out.size() >= limit:
+			continue
+		cells.sort()
+		var overlay := ChunkOverlay.build(index, o, r, p_session.objects.object_for)
+		out.append([ref, r.size, Validator.tile_grids(r, overlay, consoles), cells])
+	return [out, total]
+
+
 ## The mapgen object behind [param ref]: an open map's live object, else
 ## the object in an open file, else read from disk (each file parsed once).
 func mapgen_object(ref: DataIndex.MapgenRef) -> Dictionary:

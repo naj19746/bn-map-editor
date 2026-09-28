@@ -1,13 +1,16 @@
 class_name PaletteEditor
 extends Window
-## The palette editor window: pick a palette, edit the terrain/furniture of
-## its keys and its included palettes, see which maps use it, create new
-## palettes, and move a symbol from the current map into one of its palettes.
+## The palette editor window: pick a palette, edit the terrain/furniture and
+## computers of its keys and its included palettes, see which maps use it,
+## create new palettes, and move a symbol from the current map into one of
+## its palettes.
 ##
 ## Before an edit is made, every map using the palette is checked
 ## (PaletteImpact); if it changes maps other than the current one, they are
 ## named and the edit waits for a confirmation. Undo belongs to the palette.
-## Other per-key kinds (items, toilets, ...) are shown read-only.
+## Other per-key kinds (items, toilets, ...) are shown read-only. A key's
+## computer opens in the same ComputerDialog as a map's ("Edit computer...",
+## or "Add computer..." for a key without one).
 
 ## Files changed (an edit, undo, save): tab titles and the browser may need
 ## updating.
@@ -39,6 +42,7 @@ var confirm: ConfirmationDialog
 var new_dialog: ConfirmationDialog
 var new_id: LineEdit
 var new_path: LineEdit
+var computer_dialog: ComputerDialog
 
 var _search: LineEdit
 var _symbol_filter: LineEdit
@@ -49,6 +53,7 @@ var _save_button: Button
 var _use_button: Button
 var _apply_button: Button
 var _remove_button: Button
+var _computer_button: Button
 var _move_button: Button
 var _move_label: Label
 var _new_info: Label
@@ -146,6 +151,7 @@ func _init() -> void:
 	_apply_button.tooltip_text = "Set this key's terrain and furniture in the palette"
 	_remove_button = _button(key_row, "Remove key", remove_key)
 	_remove_button.tooltip_text = "Remove this key's terrain and furniture from the palette"
+	_computer_button = _button(key_row, "Add computer...", func() -> void: edit_computer())
 	terrain = NewSymbolDialog.IdPicker.new("Terrain")
 	furniture = NewSymbolDialog.IdPicker.new("Furniture")
 	for p: NewSymbolDialog.IdPicker in [terrain, furniture]:
@@ -208,6 +214,9 @@ func _init() -> void:
 			then.call())
 	add_child(confirm)
 	_build_new_dialog()
+	computer_dialog = ComputerDialog.new()
+	computer_dialog.palette_computer_ready.connect(_on_computer_ready)
+	add_child(computer_dialog)
 
 
 ## Uses [param p_session] (after a reload, the old one is gone).
@@ -315,6 +324,34 @@ func apply_edit() -> void:
 func remove_key() -> void:
 	if doc and key_edit.text:
 		_try(doc.build_remove_key(key_edit.text))
+
+
+## Opens the computer of [param key] (the Key box's if "") in the
+## computer dialog: the palette's own, or a new Door control. Returns why it
+## can't, or "".
+func edit_computer(key := "") -> String:
+	if doc == null:
+		return "No palette."
+	if key.is_empty():
+		key = key_edit.text
+	elif key != key_edit.text:
+		select_key(key)
+		key_edit.text = key
+		_update_buttons()
+	var problem := "Type a key first." if key.is_empty() else doc.check_computer(key)
+	if problem:
+		status.text = problem
+		return problem
+	computer_dialog.setup_palette(session, doc, key)
+	_popup(computer_dialog)
+	return ""
+
+
+## The computer dialog's OK: commits the computer for [param key] once the
+## maps it changes are confirmed.
+func _on_computer_ready(key: String, data: Dictionary) -> void:
+	if doc:
+		_try(doc.build_set_computer(key, data))
 
 
 func add_include() -> void:
@@ -577,7 +614,11 @@ func _rebuild_symbols() -> void:
 			for b: ResolvedMapgen.Binding in info.extras[kind]:
 				if b.from_palette() and not srcs.has(b.source):
 					srcs.append(b.source)
-			also.append(kind + (" (%s)" % ", ".join(srcs) if srcs.size() else ""))
+			var what := kind
+			var last: ResolvedMapgen.Binding = info.extras[kind][-1]
+			if kind == "computers" and last.value is Dictionary:
+				what = "computer \"%s\"" % Computer.of(last.value).name()
+			also.append(what + (" (%s)" % ", ".join(srcs) if srcs.size() else ""))
 		if q and not (key + " " + ter + " " + furn + " " + " ".join(also)).to_lower().contains(q):
 			continue
 		var item := symbols.create_item(root)
@@ -667,6 +708,14 @@ func _on_symbol_selected() -> void:
 			from.append(b.source)
 	status.text = "'%s' comes from %s here; Apply defines it in %s itself, over the include." % [
 		_shown_key, ", ".join(from), doc.id] if from.size() else ""
+	var comp: Variant = doc.computer(_shown_key)
+	if comp:
+		status.text = ("Computer: %s   " % Computer.of(comp).summary()) + status.text
+	elif info.extras.has("computers"):
+		var b: ResolvedMapgen.Binding = info.extras.computers[-1]
+		if b.from_palette():
+			status.text = "Its computer comes from %s; edit it there (Add computer... here gives %s its own). " % [
+				b.source, doc.id] + status.text
 	_update_buttons()
 
 
@@ -738,6 +787,12 @@ func _update_buttons() -> void:
 	_apply_button.disabled = not has or key_edit.text.is_empty()
 	_remove_button.disabled = not has or key_edit.text.is_empty() \
 			or (doc.tile_value(key_edit.text, "terrain") == null and doc.tile_value(key_edit.text, "furniture") == null)
+	var editing := has and doc.has_computer(key_edit.text)
+	_computer_button.text = "Edit computer..." if editing else "Add computer..."
+	var why := "Type or pick a key first." if not has or key_edit.text.is_empty() else doc.check_computer(key_edit.text)
+	_computer_button.disabled = not why.is_empty()
+	_computer_button.tooltip_text = why if why else ("Edit this key's computer (every map painting the key changes)" \
+			if editing else "Give this key a computer (a console; Door control to start with)")
 	_move_button.disabled = not has or map_doc == null or move_keys.item_count == 0
 
 

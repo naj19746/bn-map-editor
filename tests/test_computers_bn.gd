@@ -149,3 +149,77 @@ func test_edit_one_option_diff() -> void:
 	]))
 	index.workspace_path = ""
 	TempTree.remove(ws)
+
+
+## Stage 8d: editing one option of a real palette's computer (school_palette
+## '6') changes only that option's line of the palette's file.
+func test_edit_palette_computer_diff() -> void:
+	var index := _core_index()
+	if index == null:
+		return
+	if not JsonFormatter.new().is_available():
+		skip("json_formatter not built (tools/build_json_formatter.sh)")
+		return
+	var ws := TempTree.make({})
+	index.workspace_path = ws
+	var session := EditSession.new(index, Workspace.open(ws, index.bn_path))
+	var doc := session.open_palette(index.palette("school_palette"))
+	if not check(doc != null, session.last_error):
+		return
+	var data: Dictionary = doc.computer("6").duplicate(true)
+	Computer.of(data).set_option(2, "Emergency Bell", "toll", 0)
+	var c := doc.build_set_computer("6", data)
+	check_eq(session.impact_of(doc, c).size(), 1, "the one school map painting '6'")
+	doc.commit(c)
+	var rel := doc.file.rel_path
+	check_eq(session.save(rel), "")
+	var out := []
+	OS.execute("diff", ["-U0", index.bn_path.path_join(rel), ws.path_join(rel)], out, true)
+	var changed := PackedStringArray()
+	for l in "".join(PackedStringArray(out)).split("\n"):
+		if (l.begins_with("-") or l.begins_with("+")) and not (l.begins_with("---") or l.begins_with("+++")):
+			changed.append(l[0] + l.substr(1).strip_edges())
+	check_eq(changed, PackedStringArray([
+		"-{ \"name\": \"Emergency Toll\", \"action\": \"toll\" }",
+		"+{ \"name\": \"Emergency Bell\", \"action\": \"toll\" }",
+	]))
+	index.workspace_path = ""
+	TempTree.remove(ws)
+
+
+## Stage 8d: a lab's vault chunks (only in "else_chunks", placed by a chunk
+## the map places) are judged in the map. Their consoles reach their doors
+## in core, so their computer is swapped for one toggling shutters (none in
+## reach) through the objects the overlay reads: every vault pick is named.
+func test_core_vault_picks_judged() -> void:
+	var index := _core_index()
+	if index == null:
+		return
+	var objects := MapgenObjects.new(index)
+	var shutters := {"name": "Shutters", "options": [{"name": "Toggle", "action": "shutters"}]}
+	var swapped := func(ref: DataIndex.MapgenRef) -> Dictionary:
+		var o := objects.object_for(ref)
+		if ref.kind != DataIndex.MapgenRef.NESTED or not ref.ids[0].ends_with("_vault") or not ref.ids[0].begins_with("lab_"):
+			return o
+		var copy: Dictionary = o.duplicate(true)
+		copy.object["computers"] = {"6": shutters}
+		return copy
+	var ref: DataIndex.MapgenRef = null
+	for r in index.mapgens_for("lab_4side"):
+		if r.source.path.ends_with("lab_floorplan_cross.json") and r.source.index == 0:
+			ref = r
+	if not check(ref != null, "lab_floorplan_cross.json #0"):
+		return
+	var mapgen := objects.object_for(ref)
+	var r := MapgenResolver.resolve(index, mapgen)
+	var found := Validator.validate_map(index, ref, mapgen, r, Placement.read_all(mapgen, r.size),
+			ChunkOverlay.build(index, mapgen, r, swapped))
+	var named := {}
+	for f in found:
+		if f.code == Validator.Code.CHUNK_CONSOLE:
+			check_eq(f.target, Validator.Target.PLACEMENT)
+			check(f.text.contains("\"shutters\" changes nothing"), f.text)
+			for id in ["lab_n_vault", "lab_e_vault", "lab_s_vault", "lab_w_vault"]:
+				if f.text.contains("> %s (else_chunks" % id):
+					named[id] = true
+	check_eq(named.size(), 4, "every vault named: %s" % [found.map(func(f: Validator.Finding) -> String: return f.text)])

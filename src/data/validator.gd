@@ -44,13 +44,13 @@ enum Code {
 	CHUNK_LOOP, ROTATION, COMPUTER,
 	DROPPED, DROPPED_SET, ITEMS_CHANCE, COMPUTER_IGNORED, NO_OPTIONS, NO_STAND, NO_DOOR,
 	DISABLED, SPANS_BACK, OUTSIDE_CHUNK, CHUNK_ROTATION, OVERHANG, CONDITIONAL, UNUSED_KEY_ID,
-	DOOR_ELSEWHERE, OTHER_LOCKED, SHARED_DOOR,
+	DOOR_ELSEWHERE, OTHER_LOCKED, SHARED_DOOR, EDGE_CONSOLE, CHUNK_CONSOLE, CONSOLE_OVERHANG,
 }
 
 const NOT_CHECKED := "Not checked yet: sign and graffiti snippets, zone types and factions, mapgen " \
 		+ "flags, parameter scopes and types, the PLANT rule for furniture outside sealed_item, " \
-		+ "paint on NO_PAINT terrain, joins; computers inside nested chunks (judged only in the chunk " \
-		+ "itself, not where it's placed), doors from \"set\"/place_terrain."
+		+ "paint on NO_PAINT terrain, joins; for computers, doors from \"set\"/place_terrain or on other " \
+		+ "z-levels, and elevator_on."
 
 ## Kinds of ids, as [label, the id meaning "nothing"].
 const ID_KINDS := {
@@ -127,6 +127,10 @@ class Finding:
 	var member := ""
 	var index := -1
 	var palette := ""
+	## For a console of a chunk the map places: what the canvas shows when
+	## the finding is selected, as ConsoleReachView.build's arguments after
+	## the index ([size, grids, cells, computer]); else empty.
+	var view: Array = []
 
 	## "error", "warning" or "note".
 	func severity_name() -> String:
@@ -140,8 +144,10 @@ class Finding:
 					return "BN won't load this " + ("palette" if palette else "map")
 				return "BN reports this on every load"
 			Severity.WARNING:
-				if code in [Code.NO_OPTIONS, Code.NO_STAND, Code.NO_DOOR]:
+				if code in [Code.NO_OPTIONS, Code.NO_STAND, Code.NO_DOOR, Code.CHUNK_CONSOLE]:
 					return "it does nothing in game"
+				if code == Code.CONSOLE_OVERHANG:
+					return "BN crashes if that tile isn't generated yet"
 				return "BN silently skips it"
 		return "works, but oddly"
 
@@ -161,6 +167,10 @@ var _index := -1
 var _cell := -Vector2i.ONE
 var _palette := ""
 var _params := {}
+## Chunk id -> whether it (or a chunk it places) may put down a console.
+var _console_chunks := {}
+## Chunk console findings made so far (text -> true).
+var _console_texts := {}
 
 
 ## Every finding for map [param mapgen] (a whole mapgen object) of
@@ -238,8 +248,10 @@ func _check_map(ref: DataIndex.MapgenRef, mapgen: Dictionary, resolved: Resolved
 		_check_chunk_rotation(obj)
 	if overlay:
 		_check_overlay(overlay)
-	if not chunk:
-		_check_consoles(obj, resolved, placements, overlay)
+	if not mapgen.has("update_mapgen_id"):
+		_check_consoles(obj, resolved, placements, overlay, chunk)
+		if overlay:
+			_check_chunk_consoles(mapgen, resolved, placements, overlay)
 	if ref and ref.kind == DataIndex.MapgenRef.OM_TERRAIN and ref.method == "json":
 		_to(Target.NONE)
 		for id in ref.ids:
@@ -394,11 +406,7 @@ func _check_overlay(overlay: ChunkOverlay) -> void:
 		var top := s
 		while top.parent >= 0:
 			top = overlay.stamps[top.parent]
-		if top.member == "place_nested":
-			_to(Target.PLACEMENT, "", "place_nested", top.index)
-		else:
-			_to(Target.CELL, top.key)
-			_cell_target(top.anchor.position)
+		_to_stamp(top)
 		for issue: Array in s.issues:
 			if issue[0] == ChunkOverlay.Issue.LOOP or issue[0] == ChunkOverlay.Issue.TOO_DEEP:
 				var text := "%s: %s" % [s.path, issue[1]]
@@ -417,9 +425,10 @@ func _check_overlay(overlay: ChunkOverlay) -> void:
 ## radius, in the stand cell's overmap tile only (see Computer.EFFECTS).
 ## Terrain comes from the rows and the chunk overlay; doors a "set" or
 ## place_terrain entry makes aren't seen, so a door those name only makes
-## a note.
+## a note. In a chunk ([param in_chunk]) the player may stand in the map
+## placing it, so a console on its edge with no stand cell inside is a note.
 func _check_consoles(obj: Dictionary, resolved: ResolvedMapgen, placements: Array[Placement],
-		overlay: ChunkOverlay) -> void:
+		overlay: ChunkOverlay, in_chunk := false) -> void:
 	var consoles := console_cells(resolved, placements)
 	if consoles.is_empty():
 		return
@@ -438,6 +447,9 @@ func _check_consoles(obj: Dictionary, resolved: ResolvedMapgen, placements: Arra
 		else:
 			_to(Target.PLACEMENT, "", "place_computers", consoles[at][3])
 		var reach := console_reach(index, resolved.size, grids, at, data)
+		if reach.stands.is_empty() and in_chunk and _on_edge(at, resolved.size):
+			_add(Severity.NOTE, Code.EDGE_CONSOLE, "%s: no cell next to the console inside the chunk can be stood on; the player has to stand in the map placing it (judged there)" % where)
+			continue
 		if reach.stands.is_empty():
 			_add(Severity.WARNING, Code.NO_STAND, "%s: no cell next to the console can be stood on, so nobody can use it" % where)
 			continue
@@ -450,8 +462,8 @@ func _check_consoles(obj: Dictionary, resolved: ResolvedMapgen, placements: Arra
 			if not cells.is_empty():
 				continue
 			var e: Array = Computer.EFFECTS[action]
-			var text := "%s: \"%s\" changes nothing: no %s within %d of where the player stands, in the same overmap tile" % [
-				where, action, " or ".join(e[0]), e[2]]
+			var text := "%s: \"%s\" changes nothing: no %s within %d of where the player stands, in the %s" % [
+				where, action, " or ".join(e[0]), e[2], "chunk" if in_chunk else "same overmap tile"]
 			var named := (e[0] as Array).any(func(t: String) -> bool: return elsewhere.contains("\"%s\"" % t))
 			if named:
 				_add(Severity.NOTE, Code.DOOR_ELSEWHERE, text + " in the rows; a \"set\"/place_terrain entry may put one there")
@@ -484,6 +496,223 @@ func _check_consoles(obj: Dictionary, resolved: ResolvedMapgen, placements: Arra
 		_cell_target(a)
 		_add(Severity.NOTE, Code.SHARED_DOOR, "the consoles at (%d, %d) and (%d, %d) both reach %d door%s, e.g. (%d, %d)" % [
 			a.x, a.y, b.x, b.y, doors.size(), "" if doors.size() == 1 else "s", doors[0].x, doors[0].y])
+
+
+static func _on_edge(at: Vector2i, size: Vector2i) -> bool:
+	return at.x == 0 or at.y == 0 or at.x == size.x - 1 or at.y == size.y - 1
+
+
+## Consoles in the chunks the map places. The overlay draws one pick per
+## placement, but BN may pick any "chunks" or "else_chunks" option, any
+## mapgen of that id and any of the entry's rotations: each pick whose chunk
+## may put down a console is laid alone over the map (its rows plus the
+## drawn chunks, without that placement's own) and its consoles are judged
+## like the map's own. A chunk that a picked chunk places is judged the
+## same way, inside that pick. One finding per placing entry and pick (the
+## mapgens of an id that fail the same way are one finding), pointing at the
+## map's own entry.
+func _check_chunk_consoles(mapgen: Dictionary, resolved: ResolvedMapgen, placements: Array[Placement],
+		overlay: ChunkOverlay) -> void:
+	if overlay.size != resolved.size:
+		return
+	var own := console_cells(resolved, placements)
+	for s in overlay.stamps:
+		if s.depth == 0 and not _console_ids(overlay.objects, s).is_empty():
+			var base := ChunkOverlay.build(index, mapgen, resolved, overlay.objects, {s.uid: ChunkOverlay.NOTHING},
+					overlay.chunk_cache)
+			_judge_picks(mapgen, resolved, own, base, s, s, {})
+
+
+## The ids stamp [param s] can pick whose chunks may put down a console.
+func _console_ids(objects: Callable, s: ChunkOverlay.Stamp) -> PackedStringArray:
+	var ids := PackedStringArray()
+	for opt: Array in s.options + s.else_options:
+		if opt[0] and opt[0] != "null" and not ids.has(opt[0]) and _may_have_console(objects, opt[0], {}):
+			ids.append(opt[0])
+	return ids
+
+
+## Judges every pick of stamp [param s] laid over [param base] (an overlay
+## without s's chunk); [param forced] holds the picks of s's parents.
+func _judge_picks(mapgen: Dictionary, resolved: ResolvedMapgen, own: Dictionary, base: ChunkOverlay,
+		s: ChunkOverlay.Stamp, top: ChunkOverlay.Stamp, forced: Dictionary) -> void:
+	for id in _console_ids(base.objects, s):
+		var refs: Array = index.nested.get(id, [])
+		for rot in s.rotations:
+			## problem text -> [severity, mapgen numbers, view, overhang]
+			var groups := {}
+			for vi in refs.size():
+				var f2 := forced.duplicate()
+				f2[s.uid] = [id, refs[vi], rot]
+				var built := base.replay(s, f2)
+				var st := built.stamps[0]
+				var judged := _judge_stamp(mapgen, resolved, own, built, st)
+				if judged[0] >= 0:
+					if not groups.has(judged[1]):
+						groups[judged[1]] = [judged[0], [], judged[2], judged[3]]
+					groups[judged[1]][1].append(vi + 1)
+				for child in built.children(st):
+					if _console_ids(base.objects, child).is_empty():
+						continue
+					var f3 := f2.duplicate()
+					f3[child.uid] = ChunkOverlay.NOTHING
+					_judge_picks(mapgen, resolved, own, base.replay(s, f3), child, top, f2)
+			for text: String in groups:
+				var g: Array = groups[text]
+				var line := "%s%s: %s" % [s.path, _pick_text(s, id, rot, g[1], refs.size()), text]
+				# Different picks of an outer chunk can land an inner one alike.
+				if _console_texts.has(line):
+					continue
+				_console_texts[line] = true
+				_to_stamp(top)
+				var f := _add(g[0], Code.CONSOLE_OVERHANG if g[3] else Code.CHUNK_CONSOLE, line)
+				f.view = g[2]
+
+
+## [most severe Severity (-1: nothing wrong), the problems as one text, the
+## first judged console's view (see Finding.view), true if a console lands
+## past its tile] for the consoles of [param st], the forced stamp of
+## overlay [param built].
+func _judge_stamp(mapgen: Dictionary, resolved: ResolvedMapgen, own: Dictionary, built: ChunkOverlay,
+		st: ChunkOverlay.Stamp) -> Array:
+	var worst := -1
+	var parts := PackedStringArray()
+	var view := []
+	var overhang := false
+	if st.consoles.is_empty():
+		return [worst, "", view, overhang]
+	var in_chunk := mapgen.has("nested_mapgen_id")
+	var grids := tile_grids(resolved, built, own)
+	var elsewhere := ""
+	for o: Variant in [mapgen.get("object"), built.objects.call(st.ref).get("object")]:
+		if o is Dictionary:
+			elsewhere += JSON.stringify([o.get("set"), o.get("place_terrain"), o.get("translate_ter")])
+	var bounds := Rect2i(Vector2i.ZERO, resolved.size)
+	for c: Array in st.consoles:
+		var at: Vector2i = c[0]
+		var data: Dictionary = c[1]
+		var problems := PackedStringArray()
+		var sev := -1
+		if not (bounds.has_point(at) and st.tile.has_point(at)):
+			if in_chunk:
+				continue  # Judged in the maps placing this chunk.
+			problems.append("it lands past the overmap tile of the entry; BN adds a computer only to a submap already generated")
+			sev = Severity.WARNING
+			overhang = true
+		else:
+			var reach := console_reach(index, resolved.size, grids, at, data)
+			if reach.stands.is_empty():
+				problems.append("no cell next to it can be stood on, so nobody can use it")
+				sev = Severity.NOTE if in_chunk and _on_edge(at, resolved.size) else Severity.WARNING
+			for action: String in reach.targets:
+				if not reach.targets[action].is_empty() or reach.stands.is_empty():
+					continue
+				var e: Array = Computer.EFFECTS[action]
+				var named := (e[0] as Array).any(func(t: String) -> bool: return elsewhere.contains("\"%s\"" % t))
+				problems.append("\"%s\" changes nothing: no %s within %d of where the player stands, in the same overmap tile%s" % [
+					action, " or ".join(e[0]), e[2], " in the rows; a \"set\"/place_terrain entry may put one there" if named else ""])
+				var level := Severity.NOTE if named else Severity.WARNING
+				sev = level if sev < 0 else mini(sev, level)
+		if problems.is_empty():
+			continue
+		parts.append("its console %sat (%d, %d): %s" % ["'%s' " % c[2] if c[2] else "", at.x, at.y, "; ".join(problems)])
+		worst = sev if worst < 0 else mini(worst, sev)
+		if view.is_empty() and bounds.has_point(at):
+			var cells: Array[Vector2i] = [at]
+			view = [resolved.size, grids, cells, data]
+	return [worst, "; ".join(parts), view, overhang]
+
+
+## " > chunk_a (5% of chunks, mapgens 1-3 of 8, rotation 1)": the pick,
+## naming only what BN chooses at random.
+func _pick_text(s: ChunkOverlay.Stamp, id: String, rot: int, variants: Array, of: int) -> String:
+	var parts := PackedStringArray()
+	for pair: Array in [["chunks", s.options], ["else_chunks", s.else_options]]:
+		var total := 0
+		var w := 0
+		for o: Array in pair[1]:
+			total += maxi(o[1], 0)
+			if o[0] == id:
+				w += maxi(o[1], 0)
+		if w <= 0:
+			continue
+		if pair[0] == "else_chunks":
+			parts.append("else_chunks" + (" %s" % _percent(w, total) if w < total else ""))
+		elif w < total:
+			parts.append(_percent(w, total))
+	if of > 1:
+		if variants.size() == of:
+			parts.append("any of its %d mapgens" % of)
+		else:
+			parts.append("mapgen%s %s of %d" % ["" if variants.size() == 1 else "s", _numbers(variants), of])
+	if s.rotations.size() > 1:
+		parts.append("rotation %d" % rot)
+	return " > %s%s" % [id, " (%s)" % ", ".join(parts) if parts else ""]
+
+
+static func _percent(w: int, total: int) -> String:
+	var p := 100.0 * w / total
+	return "%d%%" % roundi(p) if p >= 1 else "%.1f%%" % p
+
+
+## "1, 3-5" for [1, 3, 4, 5].
+static func _numbers(list: Array) -> String:
+	var out := PackedStringArray()
+	var i := 0
+	while i < list.size():
+		var j := i
+		while j + 1 < list.size() and list[j + 1] == list[j] + 1:
+			j += 1
+		out.append(str(list[i]) if i == j else "%d-%d" % [list[i], list[j]])
+		i = j + 1
+	return ", ".join(out)
+
+
+## True when chunk [param id] (any of its mapgens, their palettes, or a
+## chunk they place) may put down a console.
+func _may_have_console(objects: Callable, id: String, seen: Dictionary) -> bool:
+	if _console_chunks.has(id):
+		return _console_chunks[id]
+	if seen.has(id):
+		return false
+	seen[id] = true
+	var found := false
+	for ref: DataIndex.MapgenRef in index.nested.get(id, []):
+		var obj: Variant = objects.call(ref).get("object")
+		if not obj is Dictionary:
+			continue
+		var datas: Array = [obj]
+		for pid in index.palette_closure(DataIndex.palette_options(obj)):
+			var def := index.palette(pid)
+			if def:
+				datas.append(def.data)
+		for d: Dictionary in datas:
+			if _defines_computer(d):
+				found = true
+			else:
+				for cid in DataIndex.chunk_options(d):
+					if _may_have_console(objects, cid, seen):
+						found = true
+						break
+			if found:
+				break
+		if found:
+			break
+	_console_chunks[id] = found
+	return found
+
+
+static func _defines_computer(d: Dictionary) -> bool:
+	if d.get("place_computers") is Array and not d.place_computers.is_empty():
+		return true
+	if d.get("computers") is Dictionary and not d.computers.is_empty():
+		return true
+	var mapping: Variant = d.get("mapping")
+	if mapping is Dictionary:
+		for key: String in mapping:
+			if mapping[key] is Dictionary and mapping[key].has("computers"):
+				return true
+	return false
 
 
 ## Every console of the map: cell -> [key ("" for a placement), computer
@@ -544,7 +773,9 @@ class Reach:
 	var other_locked: Array[Vector2i] = []
 
 
-## [param grids] are tile_grids() of a map of [param size] cells.
+## [param grids] are tile_grids() of a map of [param size] cells. A cell
+## without terrain is one a chunk leaves as the map placing it has it, so
+## it counts as a place to stand unless its furniture blocks it.
 static func console_reach(p_index: DataIndex, size: Vector2i, grids: Array[PackedStringArray],
 		at: Vector2i, data: Dictionary) -> Reach:
 	var r := Reach.new()
@@ -552,7 +783,11 @@ static func console_reach(p_index: DataIndex, size: Vector2i, grids: Array[Packe
 	var terrain := grids[0]
 	var furniture := grids[1]
 	r.stands = Computer.stand_cells(at, size, func(c: Vector2i) -> bool:
-		return p_index.passable(terrain[c.y * w + c.x], furniture[c.y * w + c.x]))
+		var t := terrain[c.y * w + c.x]
+		var f := furniture[c.y * w + c.x]
+		if t.is_empty():
+			return f.is_empty() or f == "f_null" or (p_index.furniture.has(f) and p_index.furniture[f].move_cost >= 0)
+		return p_index.passable(t, f))
 	var others := {}
 	for action in Computer.of(data).door_actions():
 		var e: Array = Computer.EFFECTS[action]
@@ -751,6 +986,16 @@ func _to(target: Target, key := "", member := "", i := -1) -> void:
 
 func _cell_target(c: Vector2i) -> void:
 	_cell = c
+
+
+## Findings about chunk stamp [param s] (depth 0) point at its entry, or
+## at its cell for a "nested" mapping.
+func _to_stamp(s: ChunkOverlay.Stamp) -> void:
+	if s.member == "place_nested":
+		_to(Target.PLACEMENT, "", "place_nested", s.index)
+	else:
+		_to(Target.CELL, s.key)
+		_cell_target(s.anchor.position)
 
 
 func _error(load_fails: bool, code: Code, text: String) -> void:

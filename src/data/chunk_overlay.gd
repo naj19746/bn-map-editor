@@ -28,8 +28,15 @@ extends RefCounted
 ##   drawn whole and marked when it leaves the tile; whether the overhang
 ##   survives in game depends on when the neighbouring tile is generated
 ##   (unverified).
+## - Consoles: a chunk cell with a computer becomes t_console (BN overrides
+##   the symbol), and each stamp lists the consoles its chunk puts down.
+## - Other picks: [member forced] makes a stamp draw a given chunk, mapgen
+##   and rotation instead of the heaviest, so the Validator can judge every
+##   chunk an entry may pick (see Validator._check_chunk_consoles).
 
 const MAX_DEPTH := 12
+## A [member forced] value that places nothing.
+const NOTHING := ["", null, 0]
 const WALL := "WALL"
 
 ## What kind of problem an entry of [member Stamp.issues] is.
@@ -65,6 +72,8 @@ class Stamp:
 	## Quarter turns clockwise; rotation_text is set when it's a range.
 	var rotation := 0
 	var rotation_text := ""
+	## Every rotation the entry can pick (0-3, low to high).
+	var rotations: Array[int] = [0]
 	## The chunk's mapgensize, and its footprint once turned.
 	var chunk_size := Vector2i.ZERO
 	var size := Vector2i.ZERO
@@ -75,6 +84,17 @@ class Stamp:
 	var repeat := ""
 	## Where it comes from, e.g. "place_nested #2 > chunk_a > 'X' nested".
 	var path := ""
+	## Names this placement across builds of the same map, whatever its
+	## parents picked (the key of [member ChunkOverlay.forced]).
+	var uid := ""
+	## True when [member ChunkOverlay.forced] chose the chunk.
+	var is_forced := false
+	## The consoles the chunk puts down: [cell in map cells (may be outside
+	## the map), computer JSON, the chunk's symbol ("" for place_computers)].
+	var consoles: Array = []
+	## The placing entry and where it sat, for replay().
+	var piece := {}
+	var context: RefCounted
 	var problems := PackedStringArray()
 	## [member problems] again, as [Issue, text].
 	var issues: Array = []
@@ -152,20 +172,29 @@ var chunk_keys := PackedStringArray()
 ## edit to either can change the overlay.
 var drawn_ids := {}
 var palette_ids := {}
+## Every chunk id any stamp can pick ("chunks" and "else_chunks").
+var option_ids := {}
+## Stamp uid -> [chunk id, MapgenRef, rotation]: draw that instead of the
+## heaviest pick (NOTHING: draw nothing there).
+var forced := {}
 
 ## (MapgenRef) -> the mapgen object.
-var _objects: Callable
+var objects: Callable
 ## MapgenRef -> [ResolvedMapgen, Array[Placement]], or null if unreadable.
-var _chunks := {}
+var chunk_cache := {}
 
 
 ## Lays out every chunk [param mapgen] (a whole mapgen object, resolved as
-## [param resolved]) places. [param objects] returns a MapgenRef's object.
+## [param resolved]) places. [param p_objects] returns a MapgenRef's object.
+## [param p_forced]: see [member forced]. [param cache] is shared between
+## builds so each chunk is resolved once (see resolve_chunk()).
 static func build(p_index: DataIndex, mapgen: Dictionary, resolved: ResolvedMapgen,
-		objects: Callable) -> ChunkOverlay:
+		p_objects: Callable, p_forced := {}, cache := {}) -> ChunkOverlay:
 	var o := ChunkOverlay.new()
 	o.index = p_index
-	o._objects = objects
+	o.objects = p_objects
+	o.forced = p_forced
+	o.chunk_cache = cache
 	o.size = resolved.size
 	var n := o.size.x * o.size.y
 	o.ter.resize(n)
@@ -206,6 +235,7 @@ class _Context:
 	var depth := 0
 	var parent := -1
 	var path := ""
+	var uid := ""
 	var chain := PackedStringArray()
 
 
@@ -241,6 +271,9 @@ func _place(piece: Dictionary, member: String, i: int, key: String, anchor: Rect
 	s.footprint = anchor
 	s.tile = ctx.tile
 	s.path = (ctx.path + " > " if ctx.path else "") + s.title()
+	s.uid = "%s/%s%d%s@%d,%d" % [ctx.uid, member, i, key, anchor.position.x, anchor.position.y]
+	s.piece = piece
+	s.context = ctx
 	s.options = DataIndex.weighted_ids(piece.get("chunks"))
 	s.else_options = DataIndex.weighted_ids(piece.get("else_chunks"))
 	s.conditional = piece.has("neighbors") or piece.has("joins") or piece.has("connections")
@@ -256,9 +289,19 @@ func _place(piece: Dictionary, member: String, i: int, key: String, anchor: Rect
 		if rot.lo() < 0 or rot.hi() > 4:
 			s.add_problem(Issue.ROTATION, "rotation %s is outside 0-4 (BN asserts)" % rot.text())
 			s.rotation = posmod(s.rotation, 4)
+		s.rotations.clear()
+		for r in range(rot.lo(), mini(rot.hi(), rot.lo() + 3) + 1):
+			if not s.rotations.has(posmod(r, 4)):
+				s.rotations.append(posmod(r, 4))
 	stamps.append(s)
 	var si := stamps.size() - 1
+	for o: Array in s.options + s.else_options:
+		if o[0] and o[0] != "null":
+			option_ids[o[0]] = true
 	s.chunk_id = pick(s.options)
+	if forced.has(s.uid):
+		s.chunk_id = forced[s.uid][0]
+		s.is_forced = true
 	if s.chunk_id.is_empty():
 		return
 	var refs: Array = index.nested.get(s.chunk_id, [])
@@ -267,13 +310,16 @@ func _place(piece: Dictionary, member: String, i: int, key: String, anchor: Rect
 		return
 	s.variants = refs.size()
 	s.ref = heaviest(refs)
+	if s.is_forced:
+		s.ref = forced[s.uid][1]
+		s.rotation = forced[s.uid][2]
 	if ctx.chain.has(s.chunk_id):
 		s.add_problem(Issue.LOOP, "chunk loop: %s > %s" % [" > ".join(ctx.chain), s.chunk_id])
 		return
 	if ctx.depth >= MAX_DEPTH:
 		s.add_problem(Issue.TOO_DEEP, "chunks nested more than %d deep" % MAX_DEPTH)
 		return
-	var chunk: Variant = _chunk(s.ref)
+	var chunk: Variant = resolve_chunk(s.ref)
 	if chunk == null:
 		s.add_problem(Issue.UNREADABLE, "can't read chunk %s (%s)" % [s.chunk_id, s.ref.source])
 		return
@@ -309,20 +355,29 @@ func _place(piece: Dictionary, member: String, i: int, key: String, anchor: Rect
 			if info.furniture and info.furniture.id():
 				furn[c] = info.furniture.id()
 				wrote = true
-			if info.extras.has("computers"):
-				# BN puts a console there, whatever the symbol says.
-				ter[c] = Computer.CONSOLE
-				furn[c] = "f_null"
-				wrote = true
 			if wrote:
 				owner[c] = si
 				chunk_keys[c] = r.cells[cy][cx]
+	# BN puts a console under every computer, whatever the symbol says.
+	var consoles := Validator.console_cells(r, chunk[1])
+	var local: Array = consoles.keys()
+	local.sort()
+	for at: Vector2i in local:
+		var t := origin + rotate(at, s.rotation, r.size)
+		s.consoles.append([t, consoles[at][1], consoles[at][0]])
+		if bounds.has_point(t):
+			var c := t.y * size.x + t.x
+			ter[c] = Computer.CONSOLE
+			furn[c] = "f_null"
+			owner[c] = si
+			chunk_keys[c] = consoles[at][0]
 
 	var inner := _Context.new()
 	inner.tile = ctx.tile
 	inner.depth = ctx.depth + 1
 	inner.parent = si
 	inner.path = "%s > %s" % [s.path, s.chunk_id]
+	inner.uid = s.uid
 	inner.chain = ctx.chain.duplicate()
 	inner.chain.append(s.chunk_id)
 	for cy in r.size.y:
@@ -340,15 +395,15 @@ func _place(piece: Dictionary, member: String, i: int, key: String, anchor: Rect
 
 ## [ResolvedMapgen, Array[Placement]] for [param ref], resolved once; null
 ## if its object can't be read.
-func _chunk(ref: DataIndex.MapgenRef) -> Variant:
-	if not _chunks.has(ref):
-		var mapgen: Dictionary = _objects.call(ref)
+func resolve_chunk(ref: DataIndex.MapgenRef) -> Variant:
+	if not chunk_cache.has(ref):
+		var mapgen: Dictionary = objects.call(ref)
 		if not mapgen.get("object") is Dictionary:
-			_chunks[ref] = null
+			chunk_cache[ref] = null
 		else:
 			var r := MapgenResolver.resolve(index, mapgen)
-			_chunks[ref] = [r, Placement.read_all(mapgen, r.size)]
-	return _chunks[ref]
+			chunk_cache[ref] = [r, Placement.read_all(mapgen, r.size)]
+	return chunk_cache[ref]
 
 
 ## point::rotate: [param p] turned [param turns] quarter turns clockwise
@@ -412,6 +467,46 @@ func stamps_at(cell: Vector2i) -> Array[Stamp]:
 		if s.footprint.has_point(cell):
 			out.append(s)
 	out.sort_custom(func(a: Stamp, b: Stamp) -> bool: return a.depth < b.depth)
+	return out
+
+
+## A copy of this overlay's cells with stamp [param s] (of this overlay or
+## one it was replayed from) placed again on top, [param p_forced] deciding
+## its picks. Only the replayed stamps are in the copy's [member stamps], so
+## [member owner] is meaningless there. The Validator lays each chunk pick
+## over an overlay without that placement this way, instead of building the
+## whole map again per pick (so the pick lands last, over later chunks).
+func replay(s: Stamp, p_forced: Dictionary) -> ChunkOverlay:
+	var o := ChunkOverlay.new()
+	o.index = index
+	o.objects = objects
+	o.chunk_cache = chunk_cache
+	o.forced = p_forced
+	o.size = size
+	o.ter = ter.duplicate()
+	o.furn = furn.duplicate()
+	o.owner = owner.duplicate()
+	o.chunk_keys = chunk_keys.duplicate()
+	o._place(s.piece, s.member, s.index, s.key, s.anchor, s.context)
+	o.stamps[0].parent = -1
+	return o
+
+
+## The stamp with [param uid], or null.
+func stamp_by_uid(uid: String) -> Stamp:
+	for s in stamps:
+		if s.uid == uid:
+			return s
+	return null
+
+
+## The stamps chunk [param s] (one of [member stamps]) places itself.
+func children(s: Stamp) -> Array[Stamp]:
+	var out: Array[Stamp] = []
+	var i := stamps.find(s)
+	for t in stamps:
+		if t.parent == i and i >= 0 and t != s:
+			out.append(t)
 	return out
 
 

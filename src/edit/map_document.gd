@@ -710,10 +710,22 @@ func _forget_reach() -> void:
 
 ## True when the current overlay draws chunk [param chunk_id], or a chunk
 ## using palette [param palette_id] (false before it's first built).
+## Chunks a placement can pick but the overlay doesn't draw count too: the
+## Validator judges their consoles.
 func overlay_uses(chunk_id := "", palette_id := "") -> bool:
 	if _overlay == null:
 		return false
-	return (chunk_id and _overlay.drawn_ids.has(chunk_id)) or (palette_id and _overlay.palette_ids.has(palette_id))
+	if chunk_id and (_overlay.drawn_ids.has(chunk_id) or _overlay.option_ids.has(chunk_id)):
+		return true
+	if palette_id.is_empty():
+		return false
+	if _overlay.palette_ids.has(palette_id):
+		return true
+	for id: String in _overlay.option_ids:
+		for r: DataIndex.MapgenRef in index.nested.get(id, []):
+			if index.palette_closure(r.palettes).has(palette_id):
+				return true
+	return false
 
 
 ## This chunk's nested id, or "" for other maps.

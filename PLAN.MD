@@ -1029,7 +1029,7 @@ Development stages (each ends with a headless-testable acceptance check):
      mark symbols with findings; findings of unopened maps (a project-wide scan) and of palettes
      outside the current map's use; saving with load errors only warns; the Problems tab can't
      fix anything itself (Add missing overmap_terrain stays in the Edit menu).
- Stage 8 - Computers (from the later milestones; planned 2026-09-27).  [8a, 8b, 8c DONE 2026-09-27]
+ Stage 8 - Computers (from the later milestones; planned 2026-09-27).  [8a, 8b, 8c, 8d DONE 2026-09-27]
    - Goal: a user can make a computer that unlocks a door without reading computer_session.cpp. It
      doesn't have to cover every action; door control must be easy, and the editor must show whether
      the door is actually reached.
@@ -1204,6 +1204,77 @@ Development stages (each ends with a headless-testable acceptance check):
        the tab it asks for in drawer_tab (show_drawer_tab) and tests read that.
    - Not done / open (8d): computers in the palette editor (the legend says it can't edit them
      yet), chunk computers judged in their parents, "set"/place_terrain doors in reach.
+     (8d did the first two; see below.)
+   - Result (8d): tools/run_tests.sh passes 131 tests. Chunk consoles over core, checked against an
+     independent Python pass over every json mapgen (its own palette resolution, chunk layout,
+     rotation, recursion and reach), line by line: 417 judged console placements (entry, pick,
+     console; 118 distinct with door options), with the same console cell, stand-cell count and
+     doors reached per action for every one. None reaches nothing, none lands past its tile, and
+     the 27 door consoles of chunks opened alone reach their doors: core adds 0 CHUNK_CONSOLE,
+     CONSOLE_OVERHANG, EDGE_CONSOLE, NO_STAND or NO_DOOR findings (the overhang count asked for is
+     0). tests/test_computers_bn.gd: renaming one option of school_palette's '6' changes exactly
+     that line (the impact names the one school map painting '6'); lab_floorplan_cross #0 with
+     the vaults' computer swapped for "shutters" names all four lab_*_vault picks (else_chunks,
+     one chunk deep). tests/test_chunk_consoles.gd (fake BN): a chunk alone (door missing: warning;
+     console in the chunk's edge wall: note; undefined cells around a console count as the
+     parent's floor), picks judged in the parent (10% option, else_chunks with one mapgen of two
+     failing, each rotation of [0, 1], a chunk inside a chunk, the parent's own door counting),
+     a console past the map edge and past the entry's tile, the parent's findings updating when
+     the undrawn chunk is edited, and the Problems tab drawing the pick's reach.
+     tests/test_palette_computers.gd: PaletteDocument edits/adds a key's computer with undo (a new
+     computer on a bare key gets t_console, an existing key's terrain is left), palette_consoles
+     and the impact list the maps painting the key, and the main scene: the legend's Edit
+     computer... on a palette symbol opens the palette editor and its dialog listing each map's
+     reach, OK asks because another map changes, and applies on confirm; Add computer... on a
+     key without one. Drawing checked with a non-headless screenshot (school_1_1: the palette
+     dialog over the palette editor).
+   - Code (8d): ChunkOverlay: Stamp.uid (stable across builds), rotations (every rotation of the
+     entry), consoles (cell after rotation, computer, symbol; also place_computers in chunks),
+     piece/context; overlay.forced (uid -> [id, ref, rotation], NOTHING), option_ids, chunk_cache
+     shared between builds, replay(stamp, forced), children(), stamp_by_uid(). Validator:
+     _check_consoles also for chunks (in_chunk), _check_chunk_consoles / _judge_picks /
+     _judge_stamp / _pick_text, _may_have_console (the chunk, its palettes or its chunks define a
+     computer), codes EDGE_CONSOLE (note), CHUNK_CONSOLE, CONSOLE_OVERHANG (warnings),
+     Finding.view; console_reach counts a cell without terrain as standable unless its furniture
+     blocks it. MapDocument.overlay_uses also answers for undrawn options (and their palettes).
+     PaletteDocument: computer(), has_computer(), check_computer(), build_set_computer();
+     "computers" in EDITED and MEMBER_ORDER. PaletteImpact.palette_consoles(). ComputerDialog:
+     setup_palette()/open_palette(), palette_computer_ready, the per-map reach list. PaletteEditor:
+     Add/Edit computer... button, its own ComputerDialog, edit_computer(key), the computer's name
+     in the "Also / from" column and the status line. LegendPanel.computer_palette(); main.gd:
+     edit_computer() routes a palette's computer to the palette editor; OpenMap.problem_view.
+   - Decisions (8d):
+     - Picks are laid over the map with that placement's own drawn chunk removed (a build with
+       its uid forced to NOTHING), then only the pick is replayed on top. A full rebuild per pick
+       took up to 1 s on lab_4side (rotations x mapgens x inner picks); replaying keeps every map
+       under ~110 ms. The cost: the pick lands last, over chunks placed after it (rarely
+       overlapping in core). The anchor is the range's low corner, as the overlay draws it.
+     - A cell with no terrain (a chunk's undefined " "/"." or a symbol with only furniture) is the
+       parent's terrain in game, so it counts as standable. Without this, core gave 48 false
+       "no stand cell" findings on chunk consoles alone and on their parents' picks
+       (shelter_nest_*, central lab rooms, lab security and mutagen rooms: consoles beside
+       undefined cells).
+     - One finding per entry and pick; mapgens of the id failing the same way are one finding
+       ("mapgens 1-3 of 8"); identical texts (an inner chunk reached through different outer
+       picks) are made once. The text names only what BN picks at random: "place_nested #1 >
+       room_far (10%): its console '6' at (4, 3): ...", "(else_chunks, mapgen 2 of 2)",
+       "(rotation 1)". OTHER_LOCKED and SHARED_DOOR aren't reported for picks (noise).
+     - A chunk validated alone also judges the chunks it places (it is their parent there); a
+       pick's console outside that chunk is skipped (judged in the maps placing it).
+     - A console past its tile (or the map) is CONSOLE_OVERHANG, a warning: BN's add_computer
+       returns null for a submap that isn't there and apply() dereferences it. Whether the
+       neighbour is generated yet is still unverified; core has none.
+     - Selecting a chunk console finding draws that pick's reach (the finding keeps the grids),
+       while the canvas cells still show the drawn pick; the reach panel says so.
+     - A palette computer is edited in the palette editor, not in the map's dialog: the legend's
+       Edit computer... opens the palette editor at the palette defining it with the dialog open.
+       OK goes through PaletteEditor._try, so maps other than the current one are named first.
+       The dialog lists up to 12 maps painting the key with each console's reach (maps defining
+       their own computer for the key don't count).
+   - Still open after 8d: "set"/place_terrain doors (a note), doors on other z-levels,
+     elevator_on; conditional placements' picks are judged whether or not their neighbours can
+     match; the parent's findings aren't refreshed for edits to chunks two levels below an undrawn
+     pick; the palette list in the palette editor doesn't scroll to the palette opened.
  Checked after Stage 8b (2026-09-27, against BN 39f4883093 and core data; reviews 8c, 8d):
    - Done early: "can stand here" (DataIndex TileDef.move_cost, passable()) went into 8a for the
      validator, so 8c needs no index work. Validator.Reach already has what the display draws:
