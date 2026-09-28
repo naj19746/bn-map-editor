@@ -148,6 +148,15 @@ const FIELDS := {
 		["rotation", "json", "turns the chunk"],
 		["repeat", "range", "times to place, default 1"],
 	],
+	"place_toilets": [
+		["amount", "range", "water charges, default 0 (the toilet's own default)"],
+		["repeat", "range", "times to place, default 1"],
+	],
+	"place_vendingmachines": [
+		["item_group", "id", "item group of its stock, default default_vending_machine"],
+		["reinforced", "bool", "a reinforced machine, default false"],
+		["repeat", "range", "times to place, default 1"],
+	],
 	"place_computers": [
 		["name", "text", "the console's title"],
 		["access_denied", "text", "shown when logging in fails; default: BN's message"],
@@ -550,6 +559,8 @@ static func template(p_member: String, rect: Rect2i) -> Dictionary:
 		"place_monster": fields = {"monster": ""}
 		"place_vehicles": fields = {"vehicle": "", "chance": 100, "rotation": 0}
 		"place_nested": fields = {"chunks": []}
+		# BN's default stock (default_vending_machine) until one is picked.
+		"place_vendingmachines": fields = {}
 		"place_computers": fields = Computer.preset("door")
 		_:
 			if KINDS.has(p_member) and not KINDS[p_member][2].is_empty():
@@ -572,6 +583,34 @@ const ADDABLE := ["place_items", "place_item", "place_loot", "place_monster", "p
 	"place_vehicles", "place_nested", "place_signs", "place_npcs", "place_terrain", "place_furniture",
 	"place_traps", "place_fields", "place_liquids", "place_toilets", "place_vendingmachines",
 	"place_rubble", "place_graffiti", "place_computers", "faction_owner"]
+
+
+## Symbol mapping kinds edited as fields -> the place_* member whose
+## fields a piece reads (minus mapping_skip()). BN loads each of them with
+## load_place_mapings: one object or a list of objects, every one placed.
+## ("traps" isn't one: a list there is one pick, and a plain string works.)
+const MAPPING_KINDS := {"nested": "place_nested", "monster": "place_monster", "items": "place_items",
+	"item": "place_item", "monsters": "place_monsters", "vehicles": "place_vehicles",
+	"toilets": "place_toilets", "vendingmachines": "place_vendingmachines"}
+## Mapping kinds whose piece reads its own "repeat" (jmapgen_item_group,
+## jmapgen_spawn_item); BN rolls max(place repeat, piece repeat) times.
+const MAPPING_REPEATS := ["items", "item"]
+
+
+## Fields a piece of mapping [param kind] never reads: its place is the
+## symbol's cell, once ("repeat" belongs to jmapgen_place, except for the
+## MAPPING_REPEATS kinds).
+static func mapping_skip(kind: String) -> Array:
+	return ["x", "y"] if MAPPING_REPEATS.has(kind) else ["x", "y", "repeat"]
+
+
+## A new piece for symbol mapping [param kind] (see MAPPING_KINDS): what it
+## places, left empty to fill in.
+static func mapping_template(kind: String) -> Dictionary:
+	var e := template(MAPPING_KINDS[kind], Rect2i(0, 0, 1, 1))
+	for key: String in mapping_skip(kind):
+		e.erase(key)
+	return e
 
 
 ## A bitmask of Layer bits for what the symbol's own mappings place

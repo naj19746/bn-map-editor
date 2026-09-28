@@ -313,11 +313,43 @@ func test_main_scene_places_new_chunk() -> void:
 	canvas.cell_pressed.emit(Vector2i(15, 15), false, false)
 	canvas.cell_released.emit(Vector2i(15, 15), false)
 	check_eq([panel.member, panel.index], ["place_nested", 7], "the new entry is selected")
-	check(panel._chunk_box.visible, "the chunk picker shows")
-	panel.chunk_edit.text = "nope"
+	check(panel._chunk_box.visible, "the chunk info shows")
 	check_eq(panel.add_chunk("nope"), "There's no nested chunk \"nope\".")
-	check_eq(panel.add_chunk("closet"), "")
+	var chunks: WeightedIdList = panel.lists.get("chunks")
+	if not check(chunks != null and panel.lists.has("else_chunks"), "chunks are edited as lists"):
+		main.free()
+		_cleanup()
+		return
+	check_eq(chunks.rows.size(), 0)
+	chunks.add_edit.text = "closet"
+	chunks.add_edit.text_submitted.emit("closet")
 	check_eq(m.doc.object().place_nested[7], {"chunks": ["closet"], "x": 15, "y": 15})
+	check_eq(panel.lists.get("chunks"), chunks, "updated in place, not rebuilt")
+	check_eq(chunks.rows.size(), 1)
+	check_eq([chunks.rows[0].id.text, chunks.rows[0].note.text], ["closet", "2x2"])
+	chunks.add("nope", 5)
+	check_eq(m.doc.object().place_nested[7].chunks, ["closet", ["nope", 5]])
+	check_eq(chunks.rows[1].note.text, "unknown", "an unknown id is marked")
+	check(panel._problems.text.contains("nope"), panel._problems.text)
+	chunks.rows[1].weight.value = 100
+	chunks.rows[1].weight.value_changed.emit(100.0)
+	check_eq(m.doc.object().place_nested[7].chunks, ["closet", "nope"], "weight 100 writes a plain id")
+	check_eq(chunks.set_id(1, "null"), "")
+	chunks.move(1, 0)
+	check_eq(m.doc.object().place_nested[7].chunks, ["null", "closet"])
+	chunks.remove(0)
+	var else_chunks: WeightedIdList = panel.lists["else_chunks"]
+	else_chunks.add("closet", 0)
+	check_eq(m.doc.object().place_nested[7], {"chunks": ["closet"], "x": 15, "y": 15,
+			"else_chunks": [["closet", 0]]})
+	else_chunks.remove(0)
+	check(not m.doc.object().place_nested[7].has("else_chunks"), "an emptied else_chunks goes")
+	chunks.remove(0)
+	check_eq(m.doc.object().place_nested[7].chunks, [], "an emptied chunks stays")
+	for i in 8:
+		main.undo()
+	check_eq(m.doc.object().place_nested[7], {"chunks": ["closet"], "x": 15, "y": 15}, "one undo step each")
+	check_eq(chunks.value, ["closet"], "the list follows undo")
 	check(panel._chunk_info.text.begins_with("Draws: chunk closet (2x2)"), panel._chunk_info.text)
 	check_eq([m.ascii.char_at(15, 15), m.ascii.char_at(16, 15), m.ascii.char_at(16, 16)], ["t", ".", "t"],
 			"the chunk draws on the parent")
@@ -357,5 +389,235 @@ func test_main_scene_places_new_chunk() -> void:
 	var saved := FileAccess.get_file_as_string(_ws.path_join("data/json/mapgen/nested/closet.json"))
 	check(saved.contains("\"nested_mapgen_id\": \"closet\""), saved)
 	check(saved.contains("\"mapgensize\": [ 2, 2 ]"), saved)
+	main.free()
+	_cleanup()
+
+
+func test_symbol_piece_data() -> void:
+	# The plain member, or mapping[key][kind] where it's written there.
+	var obj := {"terrain": {"a": "t_floor"}, "mapping": {"b": {"nested": {"chunks": ["x"]}, "item": {}}}}
+	check_eq(ObjectMembers.key_member(obj, "b", "nested"), "mapping")
+	check_eq(ObjectMembers.key_value(obj, "b", "nested"), {"chunks": ["x"]})
+	check_eq(ObjectMembers.set_key_value(obj, "b", "nested", {"chunks": ["y"]}, MapDocument.MEMBER_ORDER), "")
+	check_eq(obj.mapping.b.nested, {"chunks": ["y"]}, "edited where it is")
+	check_eq(ObjectMembers.set_key_value(obj, "a", "nested", {"chunks": []}, MapDocument.MEMBER_ORDER), "")
+	check_eq(obj.keys(), ["terrain", "nested", "mapping"], "a new member goes by the order")
+	ObjectMembers.set_key_value(obj, "b", "nested", null, [])
+	check_eq(obj.mapping, {"b": {"item": {}}}, "removed from the mapping entry")
+	ObjectMembers.set_key_value(obj, "b", "item", null, [])
+	check(not obj.has("mapping"), "an emptied mapping goes")
+	ObjectMembers.set_key_value(obj, "a", "nested", null, [])
+	check(not obj.has("nested"), "an emptied member goes")
+	check_eq(ObjectMembers.set_key_value({"nested": []}, "a", "nested", {}, []), "\"nested\" isn't an object.")
+	check_eq(Placement.mapping_template("nested"), {"chunks": []})
+	check_eq(Placement.mapping_template("monster"), {"monster": ""})
+	check_eq(Placement.mapping_template("items"), {"item": "", "chance": 100})
+	check_eq(Placement.mapping_template("item"), {"item": ""})
+	check_eq(Placement.mapping_template("vehicles"), {"vehicle": "", "chance": 100, "rotation": 0})
+	check_eq(Placement.mapping_template("monsters"), {"monster": ""})
+	check_eq(Placement.mapping_template("toilets"), {})
+	check_eq(Placement.mapping_template("vendingmachines"), {}, "BN's default stock")
+	check_eq(Placement.mapping_skip("items"), ["x", "y"], "items reads its own repeat")
+	check_eq(Placement.mapping_skip("item"), ["x", "y"])
+	check_eq(Placement.mapping_skip("toilets"), ["x", "y", "repeat"])
+	for kind: String in Placement.MAPPING_KINDS:
+		check(MapDocument.MEMBER_ORDER.has(kind) and PaletteDocument.MEMBER_ORDER.has(kind)
+				and PaletteDocument.EDITED.has(kind), kind + " has a place and is snapshotted")
+
+	_setup()
+	var session := _session()
+	var via := session.open(_index.mapgens_for("via_pal")[0])
+	check_eq(via.own_piece("M", "nested"), {"chunks": ["wide"], "rotation": 2})
+	check_eq(via.own_piece("N", "nested"), null, "N's comes from the palette")
+	check_eq(via.set_own_piece("M", "nested", {"chunks": ["room"], "rotation": 2}), "")
+	check_eq(via.chunk_overlay().stamps[1].chunk_id, "room", "the overlay follows")
+	check_eq(via.set_own_piece("N", "monster", [{"monster": "mon_x"}, {"group": "G"}]), "")
+	check_eq(via.object().monster, {"N": [{"monster": "mon_x"}, {"group": "G"}]})
+	check_eq(via.resolved.symbols["N"].extras.monster.size(), 1)
+	check_eq(via.set_own_piece("N", "monster", "mon_x"), "A \"monster\" mapping is an object or a list of objects.")
+	check_eq(via.set_own_piece("ab", "monster", {}), "A symbol must be one character wide.")
+	via.undo()
+	via.undo()
+	check(not via.object().has("monster"), "undone")
+	check_eq(via.own_piece("M", "nested"), {"chunks": ["wide"], "rotation": 2})
+
+	var pal := session.open_palette(_index.palette("npal"))
+	check_eq(pal.piece("N", "nested"), {"chunks": ["room"]})
+	var c := pal.build_set_piece("N", "nested", {"chunks": ["wide"]})
+	check_eq(session.impact_of(pal, c).map(func(x: PaletteImpact.Affected) -> String: return x.to_string()),
+			["via_pal (data/json/mapgen/maps.json#1): N"], "the map painting N changes")
+	pal.commit(c)
+	check_eq(pal.palette().nested, {"N": {"chunks": ["wide"]}})
+	check_eq(pal.build_set_piece("N", "nested", {"chunks": ["wide"]}), null, "nothing changes")
+	check_eq(pal.check_piece("N", "nested", 5), "A \"nested\" mapping is an object or a list of objects.")
+	pal.commit(pal.build_set_piece("N", "nested", null))
+	check(not pal.palette().has("nested"), "removed")
+	pal.undo()
+	pal.undo()
+	check_eq(pal.palette().nested, {"N": {"chunks": ["room"]}})
+	_cleanup()
+
+
+func test_main_scene_symbol_pieces() -> void:
+	if not JsonFormatter.new().is_available():
+		skip("json_formatter not built")
+		return
+	_setup()
+	var main: Control = load("res://main.tscn").instantiate()
+	main.auto_start = false
+	main._ready()
+	main._workspace_override = _ws
+	main.load_index(_root)
+	var m = main.open_id("via_pal")
+	var legend: LegendPanel = main._legend
+	var pieces := legend.pieces
+
+	# The map's own 'M': editable fields, lists included.
+	legend.select_key("M")
+	check(pieces.visible and pieces.editors.has("nested"), "M's nested is shown")
+	var ed: PieceEditor = pieces.editors.nested[0]
+	check(not ed.editors.has("x") and not ed.editors.has("repeat"), "no x/y/repeat for a mapping")
+	check_eq(ed.editors.rotation.text, "2")
+	var chunks: WeightedIdList = ed.lists.chunks
+	check_eq([chunks.rows[0].id.text, chunks.rows[0].note.text], ["wide", "3x1"])
+	chunks.add("room", 5)
+	check_eq(m.doc.object().nested.M, {"chunks": ["wide", ["room", 5]], "rotation": 2})
+	check(pieces.editors.nested[0] == ed, "updated in place")
+	ed.editors.rotation.text = "1"
+	check_eq(ed.commit_field("rotation"), "")
+	check_eq(m.doc.object().nested.M.rotation, 1)
+	check(main._tabs.get_tab_title(0).ends_with(" *"), "dirty")
+
+	# Add a monster to M, then another: the mapping becomes a list.
+	check_eq(pieces.add_buttons.monster.text, "Add monster")
+	pieces.add_buttons.monster.pressed.emit()
+	check_eq(m.doc.object().monster, {"M": {"monster": ""}})
+	var mon: PieceEditor = pieces.editors.monster[0]
+	mon.editors.monster.text = "mon_x"
+	check_eq(mon.commit_field("monster"), "")
+	check_eq(pieces.add_buttons.monster.text, "Add another monster")
+	pieces.add_buttons.monster.pressed.emit()
+	check_eq(m.doc.object().monster.M, [{"monster": "mon_x"}, {"monster": ""}])
+	check_eq(pieces.editors.monster.size(), 2)
+	check_eq(pieces.remove_piece("monster", 1), "")
+	check_eq(m.doc.object().monster.M, [{"monster": "mon_x"}], "a list stays a list")
+	pieces.remove_buttons.monster.pressed.emit()
+	check(not m.doc.object().has("monster"), "removed")
+	for i in 7:
+		main.undo()
+	check_eq(m.doc.object().nested.M, {"chunks": ["wide"], "rotation": 2}, "all undone")
+	check_eq(pieces.editors.nested[0].lists.chunks.value, ["wide"], "the legend follows undo")
+
+	# N's nested comes from npal: listed, opened in the palette editor.
+	legend.select_key("N")
+	check(pieces.editors.get("nested", []).is_empty(), "not the map's own")
+	check(not pieces.remove_buttons.has("nested"), "nothing of its own to remove")
+	var open: Button = null
+	for b in pieces.find_children("*", "Button", true, false):
+		if b.text == "Open":
+			open = b
+	if not check(open != null, "an Open button for the palette's piece"):
+		main.free()
+		_cleanup()
+		return
+	open.pressed.emit()
+	var pe: PaletteEditor = main._palette_editor
+	check(pe.doc != null and pe.doc.id == "npal", "the palette editor opened at npal")
+	check_eq(pe.key_edit.text, "N")
+	var pal_ed: PieceEditor = pe.pieces.editors.nested[0]
+	pal_ed.lists.chunks.set_id(0, "wide")
+	check(not pe.confirm.visible, "only the current map changes")
+	check_eq(pe.doc.palette().nested.N, {"chunks": ["wide"]})
+	check_eq(m.doc.chunk_overlay().stamps[0].chunk_id, "wide", "the map draws the palette's new chunk")
+	check_eq(pe.pieces.editors.nested[0], pal_ed, "updated in place")
+	pe.pieces.add_piece("monster")
+	check_eq(pe.doc.palette().monster, {"N": {"monster": ""}})
+	check(pe.status.text.contains("changes 1 map"), pe.status.text)
+	# A key typed into the Key box that isn't defined yet can get pieces.
+	pe.key_edit.text = "Q"
+	pe.key_edit.text_changed.emit("Q")
+	check(pe.pieces.visible and pe.pieces.key == "Q")
+	check_eq(pe.pieces.add_piece("nested"), "")
+	check_eq(pe.doc.palette().nested.Q, {"chunks": []})
+	check_eq(main.save_all(), "")
+	var saved := FileAccess.get_file_as_string(_ws.path_join(PALETTES))
+	check(saved.contains("\"Q\": { \"chunks\": [  ] }"), saved)
+	main.free()
+	_cleanup()
+
+
+## The other mapping kinds (items, toilets, vendingmachines, ...) in the
+## legend and the palette editor.
+func test_main_scene_item_pieces() -> void:
+	if not JsonFormatter.new().is_available():
+		skip("json_formatter not built")
+		return
+	_setup()
+	var main: Control = load("res://main.tscn").instantiate()
+	main.auto_start = false
+	main._ready()
+	main._workspace_override = _ws
+	main.load_index(_root)
+	var m = main.open_id("via_pal")
+	var legend: LegendPanel = main._legend
+	var pieces := legend.pieces
+
+	legend.select_key("M")
+	for kind: String in Placement.MAPPING_KINDS:
+		check(pieces.add_buttons.has(kind), "an Add button for " + kind)
+	pieces.add_buttons.items.pressed.emit()
+	check_eq(m.doc.object().items, {"M": {"item": "", "chance": 100}})
+	var ed: PieceEditor = pieces.editors.items[0]
+	check(not ed.editors.has("x") and ed.editors.has("repeat"), "items keeps its own repeat")
+	check(ed.completers.has("item"), "item suggests groups and items")
+	ed.editors.item.text = "grp"
+	check_eq(ed.commit_field("item"), "")
+	ed.editors.repeat.text = "1-3"
+	check_eq(ed.commit_field("repeat"), "")
+	check_eq(m.doc.object().items.M, {"item": "grp", "chance": 100, "repeat": [1, 3]})
+	check(pieces.editors.items[0] == ed, "updated in place")
+	# An inline item group is JSON in the id field and stays an object.
+	ed.editors.item.text = "{\"items\": [\"x\"]}"
+	check_eq(ed.commit_field("item"), "")
+	check_eq(m.doc.object().items.M.item, {"items": ["x"]})
+
+	pieces.add_buttons.toilets.pressed.emit()
+	check_eq(m.doc.object().toilets, {"M": {}})
+	var toilet: PieceEditor = pieces.editors.toilets[0]
+	check(toilet.editors.has("amount") and not toilet.editors.has("repeat"), "toilet fields")
+	toilet.editors.amount.text = "[5, 10]"
+	check_eq(toilet.commit_field("amount"), "")
+	check_eq(m.doc.object().toilets.M, {"amount": [5, 10]})
+	pieces.add_buttons.vendingmachines.pressed.emit()
+	var vend: PieceEditor = pieces.editors.vendingmachines[0]
+	check(vend.completers.has("item_group"), "the stock suggests item groups")
+	vend.editors.reinforced.text = "true"
+	check_eq(vend.commit_field("reinforced"), "")
+	check_eq(m.doc.object().vendingmachines, {"M": {"reinforced": true}})
+	check_eq(m.doc.resolved.symbols["M"].extras.keys().filter(func(k: String) -> bool:
+			return k in ["items", "toilets", "vendingmachines"]).size(), 3, "M resolves with its new pieces")
+	check_eq(m.doc.object().keys().slice(-5), ["toilets", "vendingmachines", "items", "nested", "place_nested"],
+			"new members go by MEMBER_ORDER")
+
+	# A palette's items: edited in the palette editor, the map using it named.
+	main.open_palette_key("npal", "N")
+	var pe: PaletteEditor = main._palette_editor
+	check_eq(pe.pieces.key, "N")
+	check_eq(pe.pieces.add_piece("items"), "")
+	check(pe.status.text.contains("changes 1 map"), pe.status.text)
+	check_eq(pe.doc.palette().items, {"N": {"item": "", "chance": 100}})
+	var pal_ed: PieceEditor = pe.pieces.editors.items[0]
+	pal_ed.editors.item.text = "pal_grp"
+	check_eq(pal_ed.commit_field("item"), "")
+	check_eq(m.doc.resolved.symbols["N"].extras.items.size(), 1, "the map sees the palette's piece")
+	# The legend lists it as inherited, with Open.
+	legend.select_key("N")
+	check(pieces.editors.get("items", []).is_empty(), "N's items aren't the map's own")
+
+	check_eq(main.save_all(), "")
+	var saved := FileAccess.get_file_as_string(_ws.path_join(PALETTES))
+	check(saved.contains("\"items\": { \"N\": { \"item\": \"pal_grp\", \"chance\": 100 } }"), saved)
+	var saved_map := FileAccess.get_file_as_string(_ws.path_join(MAPS))
+	check(saved_map.contains("\"repeat\": [ 1, 3 ]") and saved_map.contains("\"reinforced\": true"), saved_map)
 	main.free()
 	_cleanup()

@@ -338,7 +338,7 @@ func test_save_refuses_crossing_range() -> void:
 
 
 func test_field_text() -> void:
-	var P := PlacementsPanel
+	var P := PieceEditor
 	check_eq(P.parse_text("1-3", "range"), [[1, 3], ""])
 	check_eq(P.parse_text("[31, 16]", "xy"), [[31, 16], ""])
 	check_eq(P.parse_text("5", "range"), [5, ""])
@@ -411,6 +411,44 @@ func test_id_completion() -> void:
 	check_eq(submitted, ["rocks_pile"], "and submits it")
 	check(not c.is_open())
 	edit.free()
+
+
+func test_weighted_options() -> void:
+	var W := WeightedIdList
+	check_eq(W.option_id("a"), "a")
+	check_eq(W.option_id(["a", 5]), "a")
+	check_eq(W.option_weight("a"), 100)
+	check_eq(W.option_weight(["a", 5]), 5)
+	check_eq(W.option_weight(["a", 5.0]), 5)
+	check_eq(W.with_id("a", "b"), "b")
+	check_eq(W.with_id(["a", 100], "b"), ["b", 100], "a pair stays a pair")
+	check_eq(W.with_weight("a", 5), ["a", 5])
+	check_eq(W.with_weight(["a", 5], 100), "a", "100 writes a plain id")
+	check_eq(W.with_weight({"param": "p"}, 0), [{"param": "p"}, 0])
+	check_eq(W.new_option("a", 100), "a")
+	check_eq(W.new_option("a", 7), ["a", 7])
+	check_eq(W.id_text({"param": "p"}), "{\"param\":\"p\"}")
+	check_eq(W.parse_id(" mon_dog "), ["mon_dog", ""])
+	check_eq(W.parse_id("{\"param\": \"p\"}"), [{"param": "p"}, ""])
+	check(W.parse_id("{nope").back().contains("isn't valid JSON"))
+	check_eq(W.parse_id(""), [null, "Enter an id, or remove the option."])
+
+	var w := W.new(func() -> PackedStringArray: return PackedStringArray())
+	var got := []
+	w.committed.connect(func(v: Array) -> void: got.append(v))
+	w.set_value(["a", ["b", 5], {"param": "p"}])
+	check_eq(w.rows.size(), 3)
+	check_eq(w.rows[2].id.text, "{\"param\":\"p\"}")
+	check(w.rows[0].up.disabled and w.rows[2].down.disabled and not w.rows[1].up.disabled)
+	w.move(0, 1)
+	w.set_weight(1, 100)
+	check_eq(got, [[["b", 5], "a", {"param": "p"}], ["a", "b", {"param": "p"}]], "value stays until set_value")
+	w.set_value(["a"])
+	check_eq(w.rows.size(), 1)
+	check(not w._empty_label.visible)
+	w.set_value(null)
+	check(w._empty_label.visible)
+	w.free()
 
 
 func test_main_scene_placements() -> void:
@@ -487,6 +525,40 @@ func test_main_scene_placements() -> void:
 	check_eq(panel.editors["monster"].text, "mon_zombie")
 	check(panel.completers.has("group"), "and the group field")
 	check(not panel.completers.has("chance"), "not a number field")
+	var chance_edit: LineEdit = panel.editors["chance"]
+	panel.editors["monster"].text = "[\"mon_zombie\", [\"mon_dog\", 5]]"
+	check_eq(panel.commit_field("monster"), "")
+	var monsters: WeightedIdList = panel.lists.get("monster")
+	if check(monsters != null, "a monster list is edited as a list"):
+		check(not panel.editors.has("monster"))
+		check_eq(monsters.rows.size(), 2)
+		check_eq([monsters.rows[1].id.text, int(monsters.rows[1].weight.value)], ["mon_dog", 5])
+		check_eq(monsters.rows[1].note.text, "", "a known monster has no note")
+		monsters.set_id(1, "mon_nope")
+		check_eq(doc.object().place_monster[0].monster, ["mon_zombie", ["mon_nope", 5]], "the pair stays a pair")
+		check_eq(monsters.rows[1].note.text, "unknown")
+		check_eq(monsters.set_weight(1, -1), "A weight can't be negative (BN drops the option).")
+		check_eq(monsters.set_id(0, " "), "Enter an id, or remove the option.")
+		check_eq(monsters.rows[0].id.text, "mon_zombie", "the text is put back")
+		check_eq(doc.object().place_monster[0].monster, ["mon_zombie", ["mon_nope", 5]])
+		monsters.remove(1)
+		monsters.remove(0)
+		check(not doc.object().place_monster[0].has("monster"), "an emptied monster list goes")
+		check(panel.editors.has("monster") and not panel.lists.has("monster"), "a text field again")
+		for i in 4:
+			main.undo()
+	check_eq(doc.object().place_monster[0].monster, "mon_zombie")
+	panel.editors["chance"].text = "50"
+	check_eq(panel.commit_field("chance"), "")
+	check_eq(panel.editors["chance"].text, "50")
+	check(panel.editors["chance"] != chance_edit, "rebuilt after the monster field changed kind")
+	chance_edit = panel.editors["chance"]
+	panel.editors["chance"].text = "60"
+	check_eq(panel.commit_field("chance"), "")
+	check(panel.editors["chance"] == chance_edit, "same fields: updated in place")
+	check_eq(panel.piece.labels["chance"].modulate, Color.WHITE)
+	main.undo()
+	main.undo()
 	main.undo()
 	main.undo()
 	check(not doc.object().has("place_monster"), "undone")

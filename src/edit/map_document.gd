@@ -23,7 +23,8 @@ signal changed(full: bool)
 signal overlay_changed
 
 ## Where a missing object member goes, relative to the others.
-const MEMBER_ORDER := ["mapgensize", "fill_ter", "rows", "palettes", "terrain", "furniture", "computers"]
+const MEMBER_ORDER := ["mapgensize", "fill_ter", "rows", "palettes", "terrain", "furniture", "computers",
+		"toilets", "vendingmachines", "items", "item", "monsters", "monster", "vehicles", "nested"]
 ## Tried in order when suggesting a key for a new symbol, after the
 ## symbols of the terrain/furniture themselves.
 const KEY_CANDIDATES := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" \
@@ -396,6 +397,46 @@ func set_computer(key: String, data: Dictionary, name := "") -> String:
 		var defs: Dictionary = obj.get("computers", {})
 		defs[key] = value
 		_set_member("computers", defs)
+	c.after[member] = _snapshot(member)
+	c.order_after = obj.keys()
+	_push(c)
+	return ""
+
+
+# --- Symbol pieces -------------------------------------------------------------
+
+## The map's own [param kind] mapping ("nested", "monster", ...) for
+## [param key] as written: one piece object or a list of them; null if the
+## map defines none (a palette may).
+func own_piece(key: String, kind: String) -> Variant:
+	return ObjectMembers.key_value(object(), key, kind)
+
+
+## Sets the map's own [param kind] mapping for [param key] to
+## [param value] (a piece object or a list of them; null removes it) as
+## one undoable change. Returns an error, or "" (also when nothing changed).
+func set_own_piece(key: String, kind: String, value: Variant, name := "") -> String:
+	var shape := check_key_shape(key)
+	if shape:
+		return shape
+	if not (value == null or value is Dictionary or (value is Array and value.all(
+			func(e: Variant) -> bool: return e is Dictionary))):
+		return "A \"%s\" mapping is an object or a list of objects." % kind
+	var obj := object()
+	var old: Variant = own_piece(key, kind)
+	if BnJson.stringify(old) == BnJson.stringify(value):
+		return ""
+	var member := ObjectMembers.key_member(obj, key, kind)
+	if member.is_empty():
+		member = kind
+	var c := Change.new()
+	c.name = name if name else ("Remove %s of '%s'" % [kind, key] if value == null else "Edit %s of '%s'" % [kind, key])
+	file.touch(object_index)
+	c.order_before = obj.keys()
+	c.before[member] = _snapshot(member)
+	var err := ObjectMembers.set_key_value(obj, key, kind, value, MEMBER_ORDER)
+	if err:
+		return "The map's " + err
 	c.after[member] = _snapshot(member)
 	c.order_after = obj.keys()
 	_push(c)

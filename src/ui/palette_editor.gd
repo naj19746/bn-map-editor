@@ -8,9 +8,10 @@ extends Window
 ## Before an edit is made, every map using the palette is checked
 ## (PaletteImpact); if it changes maps other than the current one, they are
 ## named and the edit waits for a confirmation. Undo belongs to the palette.
-## Other per-key kinds (items, toilets, ...) are shown read-only. A key's
-## computer opens in the same ComputerDialog as a map's ("Edit computer...",
-## or "Add computer..." for a key without one).
+## A key's "nested", "monster", "items", ... mappings
+## (Placement.MAPPING_KINDS) are edited under the pickers (SymbolPieces);
+## other per-key kinds (traps, signs, ...) are shown read-only. A key's computer opens in the same ComputerDialog as a map's
+## ("Edit computer...", or "Add computer..." for a key without one).
 
 ## Files changed (an edit, undo, save): tab titles and the browser may need
 ## updating.
@@ -19,6 +20,8 @@ signal files_changed
 signal open_map_requested(ref: DataIndex.MapgenRef)
 
 const MAX_NAMED := 25
+## The most height the key's pieces take before they scroll.
+const MAX_PIECES_HEIGHT := 260.0
 
 var session: EditSession
 ## The palette shown, or null.
@@ -45,6 +48,8 @@ var new_dialog: ConfirmationDialog
 var new_id: LineEdit
 var new_path: LineEdit
 var computer_dialog: ComputerDialog
+## The Key box's "nested", "items", ... mappings.
+var pieces: SymbolPieces
 
 var _search: LineEdit
 var _symbol_filter: LineEdit
@@ -147,7 +152,9 @@ func _init() -> void:
 	key_edit.custom_minimum_size = Vector2(50, 0)
 	key_edit.max_length = 4
 	key_edit.tooltip_text = "The symbol to set; type a new one to add it"
-	key_edit.text_changed.connect(func(_t: String) -> void: _update_buttons())
+	key_edit.text_changed.connect(func(_t: String) -> void:
+		_update_buttons()
+		_show_pieces())
 	key_row.add_child(key_edit)
 	_apply_button = _button(key_row, "Apply", apply_edit)
 	_apply_button.tooltip_text = "Set this key's terrain and furniture in the palette"
@@ -160,6 +167,23 @@ func _init() -> void:
 		p.size_flags_vertical = Control.SIZE_EXPAND_FILL
 		p.list.custom_minimum_size = Vector2(0, 80)
 		edit.add_child(p)
+	var pieces_scroll := ScrollContainer.new()
+	pieces_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	edit.add_child(pieces_scroll)
+	pieces = SymbolPieces.new()
+	# As tall as the pieces need, up to MAX_PIECES_HEIGHT (then it scrolls).
+	pieces.minimum_size_changed.connect(func() -> void:
+		pieces_scroll.custom_minimum_size.y = minf(pieces.get_combined_minimum_size().y, MAX_PIECES_HEIGHT))
+	pieces.get_own = func(key: String, kind: String) -> Variant:
+		return doc.piece(key, kind) if doc else null
+	pieces.set_own = set_piece
+	pieces.message.connect(func(text: String) -> void: status.text = text)
+	pieces.open_palette_requested.connect(func(id: String, key: String) -> void:
+		var def := session.index.palette(id) if session else null
+		if def:
+			show_palette(def)
+			show_key(key))
+	pieces_scroll.add_child(pieces)
 
 	var lower := HBoxContainer.new()
 	lower.custom_minimum_size = Vector2(0, 140)
@@ -213,6 +237,7 @@ func _init() -> void:
 	confirm = ConfirmationDialog.new()
 	confirm.title = "Other maps change"
 	confirm.ok_button_text = "Apply anyway"
+	confirm.canceled.connect(_show_pieces)
 	confirm.confirmed.connect(func() -> void:
 		var then := _pending
 		_pending = Callable()
@@ -358,6 +383,22 @@ func edit_computer(key := "") -> String:
 func _on_computer_ready(key: String, data: Dictionary) -> void:
 	if doc:
 		_try(doc.build_set_computer(key, data))
+
+
+## Sets the palette's own [param kind] mapping for [param key] (null
+## removes it), once the maps it changes are confirmed. Returns an error,
+## or "" (also while it waits for the confirmation).
+func set_piece(key: String, kind: String, value: Variant) -> String:
+	if doc == null:
+		return "No palette."
+	var problem := doc.check_piece(key, kind, value)
+	if problem:
+		status.text = problem
+		return problem
+	var c := doc.build_set_piece(key, kind, value)
+	if c:
+		_try(c)
+	return ""
 
 
 func add_include() -> void:
@@ -579,6 +620,7 @@ func _after_change() -> void:
 
 func _refresh() -> void:
 	_rebuild_symbols()
+	_show_pieces()
 	_refresh_includes()
 	_refresh_users()
 	_refresh_map_part()
@@ -670,6 +712,26 @@ func _show_problems() -> void:
 	problems.visible = not lines.is_empty()
 
 
+## Selects [param key] and shows it in the Key box, its pickers and pieces.
+## False if the palette doesn't define it.
+func show_key(key: String) -> bool:
+	var found := select_key(key)
+	if found and _shown_key != key:
+		_on_symbol_selected()
+	elif not found:
+		key_edit.text = key
+		_update_buttons()
+		_show_pieces()
+	return found
+
+
+## The Key box's "nested", "items", ... mappings (none without a palette).
+func _show_pieces() -> void:
+	pieces.index = session.index if session else null
+	var key := key_edit.text if doc and MapDocument.check_key_shape(key_edit.text).is_empty() else ""
+	pieces.show_key(key, doc.view().symbols.get(key) if key else null)
+
+
 ## Selects [param key] in the symbol list (clearing the filter), as if
 ## clicked. False if the palette doesn't define it.
 func select_key(key: String) -> bool:
@@ -723,6 +785,7 @@ func _on_symbol_selected() -> void:
 			status.text = "Its computer comes from %s; edit it there (Add computer... here gives %s its own). " % [
 				b.source, doc.id] + status.text
 	_update_buttons()
+	_show_pieces()
 
 
 ## Puts [param value] (the palette's own, or null) in [param p]: an id is

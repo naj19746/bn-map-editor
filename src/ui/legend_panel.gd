@@ -7,6 +7,9 @@ extends VBoxContainer
 ## "New computer..." defines a console symbol, and "Edit computer..." (or a
 ## double-click) edits the selected symbol's computer: in the map when the
 ## map defines it, else in the palette editor at the palette defining it.
+## Below the list, the selected symbol's "nested", "items", ... mappings
+## (SymbolPieces): the map's own are edited there, a palette's open in the
+## palette editor.
 
 ## A symbol was selected ("" when the selection was cleared).
 signal key_selected(key: String)
@@ -19,12 +22,21 @@ signal edit_computer_requested(key: String)
 ## "Palette..." was pressed: open the palette editor at [param id] (the
 ## selected symbol's palette), or "" for no particular one.
 signal palette_requested(id: String)
+## "Open" next to a piece from a palette: edit [param key] in palette
+## [param id].
+signal palette_key_requested(id: String, key: String)
+## Something to tell the user (an edit was refused).
+signal message(text: String)
 
 const MAX_VALUE_TEXT := 90
 
 var _filter: LineEdit
 var _tree: Tree
 var _ascii: AsciiMap
+## The map shown (for editing its own symbol pieces), or null.
+var doc: MapDocument
+## The selected symbol's "nested", "items", ... mappings.
+var pieces: SymbolPieces
 ## key -> the symbol's TreeItem.
 var _items := {}
 var _selecting := false
@@ -74,7 +86,11 @@ func _init() -> void:
 		if _selected is String:
 			edit_computer_requested.emit(_selected))
 	row.add_child(_edit_computer_button)
+	var split := VSplitContainer.new()
+	split.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	add_child(split)
 	_tree = Tree.new()
+	_tree.custom_minimum_size = Vector2(0, 160)
 	_tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_tree.hide_root = true
 	_tree.columns = 3
@@ -89,7 +105,24 @@ func _init() -> void:
 	_tree.nothing_selected.connect(func() -> void:
 		_tree.deselect_all()
 		key_selected.emit(""))
-	add_child(_tree)
+	split.add_child(_tree)
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.custom_minimum_size = Vector2(0, 60)
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.visible = false
+	split.add_child(scroll)
+	pieces = SymbolPieces.new()
+	pieces.get_own = func(key: String, kind: String) -> Variant:
+		return doc.own_piece(key, kind) if doc else null
+	pieces.set_own = func(key: String, kind: String, value: Variant) -> String:
+		return doc.set_own_piece(key, kind, value) if doc else "No map."
+	pieces.message.connect(func(text: String) -> void: message.emit(text))
+	pieces.open_palette_requested.connect(func(id: String, key: String) -> void:
+		palette_key_requested.emit(id, key))
+	pieces.visible = false
+	pieces.visibility_changed.connect(func() -> void: scroll.visible = pieces.visible)
+	scroll.add_child(pieces)
 	reach_label = reach_label_new()
 	add_child(reach_label)
 
@@ -120,11 +153,13 @@ static func show_reach(label: Label, view: ConsoleReachView) -> void:
 	label.text = "\n".join(lines)
 
 
-## Shows [param ascii]'s symbols. [param editable] enables "New symbol...".
-func show_map(ascii: AsciiMap, editable := true) -> void:
+## Shows [param ascii]'s symbols. [param editable] enables "New symbol..."
+## and editing [param p_doc]'s own symbol pieces.
+func show_map(ascii: AsciiMap, editable := true, p_doc: MapDocument = null) -> void:
 	if ascii != _ascii:
 		_selected = null
 	_ascii = ascii
+	doc = p_doc
 	_new_button.disabled = ascii == null or not editable
 	_new_computer_button.disabled = _new_button.disabled
 	_editable = editable
@@ -135,6 +170,7 @@ func show_map(ascii: AsciiMap, editable := true) -> void:
 func select_key(key: String) -> void:
 	_selected = key
 	_update_computer_button()
+	_show_pieces()
 	var item: TreeItem = _items.get(key)
 	if item == null:
 		return
@@ -204,6 +240,7 @@ func _on_selected() -> void:
 	var key: Variant = item.get_metadata(0) if item else null
 	_selected = key if key is String else null
 	_update_computer_button()
+	_show_pieces()
 	key_selected.emit(key if key is String else "")
 
 
@@ -268,6 +305,15 @@ func _rebuild() -> void:
 	if _selected is String and _items.has(_selected):
 		select_key(_selected)
 	_update_computer_button()
+	_show_pieces()
+
+
+## Shows the selected symbol's pieces (nothing without a map or symbol).
+func _show_pieces() -> void:
+	pieces.index = doc.index if doc else null
+	pieces.editable = _editable and doc != null
+	var key: String = _selected if _selected is String and _ascii else ""
+	pieces.show_key(key, _ascii.resolved.symbols.get(key) if key else null)
 
 
 ## Adds a symbol row with one child per definition. Returns false if the

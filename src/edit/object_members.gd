@@ -56,5 +56,58 @@ static func reorder(obj: Dictionary, keys: Array) -> void:
 			obj[k] = items[k]
 
 
+## Where [param obj] (a mapgen object or a palette) defines [param kind]
+## for [param key]: [param kind] itself (the plain member), "mapping" (as
+## mapping[key][kind]), or "" when it doesn't.
+static func key_member(obj: Dictionary, key: String, kind: String) -> String:
+	if obj.get(kind) is Dictionary and obj[kind].has(key):
+		return kind
+	var mapping: Variant = obj.get("mapping")
+	if mapping is Dictionary and mapping.get(key) is Dictionary and mapping[key].has(kind):
+		return "mapping"
+	return ""
+
+
+## What [param obj] defines as [param kind] for [param key] (the live
+## value), or null.
+static func key_value(obj: Dictionary, key: String, kind: String) -> Variant:
+	match key_member(obj, key, kind):
+		"mapping": return obj.mapping[key][kind]
+		"": return null
+	return obj[kind][key]
+
+
+## Sets [param obj]'s [param kind] for [param key] to a copy of
+## [param value] where it's defined (else in the plain member, added by
+## [param order]); null removes it, and a member or mapping entry left
+## empty goes too. Returns an error, or "".
+static func set_key_value(obj: Dictionary, key: String, kind: String, value: Variant, order: Array) -> String:
+	var where := key_member(obj, key, kind)
+	if where.is_empty() and obj.has(kind) and not obj[kind] is Dictionary:
+		return "\"%s\" isn't an object." % kind
+	var copy: Variant = _copy(value)
+	if where == "mapping":
+		var entry: Dictionary = obj.mapping[key]
+		if value == null:
+			entry.erase(kind)
+			if entry.is_empty():
+				obj.mapping.erase(key)
+			if obj.mapping.is_empty():
+				obj.erase("mapping")
+		else:
+			entry[kind] = copy
+		return ""
+	if value == null:
+		if where:
+			obj[kind].erase(key)
+			if obj[kind].is_empty():
+				obj.erase(kind)
+		return ""
+	if not obj.has(kind):
+		set_member(obj, kind, {}, order)
+	obj[kind][key] = copy
+	return ""
+
+
 static func _copy(v: Variant) -> Variant:
 	return v.duplicate(true) if v is Dictionary or v is Array else v

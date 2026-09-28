@@ -17,9 +17,12 @@ extends RefCounted
 signal changed
 
 ## Where a missing member goes, relative to the others.
-const MEMBER_ORDER := ["type", "id", "parameters", "palettes", "mapping", "terrain", "furniture", "computers"]
-## The members an edit can touch; each change snapshots all of them.
-const EDITED := ["palettes", "mapping", "terrain", "furniture", "computers"]
+const MEMBER_ORDER := ["type", "id", "parameters", "palettes", "mapping", "terrain", "furniture", "computers",
+		"toilets", "vendingmachines", "items", "item", "monsters", "monster", "vehicles", "nested"]
+## The members an edit can touch (every Placement.MAPPING_KINDS kind among
+## them); each change snapshots all of them.
+const EDITED := ["palettes", "mapping", "terrain", "furniture", "computers", "toilets", "vendingmachines",
+		"items", "item", "monsters", "monster", "vehicles", "nested"]
 const TILE_KINDS := ["terrain", "furniture"]
 
 
@@ -174,6 +177,38 @@ func build_set_computer(key: String, data: Dictionary, name := "") -> Change:
 			ObjectMembers.set_member(p, "computers", defs, MEMBER_ORDER)
 		if is_new and tile_value(key, "terrain") == null:
 			_set_tile(p, key, "terrain", Computer.CONSOLE))
+
+
+## The palette's own [param kind] mapping ("nested", "monster", ...) for
+## [param key] as written (one piece object or a list of them), or null.
+func piece(key: String, kind: String) -> Variant:
+	return ObjectMembers.key_value(palette(), key, kind)
+
+
+## Why build_set_piece([param key], [param kind], ...) can't work, or "".
+func check_piece(key: String, kind: String, value: Variant) -> String:
+	var shape := MapDocument.check_key_shape(key)
+	if shape:
+		return shape
+	if not (value == null or value is Dictionary or (value is Array and value.all(
+			func(e: Variant) -> bool: return e is Dictionary))):
+		return "A \"%s\" mapping is an object or a list of objects." % kind
+	var p := palette()
+	for member: String in [kind, "mapping"]:
+		if p.has(member) and not p[member] is Dictionary:
+			return "The palette's \"%s\" isn't an object." % member
+	return ""
+
+
+## A change setting the palette's own [param kind] mapping for [param key]
+## to [param value] (null removes it). Null when nothing changes or
+## check_piece fails.
+func build_set_piece(key: String, kind: String, value: Variant, name := "") -> Change:
+	if check_piece(key, kind, value):
+		return null
+	var label := name if name else ("Remove %s of '%s'" % [kind, key] if value == null else "Edit %s of '%s'" % [kind, key])
+	return _build(label, func(p: Dictionary) -> void:
+		ObjectMembers.set_key_value(p, key, kind, value, MEMBER_ORDER))
 
 
 ## The included palettes as written (ids, or distribution/param objects).

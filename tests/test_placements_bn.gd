@@ -40,6 +40,7 @@ func test_all_core_placements() -> void:
 	var raw_entries := 0
 	var counts := {}
 	var set_maps := {}
+	var lists := 0
 	for ref in index.mapgens:
 		if ref.method != "json":
 			continue
@@ -65,6 +66,18 @@ func test_all_core_placements() -> void:
 				var r := Placement.IntRange.parse(p.entry[f], 1, 1, one_means_both)
 				if not r.valid() or BnJson.stringify(r.to_json()) != BnJson.stringify(p.entry[f]):
 					bad.append("%s: %s %s" % [where, f, BnJson.stringify(p.entry[f])])
+			# A weighted list reads as the index reads it, and writing each
+			# option back with its own id and weight changes nothing.
+			for f: String in PieceEditor.LIST_FIELDS.get(p.member, {}):
+				if p.entry.get(f) is Array:
+					lists += 1
+					var opts := []
+					var same := []
+					for e: Variant in p.entry[f]:
+						opts.append([WeightedIdList.option_id(e), WeightedIdList.option_weight(e)])
+						same.append(WeightedIdList.with_id(e, WeightedIdList.option_id(e)))
+					if opts != DataIndex.weighted_ids(p.entry[f]) or BnJson.stringify(same) != BnJson.stringify(p.entry[f]):
+						bad.append("%s: %s reads as %s" % [where, f, BnJson.stringify(opts)])
 			# Placing an entry where it is changes nothing.
 			if p.status == Placement.Status.OK:
 				for i in p.instances().size():
@@ -74,9 +87,10 @@ func test_all_core_placements() -> void:
 					for f: String in same:
 						if BnJson.stringify(same[f]) != BnJson.stringify(p.entry[f]):
 							bad.append("%s: placed where it is, %s becomes %s" % [where, f, BnJson.stringify(same[f])])
-	print("     read %d placements from %d files in %d ms: %s" % [entries, files.size(), Time.get_ticks_msec() - t, counts])
+	print("     read %d placements (%d weighted lists) from %d files in %d ms: %s" % [entries, lists, files.size(), Time.get_ticks_msec() - t, counts])
 	check_eq(entries, raw_entries, "every entry read")
 	check(entries > 15000, "entries: %d" % entries)
+	check(lists > 2000, "weighted lists: %d" % lists)
 	check_eq(bad.slice(0, MAX_REPORTED), PackedStringArray())
 	# Counted independently (a Python pass over data/json, 2026-09-27).
 	check_eq(counts.get("place DROPPED", 0), 19, "place_* anchored outside their map")
@@ -152,3 +166,55 @@ func test_edit_mall_entry_with_tool() -> void:
 		var moved := doc.placement("place_loot", 0)
 		check_eq(moved.status, Placement.Status.OK)
 		check(moved.geometry.tile_of(moved.span().position).encloses(moved.span()), "in one tile"))
+
+
+## Every mapping piece of a Placement.MAPPING_KINDS kind in core (maps and
+## palettes): each field's text reads back as the value written, so
+## committing an unchanged field changes nothing, and a piece's fields are
+## the ones BN reads.
+func test_core_symbol_pieces_round_trip() -> void:
+	var index := _core_index()
+	if index == null:
+		return
+	var objects: Array = []
+	var files := {}
+	# Read with BnJson, as the editor opens them (the index's palette data
+	# comes from Godot's JSON, whose ints are floats).
+	var read := func(source: DataIndex.Source) -> Dictionary:
+		if not files.has(source.path):
+			var parsed := BnJson.parse(FileAccess.get_file_as_string(index.bn_path.path_join(source.path)))
+			files[source.path] = parsed.value if parsed.value is Array else [parsed.value]
+		return files[source.path][source.index]
+	for ref in index.mapgens:
+		if ref.method == "json":
+			objects.append(read.call(ref.source).object)
+	for id: String in index.palettes:
+		for def: DataIndex.Definition in index.palettes[id]:
+			objects.append(read.call(def.source))
+	var counts := {}
+	var bad := PackedStringArray()
+	for obj: Dictionary in objects:
+		for kind: String in Placement.MAPPING_KINDS:
+			if not obj.get(kind) is Dictionary:
+				continue
+			var member: String = Placement.MAPPING_KINDS[kind]
+			for key: String in obj[kind]:
+				var list := SymbolPieces.pieces_of(obj[kind][key])
+				if list.is_empty():
+					bad.append("%s '%s': not an object or a list of objects" % [kind, key])
+				counts[kind] = counts.get(kind, 0) + list.size()
+				for piece: Dictionary in list:
+					for f: Array in PieceEditor.field_list(member, piece, Placement.mapping_skip(kind)):
+						if not piece.has(f[0]) or PieceEditor.list_kind(member, piece, f[0]):
+							continue
+						var back: Array = PieceEditor.parse_text(PieceEditor.value_text(piece[f[0]], f[1]), f[1])
+						if back[1] or BnJson.stringify(back[0]) != BnJson.stringify(piece[f[0]]):
+							bad.append("%s '%s' %s: %s" % [kind, key, f[0], BnJson.stringify(piece[f[0]])])
+					for skipped: String in Placement.mapping_skip(kind):
+						if piece.has(skipped):
+							bad.append("%s '%s' has %s, which BN ignores" % [kind, key, skipped])
+	print("     mapping pieces: %s" % counts)
+	check(counts.get("nested", 0) > 400 and counts.get("monster", 0) > 150, str(counts))
+	check(counts.get("items", 0) > 9000 and counts.get("toilets", 0) > 400 and counts.get("vendingmachines", 0) > 150
+			and counts.get("vehicles", 0) > 100 and counts.get("item", 0) > 100 and counts.get("monsters", 0) > 50, str(counts))
+	check_eq(bad.slice(0, MAX_REPORTED), PackedStringArray())

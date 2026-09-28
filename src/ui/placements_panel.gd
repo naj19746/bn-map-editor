@@ -5,10 +5,11 @@ extends VBoxContainer
 ## edited as text: ids as typed, the rest as JSON ("[1, 3]" or "1-3" for a
 ## range). What "chance" means is shown per kind, since it differs (percent,
 ## one in N, a plain int for place_loot). Entries BN drops or reads oddly
-## are listed in red with the reason. A place_nested entry also shows the
-## chunk it draws and a chunk picker; a place_computers entry is edited
-## with a ComputerEditor instead of JSON fields. Id fields (items, groups,
-## monsters, vehicles, terrain, ...) suggest known ids as they're typed.
+## are listed in red with the reason. The fields are a PieceEditor (id
+## suggestions, weighted lists for "chunks" and a "monster" list, in-place
+## updates). A place_nested entry also shows the chunk it draws. A
+## place_computers entry is edited with a ComputerEditor instead of JSON
+## fields.
 
 ## An entry was selected in the list ("" for none).
 signal placement_selected(member: String, index: int)
@@ -22,8 +23,6 @@ signal message(text: String)
 signal open_chunk_requested(ref: DataIndex.MapgenRef)
 
 const PROBLEM_COLOR := Color(1, 0.45, 0.45)
-## Suggestions listed at most in the chunk picker.
-const MAX_SUGGESTIONS := 60
 
 var doc: MapDocument
 ## The selected entry ("" and -1 for none).
@@ -32,14 +31,17 @@ var index := -1
 
 var list: Tree
 var kind_picker: OptionButton
+## The selected entry's fields.
+var piece: PieceEditor
 ## key -> the LineEdit editing that field of the selected entry.
-var editors := {}
+var editors: Dictionary:
+	get: return piece.editors
 ## key -> the IdCompleter of an id field's editor (items, monsters, ...).
-var completers := {}
-## The chunk picker (place_nested only): an id, its weight, and matching ids.
-var chunk_edit: LineEdit
-var chunk_weight: SpinBox
-var chunk_list: ItemList
+var completers: Dictionary:
+	get: return piece.completers
+## key -> the WeightedIdList editing that field (see PieceEditor.LIST_FIELDS).
+var lists: Dictionary:
+	get: return piece.lists
 ## Edits a place_computers entry (a copy; committed as field changes).
 var computer_editor: ComputerEditor
 ## What the selected place_computers entry reaches (see set_reach()).
@@ -47,7 +49,6 @@ var reach_label: Label
 
 var _filter: LineEdit
 var _header: Label
-var _fields: GridContainer
 var _problems: Label
 var _chunk_box: VBoxContainer
 var _chunk_info: Label
@@ -122,10 +123,18 @@ func _init() -> void:
 	var inner := VBoxContainer.new()
 	inner.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.add_child(inner)
-	_fields = GridContainer.new()
-	_fields.columns = 2
-	_fields.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	inner.add_child(_fields)
+	piece = PieceEditor.new(func(fields: Dictionary) -> String:
+		var p := doc.placement(member, index) if doc and member else null
+		if p == null:
+			return "Select a placement first."
+		var what := "Edit " + p.title()
+		if fields.size() == 1 and piece.lists.has(fields.keys()[0]):
+			what = "Edit %s of %s" % [fields.keys()[0], p.title()]
+		return doc.set_placement_fields(member, index, fields, what))
+	piece.message.connect(func(text: String) -> void:
+		message.emit(text)
+		_problems.text = text)
+	inner.add_child(piece)
 	_problems = Label.new()
 	_problems.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_problems.add_theme_color_override("font_color", PROBLEM_COLOR)
@@ -155,39 +164,17 @@ func _build_chunk_picker(parent: Control) -> void:
 	_chunk_box.visible = false
 	parent.add_child(_chunk_box)
 	_chunk_box.add_child(HSeparator.new())
-	_chunk_info = Label.new()
-	_chunk_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_chunk_box.add_child(_chunk_info)
 	var row := HBoxContainer.new()
 	_chunk_box.add_child(row)
-	chunk_edit = LineEdit.new()
-	chunk_edit.placeholder_text = "nested chunk id"
-	chunk_edit.clear_button_enabled = true
-	chunk_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	chunk_edit.text_changed.connect(func(_t: String) -> void: _suggest_chunks())
-	chunk_edit.text_submitted.connect(func(_t: String) -> void: _on_add_chunk())
-	row.add_child(chunk_edit)
-	chunk_weight = SpinBox.new()
-	chunk_weight.min_value = 1
-	chunk_weight.max_value = 100000
-	chunk_weight.value = 100
-	chunk_weight.tooltip_text = "Weight among the entry's chunks (BN's default is 100)"
-	row.add_child(chunk_weight)
-	var add := _button(row, "Add chunk", _on_add_chunk)
-	add.tooltip_text = "Add it to the entry's \"chunks\""
+	_chunk_info = Label.new()
+	_chunk_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_chunk_info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(_chunk_info)
 	_open_chunk_button = _button(row, "Open", func() -> void:
 		var st := _stamp()
 		if st and st.ref:
 			open_chunk_requested.emit(st.ref))
 	_open_chunk_button.tooltip_text = "Open the chunk drawn for this entry"
-	chunk_list = ItemList.new()
-	chunk_list.custom_minimum_size = Vector2(0, 120)
-	chunk_list.item_selected.connect(func(i: int) -> void:
-		chunk_edit.text = chunk_list.get_item_metadata(i))
-	chunk_list.item_activated.connect(func(i: int) -> void:
-		chunk_edit.text = chunk_list.get_item_metadata(i)
-		_on_add_chunk())
-	_chunk_box.add_child(chunk_list)
 
 
 ## Adds chunk [param id] to the selected place_nested entry's "chunks": a
@@ -206,15 +193,6 @@ func add_chunk(id: String, weight := 100) -> String:
 	return doc.set_placement_fields(member, index, {"chunks": chunks}, "Add chunk %s to %s" % [id, p.title()])
 
 
-func _on_add_chunk() -> void:
-	var err := add_chunk(chunk_edit.text.strip_edges(), int(chunk_weight.value))
-	if err:
-		message.emit(err)
-		_problems.text = err
-	else:
-		chunk_edit.text = ""
-
-
 ## The selected place_nested entry's chunk as the map draws it, or null.
 func _stamp() -> ChunkOverlay.Stamp:
 	if doc == null or member != "place_nested":
@@ -222,32 +200,12 @@ func _stamp() -> ChunkOverlay.Stamp:
 	return doc.chunk_overlay().stamp_for(index)
 
 
-## Lists nested chunk ids containing the picker's text, with their sizes.
-func _suggest_chunks() -> void:
-	chunk_list.clear()
-	if doc == null:
-		return
-	var text := chunk_edit.text.strip_edges().to_lower()
-	var ids: Array = doc.index.nested.keys().filter(func(id: String) -> bool:
-		return text.is_empty() or id.to_lower().contains(text))
-	ids.sort()
-	for id: String in ids.slice(0, MAX_SUGGESTIONS):
-		var refs: Array = doc.index.nested[id]
-		var ref: DataIndex.MapgenRef = ChunkOverlay.heaviest(refs)
-		var extra := " (%d mapgens)" % refs.size() if refs.size() > 1 else ""
-		var i := chunk_list.add_item("%s  %dx%d%s" % [id, ref.chunk_size.x, ref.chunk_size.y, extra])
-		chunk_list.set_item_metadata(i, id)
-	if ids.size() > MAX_SUGGESTIONS:
-		chunk_list.add_item("... %d more; type to narrow" % (ids.size() - MAX_SUGGESTIONS))
-		chunk_list.set_item_disabled(chunk_list.item_count - 1, true)
-
-
 ## Shows [param p_doc]'s placements (null for no map).
 func show_map(p_doc: MapDocument) -> void:
 	if p_doc != doc:
 		member = ""
 		index = -1
-		chunk_list.clear()
+		piece.clear()
 	doc = p_doc
 	refresh()
 
@@ -291,22 +249,13 @@ func duplicate_selected() -> void:
 
 ## Commits the text of field [param key]'s editor. Returns an error or "".
 func commit_field(key: String) -> String:
-	var p := doc.placement(member, index) if doc and member else null
-	var edit: LineEdit = editors.get(key)
-	if p == null or edit == null or _building:
-		return ""
-	var type := _type_of(key)
-	var parsed := parse_text(edit.text, type)
-	var err: String = parsed[1]
-	if err.is_empty() and type == "xy" and parsed[0] == null:
-		err = "%s is required." % key
-	if err.is_empty():
-		err = doc.set_placement_fields(member, index, {key: parsed[0]})
-	if err:
-		message.emit(err)
-		_problems.text = err
-		edit.text = value_text(p.entry.get(key), type)
-	return err
+	return piece.commit_field(key) if not _building else ""
+
+
+## Commits [param value] as field [param key] (a weighted list). Returns an
+## error or "".
+func commit_list(key: String, value: Array) -> String:
+	return piece.commit_list(key, value) if not _building else ""
 
 
 ## Writes the computer editor's fields into the selected place_computers
@@ -323,52 +272,6 @@ func commit_computer() -> String:
 		if not computer_editor.data.has(key):
 			fields[key] = null
 	return doc.set_placement_fields(member, index, fields, "Edit computer of " + p.title())
-
-
-# --- Text <-> values ------------------------------------------------------------
-
-## The text shown for [param v] in a field of [param type].
-static func value_text(v: Variant, type: String) -> String:
-	if v == null:
-		return ""
-	if v is String and (type == "id" or type == "text"):
-		return v
-	if v is Array and v.all(func(e: Variant) -> bool: return not (e is Array or e is Dictionary)):
-		return "[%s]" % ", ".join(v.map(func(e: Variant) -> String: return BnJson.stringify(e)))
-	return BnJson.stringify(v)
-
-
-## [value, error] for [param text] typed into a field of [param type]; an
-## empty text is null (the field is removed). Numbers keep int vs float.
-static func parse_text(text: String, type: String) -> Array:
-	var t := text.strip_edges()
-	if t.is_empty():
-		return [null, ""]
-	if type == "id" or type == "text":
-		if not (t.begins_with("[") or t.begins_with("{")):
-			return [t, ""]
-	if type == "range" or type == "xy":
-		var dash := RegEx.create_from_string("^(-?\\d+)\\s*-\\s*(-?\\d+)$").search(t)
-		if dash:
-			return [[int(dash.get_string(1)), int(dash.get_string(2))], ""]
-	var r := BnJson.parse(t)
-	if not r.ok():
-		return [null, "\"%s\" isn't valid JSON: %s" % [t, r.error]]
-	var v: Variant = r.value
-	match type:
-		"range", "xy":
-			if not Placement.IntRange.parse(v).valid():
-				return [null, "Enter an int, [min, max] or min-max."]
-		"int":
-			if not v is int:
-				return [null, "Enter a whole number."]
-		"float":
-			if not (v is int or v is float):
-				return [null, "Enter a number."]
-		"bool":
-			if not v is bool:
-				return [null, "Enter true or false."]
-	return [v, ""]
 
 
 # --- Building ---------------------------------------------------------------------
@@ -451,14 +354,10 @@ static func _coord_text(r: Placement.IntRange) -> String:
 
 func _rebuild_inspector() -> void:
 	_building = true
-	for c in _fields.get_children():
-		_fields.remove_child(c)
-		c.queue_free()
-	editors.clear()
-	completers.clear()
 	var p := doc.placement(member, index) if doc and member else null
 	_problems.text = ""
 	if p == null:
+		piece.clear()
 		_header.text = "Select a placement in the list or on the map (Place tool, P)." if doc else ""
 		_chunk_box.visible = false
 		computer_editor.visible = false
@@ -466,15 +365,9 @@ func _rebuild_inspector() -> void:
 		_update_buttons()
 		return
 	_header.text = "%s: %s" % [p.title(), _meaning(p)]
-	var specs := Placement.field_specs(p.member)
-	var keys := specs.map(func(s: Array) -> String: return s[0])
 	var is_computer := p.member == "place_computers"
-	for spec: Array in specs:
-		if not (is_computer and Computer.FIELD_ORDER.has(spec[0])):
-			_add_field(p, spec[0], spec[1], spec[2])
-	for key: String in p.entry:
-		if not keys.has(key):
-			_add_field(p, key, "json", "")
+	piece.index = doc.index
+	piece.show_piece(p.member, p.entry, str(p.index), Computer.FIELD_ORDER if is_computer else [])
 	computer_editor.visible = is_computer
 	if is_computer:
 		computer_editor.edit(p.entry.duplicate(true))
@@ -495,41 +388,6 @@ func _show_chunk(p: Placement) -> void:
 	var st := _stamp()
 	_chunk_info.text = "Draws: " + (st.describe() if st else "nothing (BN drops this entry)")
 	_open_chunk_button.disabled = st == null or st.ref == null
-	if chunk_list.item_count == 0:
-		_suggest_chunks()
-
-
-func _add_field(p: Placement, key: String, type: String, help: String) -> void:
-	var label := Label.new()
-	label.text = key
-	label.tooltip_text = help
-	label.mouse_filter = Control.MOUSE_FILTER_STOP
-	if not p.entry.has(key):
-		label.modulate = Color(1, 1, 1, 0.55)
-	_fields.add_child(label)
-	var edit := LineEdit.new()
-	edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	edit.text = value_text(p.entry.get(key), type)
-	edit.placeholder_text = help
-	edit.tooltip_text = help
-	edit.text_submitted.connect(func(_t: String) -> void: commit_field(key))
-	edit.focus_exited.connect(func() -> void:
-		var cur := doc.placement(member, index) if doc and member else null
-		if cur and edit.text != value_text(cur.entry.get(key), type):
-			commit_field(key))
-	_fields.add_child(edit)
-	editors[key] = edit
-	var kind := Validator.field_id_kind(p.member, key, p.entry) if type == "id" else ""
-	if kind:
-		completers[key] = IdCompleter.new(edit, func() -> PackedStringArray:
-			return Validator.id_candidates(doc.index, kind) if doc else PackedStringArray())
-
-
-func _type_of(key: String) -> String:
-	for spec: Array in Placement.field_specs(member):
-		if spec[0] == key:
-			return spec[1]
-	return "json"
 
 
 ## One line saying what the entry does and how its chance reads.

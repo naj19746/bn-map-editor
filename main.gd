@@ -423,7 +423,7 @@ func _on_doc_changed(full: bool, m: OpenMap) -> void:
 		if m.sel_member and m.doc.placement(m.sel_member, m.sel_index) == null:
 			placement_tool.select("", -1)
 		_placements_panel.refresh()
-		_legend.show_map(m.ascii)
+		_legend.show_map(m.ascii, true, m.doc)
 		_update_problems()
 		_update_brush_label()
 	_update_reach(m)
@@ -831,6 +831,14 @@ func open_palette_editor(id := "") -> void:
 	_palette_editor.open(session, id)
 
 
+## Opens the palette editor at palette [param id] with symbol [param key]
+## selected.
+func open_palette_key(id: String, key: String) -> void:
+	open_palette_editor(id)
+	if _palette_editor.doc and _palette_editor.doc.id == id:
+		_palette_editor.show_key(key)
+
+
 ## The palette editor changed or saved files (open maps that use an edited
 ## palette were already redrawn through their documents).
 func _on_palette_files_changed() -> void:
@@ -1009,7 +1017,7 @@ func _refresh_maps() -> void:
 		m.canvas.queue_redraw()
 	var cur := current_map()
 	if cur:
-		_legend.show_map(cur.ascii)
+		_legend.show_map(cur.ascii, true, cur.doc)
 
 
 func _on_tab_changed(i: int) -> void:
@@ -1025,7 +1033,7 @@ func _on_tab_changed(i: int) -> void:
 	if m:
 		placement_tool.select(m.sel_member, m.sel_index)
 	_empty_label.visible = m == null
-	_legend.show_map(m.ascii if m else null)
+	_legend.show_map(m.ascii if m else null, true, m.doc if m else null)
 	tool.key = m.brush if m else ""
 	if m:
 		show_drawer_tab(_legend)
@@ -1378,6 +1386,8 @@ func _build_ui() -> void:
 	_legend.palette_requested.connect(open_palette_editor)
 	_legend.new_computer_requested.connect(new_computer)
 	_legend.edit_computer_requested.connect(edit_computer)
+	_legend.palette_key_requested.connect(open_palette_key)
+	_legend.message.connect(func(msg: String) -> void: _status.text = msg)
 	_drawer.add_child(_legend)
 	_placements_panel = PlacementsPanel.new()
 	_placements_panel.placement_selected.connect(select_placement)

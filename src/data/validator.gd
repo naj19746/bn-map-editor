@@ -994,6 +994,14 @@ static func field_id_kind(member: String, key: String, entry: Dictionary) -> Str
 	return ""
 
 
+## Whether [param p_index] knows [param id] as an id of [param kind] (a
+## key of ID_KINDS), as the id checks judge it.
+static func is_known(p_index: DataIndex, kind: String, id: String) -> bool:
+	var v := Validator.new()
+	v.index = p_index
+	return v._known(kind, id)
+
+
 ## Every id of [param kind] (a key of ID_KINDS) [param index] knows, sorted:
 ## the ids _known accepts (the "nothing" id only where the index has it).
 static func id_candidates(index: DataIndex, kind: String) -> PackedStringArray:

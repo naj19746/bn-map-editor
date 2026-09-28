@@ -46,7 +46,9 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
 - `src/ui/`: controls built in code (`MapCanvas`, `LegendPanel`, `MapBrowser`, `ModsDialog`,
   `NewSymbolDialog`, `NewMapDialog`, `SyncDialog`, `PaletteEditor`, `PlacementsPanel`,
   `ProblemsPanel`, `ComputerEditor`, `ComputerDialog`, `IdCompleter`: an id dropdown under a
-  LineEdit). `main.gd`
+  LineEdit, `WeightedIdList`: rows of id + weight for "chunks" and monster lists, `PieceEditor`:
+  one piece's fields, used by PlacementsPanel and `SymbolPieces`: a symbol's "nested", "monster", "items", ...
+  mappings (Placement.MAPPING_KINDS) in the Legend and PaletteEditor). `main.gd`
   builds the window;
   `godot --path . -- --open <id> [--bn <path>] [--workspace <path>]` opens a map at startup.
 - `tests/test_*.gd`: test files; every `test_*` method runs. They extend

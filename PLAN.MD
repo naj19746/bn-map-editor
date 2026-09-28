@@ -94,12 +94,19 @@ Later milestones:
    id pickers and structured editors, e.g. computer options; computers are planned as Stage 8).
  - The Select tool (copy/paste/move a block of rows, from the UI sketch) is still open from Stage 3;
    when it's built, moving a block should offer to carry the placements anchored in it.
- - TODO: a weighted-id-list editor for place_nested "chunks" / "else_chunks" in the Placements
+ - (Done, see "Weighted id lists") a weighted-id-list editor for place_nested "chunks" / "else_chunks" in the Placements
    inspector (5788 options in core, edited today as JSON text next to the chunk picker): one row
    per option with its id (IdCompleter over nested chunk ids, "null" allowed), weight (BN's
    default 100: a plain id when 100, [id, weight] otherwise, keeping how each was written) and
    remove/reorder. It can replace the chunk picker's "Add chunk" row. Reuse it for place_monster's
    weighted "monster" list (89 entries, see "Added after 8d") and "monster" symbol mappings.
+ - (Done, see "More symbol pieces") edit more symbol mapping kinds as fields: "items", "item",
+   "monsters", "vehicles", "toilets", "vendingmachines" now join "nested"/"monster".
+   - Leave for later: "traps" is specialised to load_place_mapings_alternatively (mapgen.cpp
+     ~3137: a plain string is allowed and a list means "pick one", not "place all"), so
+     SymbolPieces' list handling would be wrong for it. signs/fields/npcs/gaspumps/sealed_item/
+     liquids/graffiti/... load like the six above but need their constructors and field lists
+     checked first (sealed_item nests item/items objects; most lack Placement.FIELDS entries).
  - A preview roll can take each kind's chance meaning and default from Placement.KINDS, and must
    scale by BN's spawn-rate options the way each placement class does (see the field hints).
  - Conditional nested pieces (neighbors/joins/connections; noted after Stage 6): the overlay always
@@ -1399,6 +1406,123 @@ Development stages (each ends with a headless-testable acceptance check):
      weighted-id-list editor (rows of id + weight, each id with an IdCompleter) would cover both.
    - Not done: the New map dialog's Palettes field (several ids in one field: needs completing the
      last word), snippets/zone types/factions (not indexed), the weighted-list editor above.
+ Weighted id lists (2026-09-27; the "weighted-id-list editor" TODO from the later milestones).
+   - Scope: place_nested "chunks" / "else_chunks" and a place_monster "monster" written as a list,
+     in the Placements inspector. Not the palette editor or legend (a "monster" or "nested" symbol
+     mapping is still JSON there).
+   - BN (39f4883093 weighted_list.h load_weighted_list, mapgen.cpp jmapgen_nested/jmapgen_monster):
+     each option is a plain value (weight 100) or a [value, weight] pair; weight is an int and
+     weighted_list::add drops an option with a negative weight, so 0 is allowed (never picked). A
+     chunk option is a string ("null" and "" place nothing); a monster option is a mapgen_value, so
+     it may also be a {"param": ...} object: the row then shows it as JSON text.
+   - WeightedIdList (src/ui): one row per option with its id (an IdCompleter; chunks also suggest
+     "null"), a note (a chunk's size and mapgen count, or "unknown" in red), its weight (a SpinBox,
+     0 up) and up/down/remove; below them an "add" row (id + weight + Add). Every change commits
+     the whole list as one edit. Rows keep how each option was written: changing an id keeps its
+     form; changing a weight writes a plain id at 100 and [id, weight] otherwise. An emptied list
+     writes "chunks": [] (the template's form) but removes "else_chunks" and "monster".
+   - Deviations from the TODO: the add row replaces the chunk picker's id/weight/Add row AND its
+     search list (sizes now show per row and in the id's note); "Draws: ..." and Open stay. A
+     plain-string "monster" stays a text field (the list editor shows once it is a list; typing
+     JSON "[...]" still converts it).
+   - The inspector now updates its fields in place when the selected entry and its field layout are
+     unchanged (was: rebuilt on every edit), so a weight SpinBox or a focused field survives its own
+     commit. Each weight step is still one undo step (no merging of consecutive edits).
+   - Checked (core + mods): 6043 "chunks" options (1679 plain, 4364 pairs), 27 "else_chunks", 337
+     "monster" list options (13 pairs); no other forms, no negative weights, 31 weights of 0, 137
+     [id, 100] pairs (kept as pairs unless their weight is edited).
+   - Result: tools/run_tests.sh passes 133 tests. test_placements_bn reads all 2230 core weighted
+     lists the way DataIndex.weighted_ids does and writes each option back unchanged;
+     test_placements covers the option forms, a place_monster list (pair kept, negative weight and
+     empty id refused, emptied list back to a text field) and in-place updates; test_nested's
+     main-scene test adds/reweights/moves/removes chunks and else_chunks through the panel and
+     undoes them one step each. Checked in a window: the lists sit above x/y at full width with a
+     size note per chunk and "unknown" in red.
+   - Code: src/ui/weighted_id_list.gd (WeightedIdList), PlacementsPanel.LIST_FIELDS, lists,
+     commit_list(), option_note(), _layout() (in-place updates), Validator.is_known().
+   - Not done: (symbol mappings: done, see "Symbol pieces" below); the add row can't insert at a
+     position (add, then move); a chunk option's "Open" (Open opens the drawn one).
+ Symbol pieces: "nested" and "monster" mappings (2026-09-27; follows "Weighted id lists").
+   - Goal: edit a symbol's "nested" and "monster" mappings as fields (the same editors as a
+     place_nested / place_monster entry, lists included) in the Legend (the map's own) and the
+     palette editor (the palette's own), instead of JSON nowhere.
+   - BN (39f4883093 mapgen.cpp load_place_mapings, mapgen_palette::add): a mapping value is one
+     object or a list of objects (each a piece); the pieces of a key are APPENDED across included
+     palettes, the map's palettes and the map itself, so a map's own "nested" on a key places its
+     chunk as well as the palette's, it doesn't replace it (unlike terrain/furniture). A piece
+     reads the place_* fields minus x/y and "repeat" ("repeat" belongs to jmapgen_place; a
+     mapping's placing is always one cell).
+   - Counted (core + mods): "nested" mappings 333 in maps and 121 in palettes, all single objects
+     with only "chunks"; "monster" 171 objects + 5 lists (2-3 pieces) in maps, 21 objects in
+     palettes (fields monster/group/chance/friendly/name/pack_size); none in "mapping" (supported
+     anyway: an existing mapping[key][kind] is edited where it is, as computers are).
+   - Plan: PieceEditor (src/ui) takes the Placements inspector's field editing (text fields, id
+     suggestions, weighted lists, in-place updates) so both use it. SymbolPieces (src/ui) shows a
+     key's pieces per kind: own ones editable (one PieceEditor per piece, Remove), inherited ones
+     read-only with where they come from and "Open palette"; "Add nested" / "Add monster" add an
+     own piece ({"chunks": []} / {"monster": ""}), with a note that it places alongside inherited
+     ones. MapDocument.own_piece/set_own_piece and PaletteDocument.piece/build_set_piece write
+     them (one undo step each; palette edits go through the usual impact check). Palette
+     "monsters"/items/etc. mappings stay read-only (the kind table can grow).
+   - Checked: "repeat" is jmapgen_place's (mapgen.cpp jmapgen_place ctor); a row's mapping pieces
+     are added with jmapgen_place(p), repeat 1. PaletteImpact already counts these pieces
+     (ResolvedMapgen.key_signature includes every extra), so a palette edit names the maps whose
+     rows paint the key, and chunk parents via the chunk as before.
+   - Decisions: the kinds table is Placement.MAPPING_KINDS (+ MAPPING_SKIP, mapping_template()).
+     A second "Add" turns an object into a list; removing a list's pieces keeps the list form
+     until the last goes (then the key's mapping goes). The palette editor edits the Key box's key,
+     so a key the palette doesn't define yet can get pieces. The legend's pieces share the drawer
+     with the symbol tree (a VSplit; hidden for no symbol). Long ids in a weighted list scroll to
+     their end (ids in one list share prefixes: roof_6x6_greenhouse_1/_2).
+   - Result: tools/run_tests.sh passes 136 tests. test_placements_bn round-trips every core mapping
+     piece's fields as text (445 nested, 182 monster pieces; none has x/y/repeat).
+     test_nested::test_symbol_piece_data covers ObjectMembers.key_value/set_key_value (plain
+     member and "mapping" form, emptied members removed), MapDocument.set_own_piece (overlay
+     follows, lists, bad shapes, undo) and PaletteDocument.build_set_piece (impact names the map);
+     test_main_scene_symbol_pieces edits 'M' in the legend (chunks list, rotation, add monster
+     twice, remove a piece, remove, undo), opens 'N' from its palette in the palette editor, edits
+     it there (the map redraws the new chunk), gives a new key a piece and saves. Checked in a
+     window: legend (craft_shop_roof_2 'U') and palette editor (office_palette '_').
+   - Code: src/ui/piece_editor.gd (PieceEditor, taken out of PlacementsPanel), symbol_pieces.gd
+     (SymbolPieces), LegendPanel.pieces/palette_key_requested, PaletteEditor.pieces/set_piece/
+     show_key, main.open_palette_key, ObjectMembers.key_member/key_value/set_key_value.
+   - Not done: other mapping kinds (done for six more, see "More symbol pieces"; traps etc. stay
+     read-only); a piece from a
+     palette can't be copied into the map (Add and retype); per-piece problems aren't shown next
+     to the fields (the Problems tab and the list notes have them).
+ More symbol pieces: items, item, monsters, vehicles, toilets, vendingmachines (2026-09-27; the
+   "edit more symbol mapping kinds" TODO from the later milestones, after "Symbol pieces").
+   - BN (39f4883093 mapgen.cpp): all six load with load_place_mapings (one object or a list, each
+     placed), so SymbolPieces, PieceEditor, ObjectMembers and both documents took them unchanged.
+     jmapgen_item_group and jmapgen_spawn_item read their own "repeat" (BN rolls max(place repeat,
+     piece repeat), ~3936); the others don't. jmapgen_toilet reads only "amount" (jmapgen_int,
+     default 0 = the toilet's own charges); jmapgen_vending_machine "item_group" (a mapgen_value,
+     default default_vending_machine) and "reinforced" (default false).
+   - Counted (core, pieces): items 9424, toilets 453, vendingmachines 176, item 119, vehicles 103,
+     monsters 56. Extra fields in the data: items "ammo" 38 / "magazine" 82 / "prob" 5 / "damage" /
+     "charges", item "charges" / "count". All 82 ammo/magazine pieces are in list-form mappings,
+     where load_place_mapings calls allow_omitted_members, so BN says nothing: no Validator note.
+     They show as extra JSON fields. 27 "items" and 2 "item" values are inline item groups, shown as
+     JSON in the id field; the round trip passes them.
+   - Changes: Placement.MAPPING_KINDS has the six (with their place_* members); MAPPING_SKIP became
+     Placement.mapping_skip(kind), keeping "repeat" for MAPPING_REPEATS (items, item). New
+     Placement.FIELDS for place_toilets (amount) and place_vendingmachines (item_group, reinforced),
+     which the Placements panel uses too. MapDocument/PaletteDocument MEMBER_ORDER and
+     PaletteDocument.EDITED list the new members (EDITED must: a palette change only snapshots
+     those members).
+   - Deviations: a new vendingmachines piece (and a new place_vendingmachines entry) is {} rather
+     than "item_group": "", so it is BN's default stock until a group is typed. The Add buttons sit
+     in an HFlowContainer (eight don't fit one row in the drawer).
+   - Result: tools/run_tests.sh passes 137 tests. test_placements_bn round-trips every core mapping
+     piece of all eight kinds (reading palettes with BnJson now: the index's palette data comes from
+     Godot's JSON, whose floats broke "int" fields such as a vehicle's status).
+     test_nested::test_symbol_piece_data covers the templates, mapping_skip and that every kind has a
+     member order and is snapshotted; test_main_scene_item_pieces adds items (repeat kept, an inline
+     group), toilets and a vending machine to 'M' in the legend, items to 'N' in npal through the
+     palette editor (impact names the map; the legend lists it as inherited) and saves. Checked in a
+     window: dispensary_2 '&' (own toilet, a new items piece, the Add buttons wrapping).
+   - Not done: traps and the other kinds (above); PaletteImpact needed no change (key_signature
+     covers every extra).
  Then the "Later milestones" list.
 
 Explicitly out of scope until the later milestones: tilesets, preview rolls, z-level linking, update_mapgen,
