@@ -6,6 +6,24 @@ extends RefCounted
 const SOURCE_MAP := "map"
 const SOURCE_FILL := "fill_ter"
 
+## What kind of problem an entry of [member issues] is.
+enum Issue {
+	## "object" isn't an object.
+	OBJECT,
+	## An unknown palette, a palette loop, or a palette choice that can't be read.
+	PALETTE,
+	## Wrong row or column counts.
+	ROWS,
+	## fill_ter names an unknown terrain.
+	FILL_TER,
+	## A used symbol has no terrain and there's no fill_ter.
+	NO_TERRAIN,
+	## A used symbol has no definition at all.
+	UNDEFINED,
+	## A used symbol's terrain/furniture is unknown or can't be worked out.
+	IDS,
+}
+
 
 ## One definition of a symbol, e.g. its terrain, and where it came from.
 class Binding:
@@ -50,6 +68,10 @@ class SymbolInfo:
 	## True when some definition set the terrain to a plain "t_null", which
 	## BN skips: the cell keeps fill_ter, or what was there for nested chunks.
 	var null_terrain := false
+	## True when a plain "terrain" member (not "mapping") names the key: only
+	## those count as having terrain for BN's "no fill_ter" check
+	## (mapgen_palette::keys_with_terrain).
+	var listed_terrain := false
 
 
 ## Width x height in cells.
@@ -75,6 +97,8 @@ var choices := PackedStringArray()
 ## met: its options. MapgenResolver.resolve's picks index into these.
 var choice_options: Array[PackedStringArray] = []
 var problems := PackedStringArray()
+## [member problems] again, as [Issue, key ("" if none), text].
+var issues: Array = []
 
 var _fill: Binding
 

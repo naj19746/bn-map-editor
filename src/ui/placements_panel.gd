@@ -6,7 +6,8 @@ extends VBoxContainer
 ## range). What "chance" means is shown per kind, since it differs (percent,
 ## one in N, a plain int for place_loot). Entries BN drops or reads oddly
 ## are listed in red with the reason. A place_nested entry also shows the
-## chunk it draws and a chunk picker.
+## chunk it draws and a chunk picker; a place_computers entry is edited
+## with a ComputerEditor instead of JSON fields.
 
 ## An entry was selected in the list ("" for none).
 signal placement_selected(member: String, index: int)
@@ -36,6 +37,8 @@ var editors := {}
 var chunk_edit: LineEdit
 var chunk_weight: SpinBox
 var chunk_list: ItemList
+## Edits a place_computers entry (a copy; committed as field changes).
+var computer_editor: ComputerEditor
 
 var _filter: LineEdit
 var _header: Label
@@ -123,6 +126,14 @@ func _init() -> void:
 	_problems.add_theme_color_override("font_color", PROBLEM_COLOR)
 	inner.add_child(_problems)
 	_build_chunk_picker(inner)
+	computer_editor = ComputerEditor.new()
+	computer_editor.visible = false
+	computer_editor.committed.connect(func() -> void:
+		var err := commit_computer()
+		if err:
+			message.emit(err)
+			_problems.text = err)
+	inner.add_child(computer_editor)
 	_update_buttons()
 
 
@@ -285,6 +296,22 @@ func commit_field(key: String) -> String:
 	return err
 
 
+## Writes the computer editor's fields into the selected place_computers
+## entry (x/y and other fields stay). Returns an error or "".
+func commit_computer() -> String:
+	var p := doc.placement(member, index) if doc and member else null
+	if p == null or p.member != "place_computers" or _building:
+		return ""
+	var fields := {}
+	for key: String in computer_editor.data:
+		if key != "x" and key != "y":
+			fields[key] = computer_editor.data[key]
+	for key: String in p.entry:
+		if not computer_editor.data.has(key):
+			fields[key] = null
+	return doc.set_placement_fields(member, index, fields, "Edit computer of " + p.title())
+
+
 # --- Text <-> values ------------------------------------------------------------
 
 ## The text shown for [param v] in a field of [param type].
@@ -420,18 +447,28 @@ func _rebuild_inspector() -> void:
 	if p == null:
 		_header.text = "Select a placement in the list or on the map (Place tool, P)." if doc else ""
 		_chunk_box.visible = false
+		computer_editor.visible = false
 		_building = false
 		_update_buttons()
 		return
 	_header.text = "%s: %s" % [p.title(), _meaning(p)]
 	var specs := Placement.field_specs(p.member)
 	var keys := specs.map(func(s: Array) -> String: return s[0])
+	var is_computer := p.member == "place_computers"
 	for spec: Array in specs:
-		_add_field(p, spec[0], spec[1], spec[2])
+		if not (is_computer and Computer.FIELD_ORDER.has(spec[0])):
+			_add_field(p, spec[0], spec[1], spec[2])
 	for key: String in p.entry:
 		if not keys.has(key):
 			_add_field(p, key, "json", "")
-	_problems.text = "\n".join(p.problems)
+	computer_editor.visible = is_computer
+	if is_computer:
+		computer_editor.edit(p.entry.duplicate(true))
+	var lines := PackedStringArray()
+	for f in doc.findings(false):
+		if f.target == Validator.Target.PLACEMENT and f.member == p.member and f.index == p.index:
+			lines.append(f.describe())
+	_problems.text = "\n".join(lines)
 	_show_chunk(p)
 	_building = false
 	_update_buttons()

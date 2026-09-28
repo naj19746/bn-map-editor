@@ -58,6 +58,9 @@ class TileDef:
 	## inherited: BN recomputes it on every load, and for terrain the WALL and
 	## CONNECT_TO_WALL flags imply "WALL".
 	var connect_group := ""
+	## Terrain: "move_cost" (0 is impassable). Furniture: "move_cost_mod"
+	## (-1 is impassable).
+	var move_cost := 0
 	var source: Source
 
 	func copy() -> TileDef:
@@ -71,6 +74,7 @@ class TileDef:
 		t.copy_from = copy_from
 		t.flags = flags.duplicate()
 		t.connect_group = connect_group
+		t.move_cost = move_cost
 		t.source = source
 		return t
 
@@ -122,6 +126,10 @@ class MapgenRef:
 	## "else_chunks", and its own "nested" symbol mappings), not the ones its
 	## palettes' mappings place.
 	var chunks := PackedStringArray()
+	## An om_terrain mapgen with "weight" <= 0 or "disabled": true, which BN
+	## never loads (load_mapgen_function). Chunks and update mapgens load
+	## whatever their weight.
+	var disabled := false
 
 	## The id to show for this entry: the first id, top-left for a grid.
 	func title() -> String:
@@ -148,6 +156,23 @@ class MapgenRef:
 ## without the suffix (BN's om_lines::mapgen_suffixes).
 const LINEAR_SUFFIXES := ["_straight", "_curved", "_end", "_tee", "_four_way"]
 
+## Other object types whose ids mapgen refers to: JSON "type" -> the kind
+## they're indexed under in [member ids]. Every item type is an "item".
+const ID_TYPES := {
+	"MONSTER": "monster", "vehicle": "vehicle", "vehicle_group": "vehicle_group", "trap": "trap",
+	"field_type": "field_type", "npc": "npc", "overmap_connection": "overmap_connection",
+	"ter_furn_transform": "ter_furn_transform",
+	"AMMO": "item", "GUN": "item", "ARMOR": "item", "PET_ARMOR": "item", "TOOL": "item",
+	"TOOLMOD": "item", "TOOL_ARMOR": "item", "BOOK": "item", "COMESTIBLE": "item",
+	"CONTAINER": "item", "ENGINE": "item", "WHEEL": "item", "FUEL": "item", "GUNMOD": "item",
+	"MAGAZINE": "item", "BATTERY": "item", "GENERIC": "item", "BIONIC_ITEM": "item",
+}
+## Types loaded through BN's generic_factory, which also registers "alias" ids.
+const ALIAS_TYPES := ["MONSTER", "vehicle_group", "trap", "field_type", "overmap_connection",
+	"ter_furn_transform"]
+## Lua files of a mod that can register hooks.
+const LUA_FILES := ["preload.lua", "finalize.lua", "main.lua"]
+
 var bn_path := ""
 ## Folder layered over [member bn_path], or "".
 var workspace_path := ""
@@ -168,6 +193,12 @@ var update := {}
 var mapgens: Array[MapgenRef] = []
 ## overmap_terrain id -> Source of its last definition. Abstracts aren't ids.
 var overmap_terrain := {}
+## Kind (a value of ID_TYPES) -> {id: Source of its last definition}.
+var ids := {}
+## om_terrain mapgen ids something other than an overmap_terrain uses: map
+## extras with generator_method "mapgen", and ids a Lua
+## "on_make_mapgen_factory_list" hook adds (id -> where).
+var mapgen_users := {}
 ## Load problems: unparsable files, unresolved copy-from, bad mod selection.
 var errors := PackedStringArray()
 var file_count := 0
@@ -201,6 +232,8 @@ func _load_all() -> void:
 		var dir := catalog.get_mod(mod).path
 		for file in data_files(dir, true, _overlay(dir)):
 			_load_file(mod, file)
+		for lua in LUA_FILES:
+			_scan_lua(mod, dir.path_join(lua))
 	for mod in mods:
 		var interactions := catalog.get_mod(mod).path.path_join("mod_interactions")
 		for other in mods:
@@ -346,6 +379,63 @@ func _add_object(o: Dictionary, src: Source) -> void:
 		"overmap_terrain":
 			for id in _tags(o.get("id", [])):
 				overmap_terrain[id] = src
+		"map_extra":
+			var gen: Variant = o.get("generator", o)
+			if gen is Dictionary and gen.get("generator_method") == "mapgen" and gen.get("generator_id") is String:
+				mapgen_users[gen.generator_id] = "map_extra %s" % o.get("id", "?")
+		var type:
+			var kind: String = ID_TYPES.get(type, "") if type is String else ""
+			if kind:
+				_add_ids(kind, type, o, src)
+
+
+func _add_ids(kind: String, type: String, o: Dictionary, src: Source) -> void:
+	if not ids.has(kind):
+		ids[kind] = {}
+	var table: Dictionary = ids[kind]
+	if o.has("id"):
+		for id in _tags(o.id):
+			table[id] = src
+	if ALIAS_TYPES.has(type) and o.has("alias"):
+		for id in _tags(o.alias):
+			table[id] = src
+
+
+## True when an object of [param kind] (a value of ID_TYPES) has [param id].
+func has_id(kind: String, id: String) -> bool:
+	return ids.get(kind, {}).has(id)
+
+
+## True when a player can stand on terrain [param ter_id] with furniture
+## [param furn_id] ("" or "f_null" for none). Unknown ids count as
+## impassable.
+func passable(ter_id: String, furn_id := "") -> bool:
+	var t: TileDef = terrain.get(ter_id)
+	if t == null or t.move_cost <= 0:
+		return false
+	if furn_id.is_empty() or furn_id == "f_null":
+		return true
+	var f: TileDef = furniture.get(furn_id)
+	return f != null and f.move_cost >= 0
+
+
+## Records the string ids a Lua "on_make_mapgen_factory_list" hook in
+## [param file] adds: every quoted string inside the hook's function.
+func _scan_lua(mod: String, file: String) -> void:
+	if not FileAccess.file_exists(file):
+		return
+	var text := FileAccess.get_file_as_string(file)
+	var hook := "\"on_make_mapgen_factory_list\""
+	var strings := RegEx.create_from_string("\"([^\"\\\\]+)\"")
+	var at := text.find(hook)
+	while at >= 0:
+		var start := text.find("function", at)
+		var stop := text.find("end)", start) if start >= 0 else -1
+		if stop < 0:
+			break
+		for m in strings.search_all(text.substr(start, stop - start)):
+			mapgen_users[m.get_string(1)] = "Lua hook in %s (%s)" % [relative_path(file), mod]
+		at = text.find(hook, stop)
 
 
 func _add_definition(table: Dictionary, id: String, src: Source, data := {}) -> void:
@@ -415,6 +505,9 @@ static func _apply_tile_fields(def: TileDef, o: Dictionary) -> void:
 		def.name = name
 	if o.get("looks_like") is String:
 		def.looks_like = o.looks_like
+	for key in ["move_cost", "move_cost_mod"]:
+		if o.get(key) is float or o.get(key) is int:
+			def.move_cost = int(o[key])
 	if o.has("symbol"):
 		def.symbol = _seasons(o.symbol)
 	# BN allows only one of the two; either replaces an inherited one.
@@ -493,6 +586,7 @@ func add_mapgen(o: Dictionary, src: Source) -> MapgenRef:
 	var w: Variant = o.get("weight")
 	if w is float or w is int:
 		ref.weight = int(w)
+	ref.disabled = o.has("om_terrain") and (ref.weight <= 0 or o.get("disabled") == true)
 	var obj: Variant = o.get("object")
 	if obj is Dictionary:
 		ref.palettes = palette_options(obj)
@@ -556,6 +650,13 @@ func has_overmap_terrain(om_id: String) -> bool:
 		if om_id.ends_with(suffix) and overmap_terrain.has(om_id.trim_suffix(suffix)):
 			return true
 	return false
+
+
+## True when BN counts om_terrain mapgen id [param om_id] as used
+## (mapgen_factory::get_usages): an overmap_terrain, a map extra or a Lua
+## hook uses it, or it is "null", which BN drops without a word.
+func mapgen_id_used(om_id: String) -> bool:
+	return om_id == "null" or has_overmap_terrain(om_id) or mapgen_users.has(om_id)
 
 
 ## "mapgensize", defaulting to one overmap tile like BN.

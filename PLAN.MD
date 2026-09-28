@@ -91,7 +91,7 @@ Later milestones:
  - Multi-z-level linking (roofs, basements) through city_building/overmap_special.
  - update_mapgen, parameters/switch editing, rotation preview, dedicated editors for vehicles/NPCs/
    computers (since Stage 5 every place_* list is shown, moved and edited as fields; what's left are
-   id pickers and structured editors, e.g. computer options).
+   id pickers and structured editors, e.g. computer options; computers are planned as Stage 8).
  - The Select tool (copy/paste/move a block of rows, from the UI sketch) is still open from Stage 3;
    when it's built, moving a block should offer to carry the placements anchored in it.
  - A preview roll can take each kind's chance meaning and default from Placement.KINDS, and must
@@ -105,8 +105,8 @@ Later milestones:
    conditional piece between chunks and else_chunks; with the preview roll, per-direction "assume
    neighbour X" inputs, and working out neighbours inside a multi-tile building (BN matches rotated
    oter ids, so this needs the rotation model). joins/connections need overmap_special and road
-   data (z-level linking). Stage 7 can check that neighbour oter and connection ids exist, as BN's
-   check() does.
+   data (z-level linking). (Stage 7 checks that neighbour oter and connection ids exist, as BN's
+   check() does, and notes every conditional piece.)
 
 
 JSON formatting (decided: use BN's own formatter):
@@ -949,8 +949,8 @@ Development stages (each ends with a headless-testable acceptance check):
      [3, 3], 1 [0, 2]).
    - Mods: ids are known relative to the loaded mod set (mod_interactions folders included), so an
      id from an unloaded mod is "unknown here". Say so in the finding.
- Stage 7 - Validation panel (MVP item 9). Basic checks exist since Stage 5.
-   - Proposed acceptance (revised after Stage 6): every core json mapgen and palette validates with
+ Stage 7 - Validation panel (MVP item 9).  [DONE 2026-09-27]
+   - Accept (revised after Stage 6): every core json mapgen and palette validates with
      NO errors (BN loads core cleanly), and the warnings and notes match independent core counts: 19
      dropped anchors, 209 dropped "set" in 44 maps, 0 place_items chances outside 1-100 (warnings);
      54 reversed spans, 13 place_* past a chunk's mapgensize, 574 chunk rotations that do nothing,
@@ -961,6 +961,199 @@ Development stages (each ends with a headless-testable acceptance check):
      range; place_items chance outside 1..100; place_loot with both or neither of item/group; a
      bad id in a palette key no map uses (one palette finding). Selecting a finding selects its
      cell, symbol, placement, or the palette key in the palette editor.
+   - Result: tools/run_tests.sh passes 109 tests. tests/test_validation_bn.gd validates all
+     4615 core json mapgens (overlays included) and 190 palettes in ~7.5 s: 0 errors, and exactly
+     the counts above (19 dropped anchors, 209 dropped "set" in 44 maps, 0 place_items chances; 54
+     reversed spans, 13 past mapgensize, 574 chunk rotations, 284 overhangs, 259 conditional pieces,
+     10 skipped). 574 and 259 were recounted with an independent Python pass over data/json. A
+     scratch run over core + all 63 non-obsolete mods also finds 0 errors (319 overhangs, 581
+     rotations, 319 conditional pieces). tests/test_validation.gd (fake BN) seeds each problem of
+     the list and checks its severity, whether BN would refuse the map, and its target; plus
+     aliases, vehicle prototypes, null ids, a MIGRATION id (still unknown), gas pump fuel, the Lua
+     hook, weight 0, "mapping" terrain without fill_ter, and a main-scene run (status bar counts,
+     the Problems tab, selecting a placement / symbol / palette key, a fix updating the counts).
+     Making every id "known" fails the seeded test.
+   - Code: src/data/validator.gd (Validator: Finding with severity, load_fails, code, text and
+     target; validate_map, validate_palette(s), sorted, count), src/ui/problems_panel.gd
+     (ProblemsPanel, the drawer's Problems tab). DataIndex: ids/has_id (items of all 18 types,
+     monsters, vehicles, vehicle groups, traps, field types, npc templates, overmap connections,
+     ter_furn_transforms, with generic_factory aliases), mapgen_users (map extras with
+     generator_method "mapgen", Lua hook ids), mapgen_id_used(), MapgenRef.disabled. ResolvedMapgen
+     .issues, Placement.issues, ChunkOverlay.Stamp.issues: the same problems as before, with a code.
+     MapDocument.findings() (cached per change) replaces the old problems() list, which is now its
+     text. MapCanvas.focus outlines what a finding points at; PaletteEditor shows a palette's
+     findings, marks keys with "!" and has select_key(); the Placements inspector lists the
+     selected entry's findings.
+   - How it works: a map is checked like BN's setup_common + check: the resolver's issues (rows,
+     no terrain, undefined symbols, palettes, fill_ter), the map's OWN definitions (see below), every
+     place_* entry BN keeps (dropped and crossing ones are never built, so their ids aren't
+     checked), place_loot and "set" ids (load errors), neighbors/connections, chunk ids, the
+     chunk's own rotation, overlay loops and overhangs, and "not used by anything". Palettes are
+     checked on their own, every key, and a map's Problems list adds the findings of every palette
+     it uses once each. Errors say "BN won't load this map" or "BN reports this on every load";
+     warnings "BN silently skips it"; notes "works, but oddly". The status bar counts errors and
+     warnings (notes only when there's nothing else) and opens the Problems tab: filters per
+     severity, errors first, and the list of what isn't checked. Saving still refuses only a
+     crossing range; other load errors are saved, and the status line says BN won't load the map.
+   - Decisions and checks (against BN 39f4883093 mapgen.cpp, init.cpp, generic_factory.h):
+     - Corrected: only om_terrain mapgens skip on "weight" <= 0 / "disabled" (load_mapgen_function);
+       load_nested_mapgen and load_update_mapgen don't look at either. No chunk in data has weight 0.
+       MapgenRef.disabled is set for om_terrain only; nothing else in the editor changes for it
+       (the Browser still lists and opens them).
+     - Unused keys of a map: BN builds EVERY key's pieces when it reads the map (load_temp loads
+       the map's object as a palette), so a plain terrain/furniture/trap/field id is converted to an
+       int id right away and an unknown one is reported whether the rows use the key or not. Other
+       ids (items, monsters, ...) and any distribution/param/switch are only checked through
+       check(), i.e. for used keys. So: plain converted ids are errors, the rest a note.
+     - BN checks a palette's pieces twice: on the palette, and again inside every map that uses
+       the key (the map's palette merges them). Counted once, on the palette, as decided.
+     - Found: BN's "no fill_ter" check only counts keys of a plain "terrain" member
+       (mapgen_palette::keys_with_terrain), not "mapping" terrain. In data, 18 mappings with
+       terrain are all in maps with fill_ter, and 4 are in palettes. The resolver now keeps
+       SymbolInfo.listed_terrain and reports the others ("only in mapping").
+     - Missing overmap_terrain (Stage 3's rule) now also accepts map extras' mapgen ids, ids a
+       loaded mod's preload/finalize/main.lua adds in an on_make_mapgen_factory_list hook (every
+       quoted string inside the hook's function; core registers the six lab_* ids), and "null".
+       With weight-0 maps skipped, core has none; it's an error (reported on load), not a warning.
+     - Null ids accepted per kind (t_null, f_null, tr_null, fd_null, "null", mon_null, GROUP_NULL,
+       "" for item groups and connections); generic_factory aliases for monsters, traps, fields,
+       vehicle groups, connections and transforms. Items have no aliases; MIGRATION ids are not
+       items (confirmed: a migrated id is a finding). place_items' "item" is a group or an item;
+       an inline group isn't checked. Gas pump fuel must be one of gasoline/diesel/jp8/avgas.
+     - Undefined parameters (a "param" naming none of the map's/palette's parameters) are an
+       error; a palette is checked with only its own "parameters", like mapgen_palette::check.
+     - Chunk loops are errors ("BN would recurse forever"), found by the overlay's loop guard.
+     - The mod note: with mods loaded, unknown ids read "... in the loaded mods".
+   - Not done / open: what NOT_CHECKED lists (snippets, zones, factions, mapgen flags, parameter
+     scopes/types, PLANT outside sealed_item, NO_PAINT, computers, joins); the legend doesn't
+     mark symbols with findings; findings of unopened maps (a project-wide scan) and of palettes
+     outside the current map's use; saving with load errors only warns; the Problems tab can't
+     fix anything itself (Add missing overmap_terrain stays in the Edit menu).
+ Stage 8 - Computers (from the later milestones; planned 2026-09-27).  [8a, 8b DONE 2026-09-27]
+   - Goal: a user can make a computer that unlocks a door without reading computer_session.cpp. It
+     doesn't have to cover every action; door control must be easy, and the editor must show whether
+     the door is actually reached.
+   - Checked (against BN 39f4883093 source and core data):
+     - jmapgen_computer (mapgen.cpp:2454) reads "name", "access_denied" (translations), "security"
+       (int, default 0), "target" (bool), "options" [{name, action, security}] and "failures"
+       [{action}]. Wherever it lands BN sets t_console and f_null, whatever the symbol says. "action"
+       goes through get_enum_value, so an unknown option or failure action is a load error. No
+       check() exists for computers.
+     - Core has 0 place_computers entries: all 118 computers are "computers" symbol mappings (5 in
+       palettes, 32 in chunks). The symbol route is the main one; place_computers is secondary.
+     - Actions used: unlock 46, unlock_disarm 20, unlock_labpass 13, blood_anal 12, toll 12, then a
+       long tail (44 kinds of 50). Failures: shutdown 65, damage 54, alarm 46, manhacks 26,
+       secubots 13, destroy_blood 12, amigara 1, destroy_data 1. Security 0-10; 71 of 201 options
+       set their own security.
+     - Door actions (computer_session.cpp, map::translate_radius): unlock/unlock_disarm turn
+       t_door_metal_locked into t_door_metal_c; lock does the reverse; open/open_disarm turn
+       t_door_metal_locked into t_floor; shutters toggles t_reinforced_glass_shutter(_open); release
+       turns t_reinforced_glass into t_thconc_floor. Radius 8 (open and release 25), measured with
+       trig_dist from the PLAYER (standing next to the console), on the same z-level, and only in
+       the player's own OMT (same_submap compares OMTs). Every matching cell in reach changes,
+       including doors meant for another computer. Other locked doors (t_door_locked, bars, ...)
+       are never touched. *_disarm also removes the submap's turrets; unlock_labpass needs (and uses
+       up) a labpass. elevator_on switches every t_elevator_control_off on the z-level.
+     - Login: security > 0 asks to hack (Computer skill); a failed hack fires a random failure, or
+       locks out if there are none. An option's own security (plus alerts) asks again.
+   - 8a. Model and validation (no UI):
+     - src/data/computer.gd (Computer): a view over one computer object, like Placement over an
+       entry, so untouched fields keep their form. Tables from computer.h: every action with a
+       label, a group (Doors / Info / Special) and its effect (from, to, radius, whole z-level),
+       every failure with a one-line description.
+     - MapDocument: computer(key) and set_computer(key, dict) for the map's own "computers" /
+       "mapping" entries, through the member-snapshot undo. New fields in the order data uses:
+       name, access_denied, security, target, options, failures.
+     - AsciiMap draws a cell whose symbol places a computer as t_console.
+     - Validator (drops "computers" from NOT_CHECKED): error (won't load) for an unknown option or
+       failure action, or options/failures that aren't lists of objects; warning for a door action
+       with no matching terrain reachable from any stand cell, a computer with no options, a console
+       with no free neighbour; note for other locked door types in reach of an unlock computer, and
+       a door reached by two computers.
+   - 8b. Computer editor and "new computer":
+     - ComputerEditor control (reusable): name, access-denied text, security (hint on hacking),
+       options (name, grouped action dropdown, own security), failure checkboxes, mission target.
+       Presets: "Door control" (unlock, security 0), "Secured door" (security 3, shutdown / alarm
+       / manhacks, as the police station), "Lab door" (unlock_labpass).
+     - Legend: "New computer..." picks a free key, writes terrain t_console plus a "computers" entry
+       into the map's own definitions (the Stage 3 rule for new symbols), selects it as the brush and
+       opens the editor. A selected computer symbol gets "Edit computer...".
+     - Placements panel: ComputerEditor instead of raw JSON for place_computers, and Add.
+   - 8c. Reach display:
+     - With a computer selected, the canvas shows the stand cells, the radius cut at each stand
+       cell's OMT, target cells (solid if every stand cell reaches them, faded if only some do),
+       and wrong-type locked doors in range in red. Uses the rows plus the chunk overlay; doors from
+       "set"/place_terrain aren't included, and the panel says so.
+     - On a door cell, "Control with a computer...": offer to swap it to a symbol with
+       t_door_metal_locked (add_symbol), and if no unlock computer reaches it, highlight the cells
+       where a new console would and place one there with the preset.
+     - "Can stand here" needs terrain move_cost in DataIndex (small). Without it, all 8 neighbours
+       count, which overstates reach.
+   - 8d. Later: computers in the palette editor (same control); computers inside chunks are judged
+     in each parent, through the overlay.
+   - Accept: all 118 core computers go through the model and back to an equal value, and editing one
+     option of a real map changes only its lines in the diff against BN. Core validates with 0
+     computer errors, and the "no reachable door" warnings match an independent Python count (each
+     one looked at: set/place_terrain doors, chunks and other z-levels may make false positives).
+     police_station's "5" and "6" reach exactly the supply room and evidence locker doors. A
+     main-scene test on fake BN: New computer -> Door control -> paint the console -> paint
+     t_door_metal_locked within 8 -> save gives the expected JSON and an empty Problems tab; moving
+     the door out of reach or into the next OMT gives the warning.
+   - Result (8a + 8b): tools/run_tests.sh passes 118 tests. tests/test_computers_bn.gd: all 118
+     core computers round-trip through Computer with every field set to its own value (0 issues;
+     unlock 46, unlock_disarm 20, unlock_labpass 13), police "5" reaches only (2, 11) and "6" only
+     (21, 6), and renaming one option of police "5" changes exactly that one line in the diff.
+     Core validates with 0 computer errors and 0 computer warnings (no console without options or a
+     stand cell, no door option reaching nothing), 17 consoles with other locked doors in reach and
+     15 console pairs sharing doors (notes): the same numbers as an independent Python pass over
+     core's om_terrain maps (rows + palettes; the editor adds chunk terrain, which changed nothing).
+     tests/test_computers.gd (fake BN): the model keeps form (explicit 0s, option key order, empty
+     lists removed), every seeded finding at its severity and target, trig reach and the OMT cut,
+     console drawing, add/edit/undo in the document (also a computer in "mapping"), the main-scene
+     flow above (JSON checked, "No problems", 9 away / next OMT warn, 8 away / same OMT fine, the
+     legend's Edit computer applying on OK only), and place_computers in the Placements panel.
+   - Code: src/data/computer.gd (Computer: ACTIONS with label/group/description, EFFECTS, FAILURES,
+     PRESETS door/secured/lab, issues(), form-keeping setters, stand_cells/reach_rect/in_reach).
+     Validator: _check_computers (per piece, map and palette), _check_consoles with console_cells,
+     tile_grids, console_reach (Reach: stands, targets per action, other_locked). DataIndex:
+     TileDef.move_cost (terrain move_cost, furniture move_cost_mod) and passable(). ChunkOverlay
+     writes t_console/f_null for a chunk's computer cells; AsciiMap draws computer symbols as
+     t_console and the hover text names the computer. MapDocument: computer(), computer_source(),
+     set_computer(), add_computer_symbol(), console_reaches(); "computers" joins MEMBER_ORDER.
+     Placement: place_computers fields, template (the Door control preset) and Add.
+     src/ui/computer_editor.gd (ComputerEditor), src/ui/computer_dialog.gd (ComputerDialog: new /
+     edit, OK = one undo step). Legend: "New computer...", "Edit computer..." (and double-click),
+     the computer summary per symbol. Edit > New computer.... Placements panel: ComputerEditor
+     for place_computers (x/y stay fields; each finished edit is one undo step).
+   - Decisions and checks (against BN 39f4883093):
+     - "lock" counts t_door_metal_locked as its door too (it re-locks what an unlock opened):
+       office_doctor's "6" has lock + unlock over one locked door, which is right.
+     - "Other locked door" = a terrain id starting t_door with "locked" in it, not the action's
+       own (t_door_locked, t_door_bar_locked, t_door_locked_interior, ...).
+     - Shared doors are one note per console PAIR, not per door: consoles on both sides of a
+       door (microlab_firebreak) would otherwise give 36 notes for 15 real pairs.
+     - Errors are load errors whether the rows use the key or not (BN builds every key's pieces
+       when it reads a map or palette): an unknown option or failure action, a missing action,
+       an entry that isn't an object, a non-int security. "options"/"failures" that aren't lists
+       are skipped by BN (has_array): a warning. No options: a warning on used keys only.
+     - Reach checks run on om_terrain maps only, over the rows plus chunk terrain; a chunk's own
+       consoles are judged in the chunk alone (8d judges them in their parents). A door option
+       reaching nothing is a note, not a warning, when the map's "set"/place_terrain/translate_ter
+       names the target terrain. elevator_on (whole z-level) isn't checked: other maps share it.
+       place_computers counts only on a single cell (a range picks one at random).
+     - A symbol with a computer is drawn as t_console (BN overrides its terrain and furniture).
+       A new computer symbol still gets terrain t_console, so it's valid without fill_ter.
+     - New computer suggests the console's own symbol ("6") if free, starts from Door control and,
+       when the map has no symbol for the door its first door action works on, offers to add one
+       (t_door_metal_locked's own "+" if free), then makes the console the brush and says what to
+       paint. The edit dialog lists what each painted console reaches ("At (1, 10): unlock reaches
+       1 door: (2, 11)"), recomputed as options change.
+     - Door-option warnings read "it does nothing in game" rather than "BN silently skips it".
+     - Found: Godot 4.7 doesn't emit a Range's value_changed outside the scene tree; UI tests emit
+       it themselves.
+   - Not done / open (8c, 8d): the canvas reach display, "Control with a computer..." on a door
+     cell, computers in the palette editor (the legend says a palette's computer is edited there
+     as JSON), chunk computers judged in their parents, "set"/place_terrain doors in reach.
  Then the "Later milestones" list.
 
 Explicitly out of scope until the later milestones: tilesets, preview rolls, z-level linking, update_mapgen,

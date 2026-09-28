@@ -23,7 +23,10 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   `Placement` (one place_*/"set" entry read BN's way: first-value anchor, dropped/crossing/reversed
   ranges, "set" in every OMT; `IntRange` keeps how a jmapgen_int is written), `ChunkOverlay` (the
   nested chunks a map places, laid over its cells in BN's order, rotation and recursion; footprints,
-  overhang), `MapgenObjects` (a MapgenRef's object: open file live, else a cached parse).
+  overhang), `MapgenObjects` (a MapgenRef's object: open file live, else a cached parse),
+  `Validator` (what BN would say about a map or palette: findings with severity, "won't load" vs
+  "reported on load", and a target to select; console reach), `Computer` (one computer's JSON:
+  action/failure tables, presets, form-keeping setters, reach geometry).
 - `src/edit/`: editing, no nodes. `EditSession` (open files/maps, save, new mapgen, overmap_terrain
   stubs), `MapDocument` (one mapgen: paint, new symbol, placements, undo/redo, writes straight
   into the BnJson object), `JsonFile` (a parsed file; untouched top-level objects are written back as their
@@ -38,7 +41,8 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
 - `src/view/`: display logic without nodes, testable headless. `AsciiMap` (what each cell looks like,
   wall joining, hover text), `BnColors` (BN color names -> RGB).
 - `src/ui/`: controls built in code (`MapCanvas`, `LegendPanel`, `MapBrowser`, `ModsDialog`,
-  `NewSymbolDialog`, `NewMapDialog`, `SyncDialog`, `PaletteEditor`, `PlacementsPanel`). `main.gd`
+  `NewSymbolDialog`, `NewMapDialog`, `SyncDialog`, `PaletteEditor`, `PlacementsPanel`,
+  `ProblemsPanel`, `ComputerEditor`, `ComputerDialog`). `main.gd`
   builds the window;
   `godot --path . -- --open <id> [--bn <path>] [--workspace <path>]` opens a map at startup.
 - `tests/test_*.gd`: test files; every `test_*` method runs. They extend
@@ -66,6 +70,8 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   `push_error` on purpose will fail.
 - Tests run inside `SceneTree._initialize`, before the root enters the tree: `_ready` doesn't fire
   and awaited frames never come. UI tests call `_ready()` directly (see `tests/test_viewer.gd`).
+- Core must validate with no errors (BN's CI loads it cleanly): an error `test_validation_bn`
+  finds in core is a false positive in the Validator, not a data bug.
 - `_draw` never runs in tests, nor under `--headless` at all, so canvas drawing code is untested.
   After changing it, run a scratch `-s` script without `--headless` that adds main.tscn to `root`,
   opens a map, waits a few frames in `_process` and saves `root.get_texture().get_image()`.
@@ -76,4 +82,6 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   `BnJson.encode_string(...)`.
 - Godot's `JSON.stringify` sorts keys unless its third argument is false; TempTree writes values with
   it, so pass a fixture as text when its key order matters.
+- A Range (SpinBox, slider) outside the scene tree doesn't emit `value_changed` when its value is
+  set; a UI test emits it itself after setting the value.
 - Commit the `*.uid` and `*.import` files Godot generates next to scripts and assets.

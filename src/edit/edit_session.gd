@@ -566,6 +566,8 @@ func add_missing_overmap_terrain(doc: MapDocument) -> PackedStringArray:
 	for id in missing:
 		index.overmap_terrain[id] = src
 		_remember(_new_overmap, rel, id)
+	for d in docs:
+		d.forget_findings()
 	return missing
 
 

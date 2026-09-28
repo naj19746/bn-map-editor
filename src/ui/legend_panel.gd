@@ -4,11 +4,18 @@ extends VBoxContainer
 ## furniture, and where every definition comes from (the map, fill_ter, or
 ## which palette). Symbols the rows don't use are listed separately.
 ## Selecting a symbol makes it the brush; "New symbol..." defines another.
+## "New computer..." defines a console symbol, and "Edit computer..." (or a
+## double-click) edits the selected symbol's computer when the map itself
+## defines it.
 
 ## A symbol was selected ("" when the selection was cleared).
 signal key_selected(key: String)
 ## The "New symbol..." button was pressed.
 signal new_symbol_requested
+## "New computer..." was pressed.
+signal new_computer_requested
+## "Edit computer..." was pressed (or a computer symbol double-clicked).
+signal edit_computer_requested(key: String)
 ## "Palette..." was pressed: open the palette editor at [param id] (the
 ## selected symbol's palette), or "" for no particular one.
 signal palette_requested(id: String)
@@ -23,7 +30,10 @@ var _items := {}
 var _selecting := false
 ## The selected symbol, kept across rebuilds; null for none.
 var _selected: Variant = null
+var _editable := true
 var _new_button: Button
+var _new_computer_button: Button
+var _edit_computer_button: Button
 
 
 func _init() -> void:
@@ -47,6 +57,21 @@ func _init() -> void:
 	palette_button.tooltip_text = "Edit the palette that defines the selected symbol (Ctrl+Shift+E)"
 	palette_button.pressed.connect(func() -> void: palette_requested.emit(selected_palette()))
 	top.add_child(palette_button)
+	var row := HBoxContainer.new()
+	add_child(row)
+	_new_computer_button = Button.new()
+	_new_computer_button.text = "New computer..."
+	_new_computer_button.tooltip_text = "Define a console symbol with a computer (e.g. one that unlocks doors) in this map"
+	_new_computer_button.disabled = true
+	_new_computer_button.pressed.connect(func() -> void: new_computer_requested.emit())
+	row.add_child(_new_computer_button)
+	_edit_computer_button = Button.new()
+	_edit_computer_button.text = "Edit computer..."
+	_edit_computer_button.disabled = true
+	_edit_computer_button.pressed.connect(func() -> void:
+		if _selected is String:
+			edit_computer_requested.emit(_selected))
+	row.add_child(_edit_computer_button)
 	_tree = Tree.new()
 	_tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_tree.hide_root = true
@@ -56,6 +81,9 @@ func _init() -> void:
 	_tree.set_column_expand(2, false)
 	_tree.set_column_custom_minimum_width(2, 48)
 	_tree.item_selected.connect(_on_selected)
+	_tree.item_activated.connect(func() -> void:
+		if _selected is String and computer_state(_selected).is_empty():
+			edit_computer_requested.emit(_selected))
 	_tree.nothing_selected.connect(func() -> void:
 		_tree.deselect_all()
 		key_selected.emit(""))
@@ -68,12 +96,15 @@ func show_map(ascii: AsciiMap, editable := true) -> void:
 		_selected = null
 	_ascii = ascii
 	_new_button.disabled = ascii == null or not editable
+	_new_computer_button.disabled = _new_button.disabled
+	_editable = editable
 	_rebuild()
 
 
 ## Selects [param key]'s entry without emitting key_selected.
 func select_key(key: String) -> void:
 	_selected = key
+	_update_computer_button()
 	var item: TreeItem = _items.get(key)
 	if item == null:
 		return
@@ -81,6 +112,28 @@ func select_key(key: String) -> void:
 	item.select(0)
 	_tree.scroll_to_item(item)
 	_selecting = false
+
+
+## Why [param key]'s computer can't be edited here ("" if it can): it
+## places none, a palette defines it, or it's a list of several.
+func computer_state(key: String) -> String:
+	if _ascii == null or not _editable:
+		return "Nothing to edit."
+	var info: ResolvedMapgen.SymbolInfo = _ascii.resolved.symbols.get(key)
+	if info == null or not info.extras.has("computers"):
+		return "'%s' places no computer." % key
+	var b: ResolvedMapgen.Binding = info.extras.computers[-1]
+	if b.from_palette():
+		return "'%s''s computer is defined in %s; edit it there (as JSON in the palette editor)." % [key, b.source_label()]
+	if not b.value is Dictionary:
+		return "'%s' places several computers; edit them as JSON." % key
+	return ""
+
+
+func _update_computer_button() -> void:
+	var why := computer_state(_selected) if _selected is String else "Select a computer symbol."
+	_edit_computer_button.disabled = not why.is_empty()
+	_edit_computer_button.tooltip_text = why if why else "Edit the selected symbol's computer (or double-click it)"
 
 
 ## The palette defining the selected symbol's terrain (else furniture, else
@@ -108,6 +161,7 @@ func _on_selected() -> void:
 		item = item.get_parent()
 	var key: Variant = item.get_metadata(0) if item else null
 	_selected = key if key is String else null
+	_update_computer_button()
 	key_selected.emit(key if key is String else "")
 
 
@@ -171,6 +225,7 @@ func _rebuild() -> void:
 			_items[key].collapsed = false
 	if _selected is String and _items.has(_selected):
 		select_key(_selected)
+	_update_computer_button()
 
 
 ## Adds a symbol row with one child per definition. Returns false if the
@@ -191,7 +246,10 @@ func _add_symbol(parent: TreeItem, key: String, count: int, filter: String) -> b
 	if info:
 		for kind: String in info.extras:
 			for b: ResolvedMapgen.Binding in info.extras[kind]:
-				lines.append(PackedStringArray([kind, _short_value(b.value), b.source_label()]))
+				var text := _short_value(b.value)
+				if kind == "computers" and b.value is Dictionary:
+					text = Computer.of(b.value).summary()
+				lines.append(PackedStringArray([kind, text, b.source_label()]))
 
 	var look := _ascii.look_for(key)
 	var title := _title(look, info)

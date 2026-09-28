@@ -8,7 +8,8 @@ extends RefCounted
 ## connect group. Cells outside the map count as not connected.
 ##
 ## Distributions, params and switches show their first possible id (see
-## ResolvedMapgen.Binding.id()).
+## ResolvedMapgen.Binding.id()). A symbol placing a computer shows t_console,
+## as BN puts one there whatever the symbol's terrain.
 ##
 ## With an [member overlay], cells a nested chunk writes show what the chunk
 ## leaves there (ChunkOverlay): its terrain and/or furniture over the map's.
@@ -164,6 +165,8 @@ func describe_cell(x: int, y: int) -> String:
 		parts.append(" + ".join(ids))
 	if info and not info.extras.is_empty():
 		parts.append("[%s]" % ", ".join(PackedStringArray(info.extras.keys())))
+	if info and info.extras.has("computers") and info.extras.computers[-1].value is Dictionary:
+		parts.append("computer %s" % Computer.of(info.extras.computers[-1].value).summary())
 	var stamp := overlay.stamp_at(Vector2i(x, y)) if overlay else null
 	if stamp:
 		var i := y * size.x + x
@@ -223,6 +226,11 @@ func _make_look(key: String) -> Look:
 	look.layers = Placement.mapping_layers(info)
 	var ter_id := ter.id() if ter else ""
 	var furn_id := furn.id() if furn else ""
+	if info and info.extras.has("computers"):
+		# BN sets t_console and no furniture wherever a computer goes.
+		ter_id = Computer.CONSOLE
+		furn_id = ""
+		ter = null
 	look.terrain = index.terrain.get(ter_id)
 	if furn_id and furn_id != "f_null":
 		look.furniture = index.furniture.get(furn_id)

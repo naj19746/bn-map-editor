@@ -34,6 +34,20 @@ enum Status {
 	OUTSIDE_CHUNK,
 }
 
+## What kind of problem an entry of [member issues] is (the status ones
+## match [member status]).
+enum Issue {
+	DROPPED, CROSSES, SPANS_BACK, OUTSIDE_CHUNK,
+	## x/y (or x2/y2, chance, ...) aren't ints or ranges: a JSON error in BN.
+	MALFORMED,
+	## place_items chance outside 1-100: BN places nothing.
+	ITEMS_CHANCE,
+	## place_loot needs exactly one of group and item.
+	LOOT_GROUP_ITEM,
+	## place_monster has neither monster nor group.
+	NO_MONSTER,
+}
+
 const OMT := 24
 const LAYER_NAMES := ["Items", "Monsters", "Vehicles", "Nested", "Other"]
 
@@ -133,6 +147,14 @@ const FIELDS := {
 		["joins", "json", "conditions on joins"],
 		["rotation", "json", "turns the chunk"],
 		["repeat", "range", "times to place, default 1"],
+	],
+	"place_computers": [
+		["name", "text", "the console's title"],
+		["access_denied", "text", "shown when logging in fails; default: BN's message"],
+		["security", "int", "hack difficulty, default 0 (no hack)"],
+		["target", "bool", "the mission target, default false"],
+		["options", "json", "[{name, action, security}]"],
+		["failures", "json", "[{action}]: one fires when a hack fails"],
 	],
 	"set": [
 		["point", "text", "terrain, furniture, trap, radiation or bash (one cell)"],
@@ -273,6 +295,8 @@ var status := Status.OK
 ## The OMT owning the entry, (-1, -1) when dropped. Always (0, 0) for "set".
 var anchor_omt := -Vector2i.ONE
 var problems := PackedStringArray()
+## [member problems] again, as [Issue, text].
+var issues: Array = []
 var geometry: Geometry
 
 
@@ -404,7 +428,7 @@ func blocking_problem() -> String:
 func _classify() -> void:
 	if not x.valid() or not y.valid() or x.form == IntRange.Form.MISSING or y.form == IntRange.Form.MISSING:
 		status = Status.CROSSES
-		problems.append("%s: x and y must each be an int or [min, max]" % title())
+		_issue(Issue.MALFORMED, "%s: x and y must each be an int or [min, max]" % title())
 		return
 	if is_set():
 		_classify_set()
@@ -415,21 +439,21 @@ func _classify() -> void:
 	var first := Vector2i(x.first, y.first)
 	if first.x < 0 or first.y < 0 or first.x >= total.x or first.y >= total.y:
 		status = Status.DROPPED
-		problems.append("%s is anchored at (%d, %d), outside the map, so BN drops it" % [title(), first.x, first.y])
+		_issue(Issue.DROPPED, "%s is anchored at (%d, %d), outside the map, so BN drops it" % [title(), first.x, first.y])
 		return
 	anchor_omt = first / OMT
 	var local_second := Vector2i(x.second, y.second) - anchor_omt * OMT
 	if local_second.x > OMT - 1 or local_second.y > OMT - 1:
 		status = Status.CROSSES
-		problems.append("%s: its range leaves overmap tile (%d, %d); BN refuses to load the map (\"coordinate range cannot cross grid boundaries\")" % [
+		_issue(Issue.CROSSES, "%s: its range leaves overmap tile (%d, %d); BN refuses to load the map (\"coordinate range cannot cross grid boundaries\")" % [
 			title(), anchor_omt.x, anchor_omt.y])
 	elif local_second.x < 0 or local_second.y < 0:
 		status = Status.SPANS_BACK
-		problems.append("%s: its reversed range reaches back out of overmap tile (%d, %d) (BN uses %d-%d, %d-%d)" % [
+		_issue(Issue.SPANS_BACK, "%s: its reversed range reaches back out of overmap tile (%d, %d) (BN uses %d-%d, %d-%d)" % [
 			title(), anchor_omt.x, anchor_omt.y, x.lo(), x.hi(), y.lo(), y.hi()])
 	elif geometry.chunk and (x.hi() >= geometry.size.x or y.hi() >= geometry.size.y):
 		status = Status.OUTSIDE_CHUNK
-		problems.append("%s reaches past the chunk's mapgensize %dx%d (BN allows up to 24x24)" % [
+		_issue(Issue.OUTSIDE_CHUNK, "%s reaches past the chunk's mapgensize %dx%d (BN allows up to 24x24)" % [
 			title(), geometry.size.x, geometry.size.y])
 
 
@@ -442,7 +466,7 @@ func _classify_set() -> void:
 	if x2 != null:
 		if not x2.valid() or not y2.valid() or x2.form == IntRange.Form.MISSING or y2.form == IntRange.Form.MISSING:
 			status = Status.CROSSES
-			problems.append("%s: a line or square needs x2 and y2" % title())
+			_issue(Issue.MALFORMED, "%s: a line or square needs x2 and y2" % title())
 			return
 		pairs.append([x2, y2])
 	for pair: Array in pairs:
@@ -452,14 +476,19 @@ func _classify_set() -> void:
 			status = Status.DROPPED
 			var why := "outside the map" if geometry.chunk or geometry.omts() == Vector2i.ONE \
 					else "past the tile: \"set\" runs in every tile without the tile offset, so it runs in none"
-			problems.append("%s is at (%d, %d), %s; BN drops it" % [title(), rx.first, ry.first, why])
+			_issue(Issue.DROPPED, "%s is at (%d, %d), %s; BN drops it" % [title(), rx.first, ry.first, why])
 			return
 	for pair: Array in pairs:
 		if pair[0].second > bound.x - 1 or pair[1].second > bound.y - 1:
 			status = Status.CROSSES
-			problems.append("%s: its range leaves the %dx%d area; BN refuses to load the map" % [title(), bound.x, bound.y])
+			_issue(Issue.CROSSES, "%s: its range leaves the %dx%d area; BN refuses to load the map" % [title(), bound.x, bound.y])
 			return
 	anchor_omt = Vector2i.ZERO
+
+
+func _issue(code: Issue, text: String) -> void:
+	problems.append(text)
+	issues.append([code, text])
 
 
 ## Field checks BN makes when loading or placing (not id lookups).
@@ -468,18 +497,18 @@ func _check_fields() -> void:
 		"place_items":
 			var c := IntRange.parse(entry.get("chance"), 1, 1, false)
 			if c.valid() and (c.lo() < 1 or c.hi() > 100):
-				problems.append("%s: chance %s is outside 1-100, so BN places nothing" % [title(), c.text()])
+				_issue(Issue.ITEMS_CHANCE, "%s: chance %s is outside 1-100, so BN places nothing" % [title(), c.text()])
 		"place_loot":
 			if entry.has("group") == entry.has("item"):
-				problems.append("%s: needs exactly one of \"group\" and \"item\"" % title())
+				_issue(Issue.LOOT_GROUP_ITEM, "%s: needs exactly one of \"group\" and \"item\"" % title())
 			if entry.has("chance") and not IntRange._is_int(entry.chance):
-				problems.append("%s: chance must be a plain int" % title())
+				_issue(Issue.MALFORMED, "%s: chance must be a plain int" % title())
 		"place_monster":
 			if not entry.has("group") and not entry.has("monster"):
-				problems.append("%s: needs \"monster\" or \"group\"" % title())
+				_issue(Issue.NO_MONSTER, "%s: needs \"monster\" or \"group\"" % title())
 	var kind: Chance = KINDS[member][3]
 	if kind != Chance.NONE and entry.has("chance") and not IntRange.parse(entry.chance).valid():
-		problems.append("%s: chance must be an int or [min, max]" % title())
+		_issue(Issue.MALFORMED, "%s: chance must be an int or [min, max]" % title())
 
 
 ## The field list for [param p_member]: x, y, then FIELDS (or the kind's id
@@ -521,6 +550,7 @@ static func template(p_member: String, rect: Rect2i) -> Dictionary:
 		"place_monster": fields = {"monster": ""}
 		"place_vehicles": fields = {"vehicle": "", "chance": 100, "rotation": 0}
 		"place_nested": fields = {"chunks": []}
+		"place_computers": fields = Computer.preset("door")
 		_:
 			if KINDS.has(p_member) and not KINDS[p_member][2].is_empty():
 				fields[KINDS[p_member][2][0]] = ""
@@ -541,7 +571,7 @@ static func template(p_member: String, rect: Rect2i) -> Dictionary:
 const ADDABLE := ["place_items", "place_item", "place_loot", "place_monster", "place_monsters",
 	"place_vehicles", "place_nested", "place_signs", "place_npcs", "place_terrain", "place_furniture",
 	"place_traps", "place_fields", "place_liquids", "place_toilets", "place_vendingmachines",
-	"place_rubble", "place_graffiti", "faction_owner"]
+	"place_rubble", "place_graffiti", "place_computers", "faction_owner"]
 
 
 ## A bitmask of Layer bits for what the symbol's own mappings place

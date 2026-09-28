@@ -4,6 +4,7 @@ extends Control
 ## and the 24x24 overmap-tile boundaries, and the map's placements on top:
 ## a box for a point, a dashed outline for a range, with labels like "I 50%".
 ## Placements BN drops or reads oddly are drawn in red, where BN puts them.
+## The cells a selected problem points at are outlined in magenta.
 ## Cells whose symbol itself places items, monsters, ... get a corner mark.
 ## With the Nested layer shown, each placed chunk's footprint is outlined
 ## (dotted for chunks placed by chunks), and the part reaching past its
@@ -41,6 +42,7 @@ const LAYER_COLORS := [Color(1.0, 0.85, 0.3), Color(1.0, 0.45, 0.45), Color(0.4,
 const PLACEMENT_PROBLEM := Color(1.0, 0.15, 0.25)
 const LABEL_BG := Color(0, 0, 0, 0.65)
 const OVERHANG := Color(1.0, 0.15, 0.25, 0.22)
+const FOCUS := Color(1.0, 0.3, 1.0)
 
 ## Line characters drawn as lines, so walls join whatever the font:
 ## sides as [N, E, S, W].
@@ -95,6 +97,11 @@ var selected_index := -1
 var placement_preview := Rect2i():
 	set(v):
 		placement_preview = v
+		queue_redraw()
+## Cells a selected problem points at, outlined (empty for none).
+var focus := Rect2i():
+	set(v):
+		focus = v
 		queue_redraw()
 var cell_size := 18.0
 ## Screen position of cell (0, 0)'s top-left corner.
@@ -282,6 +289,9 @@ func _draw() -> void:
 	_draw_preview(font_size, baseline, draw_text)
 	_draw_grid(x0, y0, x1, y1)
 	_draw_placements()
+	if focus.has_area():
+		var r := Rect2(origin + Vector2(focus.position) * cs, Vector2(focus.size) * cs)
+		draw_rect(r.grow(2.0), FOCUS, false, 3.0)
 	if hovered.x >= 0:
 		draw_rect(Rect2(origin + Vector2(hovered) * cs, Vector2(cs, cs)), HOVER, false, 2.0)
 	_draw_rulers(x0, y0, x1, y1)

@@ -33,6 +33,8 @@ var include_edit: LineEdit
 var users: ItemList
 var move_keys: OptionButton
 var status: Label
+## What BN would say about the palette's own definitions (see Validator).
+var problems: Label
 var confirm: ConfirmationDialog
 var new_dialog: ConfirmationDialog
 var new_id: LineEdit
@@ -92,6 +94,10 @@ func _init() -> void:
 	_header = Label.new()
 	_header.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	right.add_child(_header)
+	problems = Label.new()
+	problems.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	problems.add_theme_color_override("font_color", ProblemsPanel.COLORS[0])
+	right.add_child(problems)
 	var bar := HBoxContainer.new()
 	right.add_child(bar)
 	_undo_button = _button(bar, "Undo", undo, KEY_MASK_CTRL | KEY_Z)
@@ -533,6 +539,7 @@ func _refresh() -> void:
 	_refresh_includes()
 	_refresh_users()
 	_refresh_map_part()
+	_show_problems()
 	if doc == null:
 		_header.text = "Pick a palette on the left, or create one." if session else ""
 		_update_buttons()
@@ -559,6 +566,7 @@ func _rebuild_symbols() -> void:
 	var q := _symbol_filter.text.strip_edges().to_lower()
 	var keys: Array = view.symbols.keys()
 	keys.sort()
+	var by_key := findings_by_key()
 	for key: String in keys:
 		var info: ResolvedMapgen.SymbolInfo = view.symbols[key]
 		var ter := _binding_text(info.terrain, "t_null" if info.null_terrain else "")
@@ -580,11 +588,56 @@ func _rebuild_symbols() -> void:
 		item.set_text(1, ter)
 		item.set_text(2, furn)
 		item.set_text(3, ", ".join(also))
+		if by_key.has(key):
+			var texts: Array = by_key[key].map(func(f: Validator.Finding) -> String: return f.describe())
+			item.set_text(0, item.get_text(0) + "  !")
+			item.set_tooltip_text(0, "\n".join(texts))
 		item.set_tooltip_text(1, JSON.stringify(info.terrain.value) if info.terrain else "")
 		item.set_tooltip_text(2, JSON.stringify(info.furniture.value) if info.furniture else "")
 		item.set_metadata(0, key)
 		if key == _shown_key:
 			item.select(0)
+
+
+## The palette's findings, by key ("" for the palette itself).
+func findings_by_key() -> Dictionary:
+	var out := {}
+	if doc == null:
+		return out
+	for f in Validator.sorted(Validator.validate_palette(session.index, doc.id, doc.def.data)):
+		if not out.has(f.key):
+			out[f.key] = []
+		out[f.key].append(f)
+	return out
+
+
+func _show_problems() -> void:
+	var lines := PackedStringArray()
+	var by_key := findings_by_key()
+	for key: String in by_key:
+		for f: Validator.Finding in by_key[key]:
+			lines.append(f.describe())
+	if lines.size() > 6:
+		lines = lines.slice(0, 5) + PackedStringArray(["... %d more (keys marked ! in the list)" % (lines.size() - 5)])
+	problems.text = "\n".join(lines)
+	problems.visible = not lines.is_empty()
+
+
+## Selects [param key] in the symbol list (clearing the filter), as if
+## clicked. False if the palette doesn't define it.
+func select_key(key: String) -> bool:
+	if _symbol_filter.text:
+		_symbol_filter.text = ""
+		_rebuild_symbols()
+	var root := symbols.get_root()
+	var it := root.get_first_child() if root else null
+	while it:
+		if it.get_metadata(0) == key:
+			it.select(0)
+			symbols.scroll_to_item(it)
+			return true
+		it = it.get_next()
+	return false
 
 
 ## An id (with "(from p)" when an included palette defines it), or a short

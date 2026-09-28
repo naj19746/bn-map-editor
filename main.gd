@@ -2,8 +2,9 @@ extends Control
 ## Application root: the ASCII map editor.
 ##
 ## Layout: menu bar and toolbar on top; map tabs with the canvas on the left;
-## a side drawer (Browser, Legend, Placements) on the right; a layer bar
-## under the map; a status bar at the bottom.
+## a side drawer (Browser, Legend, Placements, Problems) on the right; a
+## layer bar under the map; a status bar at the bottom, counting the current
+## map's errors and warnings (see Validator).
 ## Maps are edited through an EditSession and saved to the workspace; the
 ## Palette editor window edits palettes in the same session, and the Sync
 ## window pushes workspace files into BN.
@@ -20,7 +21,7 @@ enum Menu {
 	SHOW_FURNITURE, SHOW_KEYS, SHOW_CHUNKS, FIT, TOGGLE_DRAWER, FIND,
 	SPRING, SUMMER, AUTUMN, WINTER,
 	NEW_MAP, NEW_CHUNK, SAVE, SAVE_ALL, WORKSPACE,
-	UNDO, REDO, NEW_SYMBOL, ADD_OVERMAP, PALETTES, CHUNK_PARENTS,
+	UNDO, REDO, NEW_SYMBOL, NEW_COMPUTER, ADD_OVERMAP, PALETTES, CHUNK_PARENTS,
 	SYNC,
 }
 
@@ -83,6 +84,9 @@ var _drawer: TabContainer
 var _browser: MapBrowser
 var _legend: LegendPanel
 var _placements_panel: PlacementsPanel
+var _problems_panel: ProblemsPanel
+## True while a problem selects a placement (the Problems tab stays up).
+var _from_problems := false
 var _layer_buttons: Array[Button] = []
 var _status: Label
 var _problems_button: Button
@@ -93,6 +97,7 @@ var _mods_dialog: ModsDialog
 var _bn_dialog: FileDialog
 var _workspace_dialog: FileDialog
 var _new_symbol_dialog: NewSymbolDialog
+var _computer_dialog: ComputerDialog
 var _new_map_dialog: NewMapDialog
 var _sync_dialog: SyncDialog
 var _palette_editor: PaletteEditor
@@ -421,6 +426,35 @@ func show_chunk_parents() -> void:
 	_show_report("Maps placing %s (%d)" % [id, lines.size()], lines)
 
 
+# --- Computers -----------------------------------------------------------------
+
+## Opens "New computer" for the current map.
+func new_computer() -> void:
+	var m := current_map()
+	if m:
+		_computer_dialog.open_new(m.doc)
+
+
+## Opens the computer of symbol [param key] of the current map.
+func edit_computer(key: String) -> void:
+	var m := current_map()
+	if m == null:
+		return
+	var why := _legend.computer_state(key)
+	if why:
+		_status.text = why
+		return
+	_computer_dialog.open_edit(m.doc, key)
+
+
+func _on_computer_added(key: String, door_key: String) -> void:
+	set_brush(key)
+	set_tool(MapTool.Kind.PAINT)
+	_status.text = "Paint '%s' where the console goes%s. The Problems tab says if a door option reaches nothing." % [
+		LegendPanel._show_key(key),
+		", then '%s' for the door (within 8 cells of a cell next to the console, same overmap tile)" % door_key if door_key else ""]
+
+
 # --- Placements ----------------------------------------------------------------
 
 ## Selects placement [param member] #[param index] of the current map ("" for
@@ -439,7 +473,8 @@ func _on_placement_selected(member: String, index: int) -> void:
 	_placements_panel.select(member, index)
 	var p := m.doc.placement(member, index) if member else null
 	if p:
-		_drawer.current_tab = _placements_panel.get_index()
+		if not _from_problems:
+			_drawer.current_tab = _placements_panel.get_index()
 		_status.text = "%s: %s   %s" % [p.title(), p.label(), p.what()]
 
 
@@ -511,6 +546,15 @@ func _save_files(rels: PackedStringArray) -> String:
 		return "\n".join(errors)
 	_status.text = "Saved %s to %s" % [", ".join(rels), session.workspace.root] if rels.size() \
 			else "Nothing to save"
+	var fatal := PackedStringArray()
+	for rel in rels:
+		for d in session.docs_for(rel):
+			for f in d.findings(false):
+				if f.severity == Validator.Severity.ERROR and f.load_fails:
+					fatal.append("%s: %s" % [d.ref.title(), f.text])
+	if not fatal.is_empty():
+		_status.text += ". BN won't load %s%s (see Problems)" % [fatal[0],
+				" and %d more" % (fatal.size() - 1) if fatal.size() > 1 else ""]
 	if not notes.is_empty():
 		var lines := PackedStringArray(["Saved. These edited objects had text that saving normalized:"])
 		lines.append_array(notes)
@@ -591,12 +635,69 @@ func _update_tab_titles() -> void:
 		_tabs.set_tab_title(i, title)
 
 
+## Counts the current map's errors and warnings in the status bar and
+## fills the Problems tab.
 func _update_problems() -> void:
 	var m := current_map()
-	var problems := m.doc.problems() if m else PackedStringArray()
+	var found: Array[Validator.Finding] = m.doc.findings() if m else ([] as Array[Validator.Finding])
+	var n := Validator.count(found)
 	_problems_button.visible = m != null
-	_problems_button.text = "%d problems" % problems.size() if problems.size() else "No problems"
-	_problems_button.modulate = Color(1, 0.55, 0.55) if problems.size() else Color(0.7, 1, 0.7)
+	var parts := PackedStringArray()
+	if n[0]:
+		parts.append("%d error%s" % [n[0], "" if n[0] == 1 else "s"])
+	if n[1]:
+		parts.append("%d warning%s" % [n[1], "" if n[1] == 1 else "s"])
+	if parts.is_empty() and n[2]:
+		parts.append("%d note%s" % [n[2], "" if n[2] == 1 else "s"])
+	_problems_button.text = ", ".join(parts) if parts.size() else "No problems"
+	_problems_button.tooltip_text = "Errors: BN won't load the map or reports it on every load. Warnings: BN " \
+			+ "silently skips something. Notes: BN does something odd. Click for the Problems tab."
+	_problems_button.modulate = ProblemsPanel.COLORS[0] if n[0] else (ProblemsPanel.COLORS[1] if n[1] else Color(0.7, 1, 0.7))
+	_problems_panel.show_findings(found, m.ascii.resolved.choices if m else PackedStringArray())
+	if m:
+		m.canvas.focus = Rect2i()
+
+
+## Shows what [param f] points at: its placement, symbol or cell on the map,
+## or its palette key in the palette editor.
+func show_finding(f: Validator.Finding) -> void:
+	var m := current_map()
+	_status.text = f.describe()
+	if f.target == Validator.Target.PALETTE_KEY:
+		open_palette_editor(f.palette)
+		if f.key:
+			_palette_editor.select_key(f.key)
+		return
+	if m == null:
+		return
+	var focus := Rect2i()
+	match f.target:
+		Validator.Target.PLACEMENT:
+			var p := m.doc.placement(f.member, f.index)
+			if p:
+				_from_problems = true
+				select_placement(f.member, f.index)
+				_from_problems = false
+				focus = p.instances()[0]
+		Validator.Target.SYMBOL:
+			m.canvas.highlight_key = f.key
+			_legend.select_key(f.key)
+			focus = _first_cell(m, f.key)
+		Validator.Target.CELL:
+			focus = Rect2i(f.cell, Vector2i.ONE)
+	m.canvas.focus = focus
+	if focus.has_area():
+		m.canvas.center_on(focus)
+
+
+## The first cell (row order) using [param key], or an empty rect.
+static func _first_cell(m: OpenMap, key: String) -> Rect2i:
+	var cells := m.doc.resolved.cells
+	for y in cells.size():
+		var x := cells[y].find(key)
+		if x >= 0:
+			return Rect2i(x, y, 1, 1)
+	return Rect2i()
 
 
 # --- View ----------------------------------------------------------------------
@@ -704,15 +805,8 @@ func _show_report(title: String, lines: PackedStringArray) -> void:
 
 
 func _on_problems_pressed() -> void:
-	var m := current_map()
-	if m == null:
-		return
-	var lines := m.doc.problems()
-	if not m.ascii.resolved.choices.is_empty():
-		lines.append("")
-		lines.append("Shown with these choices:")
-		lines.append_array(m.ascii.resolved.choices)
-	_show_report("Problems: " + m.ref.title(), lines)
+	_drawer.visible = true
+	_drawer.current_tab = _problems_panel.get_index()
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -770,6 +864,8 @@ func _on_menu(id: int) -> void:
 		Menu.NEW_SYMBOL:
 			if current_map():
 				_new_symbol_dialog.open(current_map().doc)
+		Menu.NEW_COMPUTER:
+			new_computer()
 		Menu.ADD_OVERMAP:
 			add_missing_overmap_terrain()
 		Menu.PALETTES:
@@ -807,6 +903,7 @@ func _update_edit_menu() -> void:
 	_edit_menu.set_item_text(redo_i, "Redo " + m.doc.redo_name() if m and m.doc.can_redo() else "Redo")
 	_edit_menu.set_item_disabled(redo_i, not (m and m.doc.can_redo()))
 	_edit_menu.set_item_disabled(_edit_menu.get_item_index(Menu.NEW_SYMBOL), m == null)
+	_edit_menu.set_item_disabled(_edit_menu.get_item_index(Menu.NEW_COMPUTER), m == null)
 	_edit_menu.set_item_disabled(_edit_menu.get_item_index(Menu.ADD_OVERMAP),
 			m == null or m.doc.missing_overmap_terrain().is_empty())
 	_edit_menu.set_item_disabled(_edit_menu.get_item_index(Menu.CHUNK_PARENTS),
@@ -886,6 +983,7 @@ func _build_ui() -> void:
 		["Redo", Menu.REDO, KEY_MASK_CTRL | KEY_Y],
 		[],
 		["New symbol...", Menu.NEW_SYMBOL, KEY_MASK_CTRL | KEY_E],
+		["New computer...", Menu.NEW_COMPUTER, 0],
 		["Add missing overmap_terrain", Menu.ADD_OVERMAP, 0],
 		[],
 		["Palette editor...", Menu.PALETTES, KEY_MASK_CTRL | KEY_MASK_SHIFT | KEY_E],
@@ -994,6 +1092,8 @@ func _build_ui() -> void:
 	_legend.key_selected.connect(_on_key_selected)
 	_legend.new_symbol_requested.connect(_on_menu.bind(Menu.NEW_SYMBOL))
 	_legend.palette_requested.connect(open_palette_editor)
+	_legend.new_computer_requested.connect(new_computer)
+	_legend.edit_computer_requested.connect(edit_computer)
 	_drawer.add_child(_legend)
 	_placements_panel = PlacementsPanel.new()
 	_placements_panel.placement_selected.connect(select_placement)
@@ -1002,6 +1102,9 @@ func _build_ui() -> void:
 	_placements_panel.message.connect(func(msg: String) -> void: _status.text = msg)
 	_placements_panel.open_chunk_requested.connect(func(ref: DataIndex.MapgenRef) -> void: open_ref(ref))
 	_drawer.add_child(_placements_panel)
+	_problems_panel = ProblemsPanel.new()
+	_problems_panel.finding_selected.connect(show_finding)
+	_drawer.add_child(_problems_panel)
 
 	var status_bar := PanelContainer.new()
 	root.add_child(status_bar)
@@ -1042,6 +1145,11 @@ func _build_ui() -> void:
 	_new_symbol_dialog = NewSymbolDialog.new()
 	_new_symbol_dialog.symbol_added.connect(set_brush)
 	add_child(_new_symbol_dialog)
+	_computer_dialog = ComputerDialog.new()
+	_computer_dialog.computer_added.connect(_on_computer_added)
+	_computer_dialog.computer_edited.connect(func(key: String) -> void:
+		_status.text = "Changed the computer of '%s'." % key)
+	add_child(_computer_dialog)
 	_new_map_dialog = NewMapDialog.new()
 	_new_map_dialog.map_created.connect(func(doc: MapDocument) -> void:
 		_add_tab(doc)

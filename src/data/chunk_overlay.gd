@@ -32,6 +32,9 @@ extends RefCounted
 const MAX_DEPTH := 12
 const WALL := "WALL"
 
+## What kind of problem an entry of [member Stamp.issues] is.
+enum Issue { ROTATION, UNKNOWN_CHUNK, LOOP, TOO_DEEP, UNREADABLE }
+
 
 ## One chunk placement: a place_nested entry or a "nested" mapping at a
 ## cell, at any depth.
@@ -73,6 +76,8 @@ class Stamp:
 	## Where it comes from, e.g. "place_nested #2 > chunk_a > 'X' nested".
 	var path := ""
 	var problems := PackedStringArray()
+	## [member problems] again, as [Issue, text].
+	var issues: Array = []
 
 	func title() -> String:
 		return "place_nested #%d" % (index + 1) if member == "place_nested" else "'%s' nested" % key
@@ -102,6 +107,10 @@ class Stamp:
 		if overhangs() or not problems.is_empty():
 			parts.append("!")
 		return " ".join(parts)
+
+	func add_problem(code: Issue, text: String) -> void:
+		problems.append(text)
+		issues.append([code, text])
 
 	## One line for the status bar and the inspector.
 	func describe() -> String:
@@ -239,13 +248,13 @@ func _place(piece: Dictionary, member: String, i: int, key: String, anchor: Rect
 		s.repeat = Placement.IntRange.parse(piece.repeat, 1, 1, false).text()
 	var rot := Placement.IntRange.parse(piece.get("rotation"))
 	if not rot.valid():
-		s.problems.append("rotation must be an int or [min, max]")
+		s.add_problem(Issue.ROTATION, "rotation must be an int or [min, max]")
 	else:
 		s.rotation = rot.lo()
 		if rot.first != rot.second:
 			s.rotation_text = "%d-%d" % [rot.lo(), rot.hi()]
 		if rot.lo() < 0 or rot.hi() > 4:
-			s.problems.append("rotation %s is outside 0-4 (BN asserts)" % rot.text())
+			s.add_problem(Issue.ROTATION, "rotation %s is outside 0-4 (BN asserts)" % rot.text())
 			s.rotation = posmod(s.rotation, 4)
 	stamps.append(s)
 	var si := stamps.size() - 1
@@ -254,19 +263,19 @@ func _place(piece: Dictionary, member: String, i: int, key: String, anchor: Rect
 		return
 	var refs: Array = index.nested.get(s.chunk_id, [])
 	if refs.is_empty():
-		s.problems.append("unknown chunk \"%s\" (BN places nothing)" % s.chunk_id)
+		s.add_problem(Issue.UNKNOWN_CHUNK, "unknown chunk \"%s\" (BN places nothing)" % s.chunk_id)
 		return
 	s.variants = refs.size()
 	s.ref = heaviest(refs)
 	if ctx.chain.has(s.chunk_id):
-		s.problems.append("chunk loop: %s > %s" % [" > ".join(ctx.chain), s.chunk_id])
+		s.add_problem(Issue.LOOP, "chunk loop: %s > %s" % [" > ".join(ctx.chain), s.chunk_id])
 		return
 	if ctx.depth >= MAX_DEPTH:
-		s.problems.append("chunks nested more than %d deep" % MAX_DEPTH)
+		s.add_problem(Issue.TOO_DEEP, "chunks nested more than %d deep" % MAX_DEPTH)
 		return
 	var chunk: Variant = _chunk(s.ref)
 	if chunk == null:
-		s.problems.append("can't read chunk %s (%s)" % [s.chunk_id, s.ref.source])
+		s.add_problem(Issue.UNREADABLE, "can't read chunk %s (%s)" % [s.chunk_id, s.ref.source])
 		return
 	var r: ResolvedMapgen = chunk[0]
 	s.chunk_size = r.size
@@ -299,6 +308,11 @@ func _place(piece: Dictionary, member: String, i: int, key: String, anchor: Rect
 				wrote = true
 			if info.furniture and info.furniture.id():
 				furn[c] = info.furniture.id()
+				wrote = true
+			if info.extras.has("computers"):
+				# BN puts a console there, whatever the symbol says.
+				ter[c] = Computer.CONSOLE
+				furn[c] = "f_null"
 				wrote = true
 			if wrote:
 				owner[c] = si

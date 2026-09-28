@@ -56,7 +56,7 @@ func _run(mapgen: Dictionary) -> void:
 	var res := _result
 	var obj: Variant = mapgen.get("object", {})
 	if not obj is Dictionary:
-		res.problems.append("\"object\" is not an object")
+		_problem(ResolvedMapgen.Issue.OBJECT, "", "\"object\" is not an object")
 		return
 	res.size = _size(mapgen)
 	if obj.get("fill_ter") is String:
@@ -101,7 +101,7 @@ func _merge_parameters(data: Dictionary) -> void:
 func _add_palette_value(value: Variant, chain: PackedStringArray) -> void:
 	var ids := possible_ids(value, "", _result.parameters)
 	if ids.is_empty():
-		_result.problems.append("can't work out a palette from %s" % JSON.stringify(value))
+		_problem(ResolvedMapgen.Issue.PALETTE, "", "can't work out a palette from %s" % JSON.stringify(value))
 		return
 	var pick := 0
 	if ids.size() > 1:
@@ -113,11 +113,11 @@ func _add_palette_value(value: Variant, chain: PackedStringArray) -> void:
 
 func _add_palette(id: String, chain: PackedStringArray) -> void:
 	if chain.has(id):
-		_result.problems.append("palette loop: %s -> %s" % [" -> ".join(chain), id])
+		_problem(ResolvedMapgen.Issue.PALETTE, "", "palette loop: %s -> %s" % [" -> ".join(chain), id])
 		return
 	var def := _index.palette(id)
 	if def == null:
-		_result.problems.append("unknown palette \"%s\"" % id)
+		_problem(ResolvedMapgen.Issue.PALETTE, "", "unknown palette \"%s\"" % id)
 		return
 	var inner := chain.duplicate()
 	inner.append(id)
@@ -136,15 +136,16 @@ func _add_mappings(data: Dictionary, source: String, chain: PackedStringArray) -
 			for key: String in mapping:
 				var entry: Variant = mapping[key]
 				if entry is Dictionary and entry.has(kind):
-					_bind(key, kind, entry[kind], source, chain)
+					_bind(key, kind, entry[kind], source, chain, false)
 		var defs: Variant = data.get(kind)
 		if defs is Dictionary:
 			for key: String in defs:
-				_bind(key, kind, defs[key], source, chain)
+				_bind(key, kind, defs[key], source, chain, true)
 
 
+## [param listed]: the key is in the plain member (not "mapping").
 func _bind(key: String, kind: String, value: Variant, source: String,
-		chain: PackedStringArray) -> void:
+		chain: PackedStringArray, listed: bool) -> void:
 	var b := ResolvedMapgen.Binding.new()
 	b.value = value
 	b.source = source
@@ -155,6 +156,8 @@ func _bind(key: String, kind: String, value: Variant, source: String,
 		info = ResolvedMapgen.SymbolInfo.new()
 		info.key = key
 		_result.symbols[key] = info
+	if kind == "terrain" and listed:
+		info.listed_terrain = true
 	var is_tile := kind == "terrain" or kind == "furniture"
 	if is_tile:
 		if value is String and value == ("t_null" if kind == "terrain" else "f_null"):
@@ -240,11 +243,11 @@ func _read_rows(obj: Dictionary) -> void:
 			res.cells.append(blank.duplicate())
 		return
 	if rows.size() != res.size.y:
-		res.problems.append("rows: expected %d rows, found %d" % [res.size.y, rows.size()])
+		_problem(ResolvedMapgen.Issue.ROWS, "", "rows: expected %d rows, found %d" % [res.size.y, rows.size()])
 	for y in rows.size():
 		var cells := CellText.split_row(str(rows[y]))
 		if cells.size() != res.size.x:
-			res.problems.append("row %d: expected %d columns, found %d" % [y + 1, res.size.x, cells.size()])
+			_problem(ResolvedMapgen.Issue.ROWS, "", "row %d: expected %d columns, found %d" % [y + 1, res.size.x, cells.size()])
 			# Pad or cut so every row indexes safely.
 			var fixed := cells.slice(0, res.size.x)
 			while fixed.size() < res.size.x:
@@ -261,17 +264,19 @@ func _check() -> void:
 	var has_fallback := not res.fill_ter.is_empty() or not res.predecessor_mapgen.is_empty() \
 			or res.draws_over
 	if not res.fill_ter.is_empty() and not _index.terrain.has(res.fill_ter):
-		res.problems.append("fill_ter: unknown terrain \"%s\"" % res.fill_ter)
+		_problem(ResolvedMapgen.Issue.FILL_TER, "", "fill_ter: unknown terrain \"%s\"" % res.fill_ter)
 	for key in res.used_keys():
 		if key.is_empty():
 			continue
 		var info: ResolvedMapgen.SymbolInfo = res.symbols.get(key)
-		var has_terrain := info != null and (info.terrain != null or info.null_terrain)
+		# BN only counts keys of a plain "terrain" member here, not "mapping".
+		var has_terrain := info != null and info.listed_terrain
 		if not has_terrain and not has_fallback:
-			res.problems.append("'%s' has no terrain and there is no fill_ter" % key)
+			var why := " (only in \"mapping\", which BN doesn't count here)" if info != null and info.terrain != null else ""
+			_problem(ResolvedMapgen.Issue.NO_TERRAIN, key, "'%s' has no terrain%s and there is no fill_ter" % [key, why])
 		if info == null:
 			if key != " " and key != ".":
-				res.problems.append("'%s' has no terrain, furniture or other definition" % key)
+				_problem(ResolvedMapgen.Issue.UNDEFINED, key, "'%s' has no terrain, furniture or other definition" % key)
 			continue
 		_check_ids(key, info.terrain, _index.terrain, "terrain")
 		_check_ids(key, info.furniture, _index.furniture, "furniture")
@@ -281,8 +286,13 @@ func _check_ids(key: String, b: ResolvedMapgen.Binding, table: Dictionary, what:
 	if b == null:
 		return
 	if b.ids.is_empty():
-		_result.problems.append("'%s': can't work out the %s from %s (%s)" % [
+		_problem(ResolvedMapgen.Issue.IDS, key, "'%s': can't work out the %s from %s (%s)" % [
 			key, what, JSON.stringify(b.value), b.source])
 	for id in b.ids:
 		if not table.has(id):
-			_result.problems.append("'%s': unknown %s \"%s\" (%s)" % [key, what, id, b.source])
+			_problem(ResolvedMapgen.Issue.IDS, key, "'%s': unknown %s \"%s\" (%s)" % [key, what, id, b.source])
+
+
+func _problem(code: ResolvedMapgen.Issue, key: String, text: String) -> void:
+	_result.problems.append(text)
+	_result.issues.append([code, key, text])

@@ -23,7 +23,7 @@ signal changed(full: bool)
 signal overlay_changed
 
 ## Where a missing object member goes, relative to the others.
-const MEMBER_ORDER := ["mapgensize", "fill_ter", "rows", "palettes", "terrain", "furniture"]
+const MEMBER_ORDER := ["mapgensize", "fill_ter", "rows", "palettes", "terrain", "furniture", "computers"]
 ## Tried in order when suggesting a key for a new symbol, after the
 ## symbols of the terrain/furniture themselves.
 const KEY_CANDIDATES := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" \
@@ -67,6 +67,8 @@ var _placements: Array[Placement] = []
 var _option_keys := {}
 ## Built on first use after each change.
 var _overlay: ChunkOverlay
+var _findings: Array[Validator.Finding] = []
+var _findings_built := false
 
 
 ## Returns null if objects[[param i]] isn't a mapgen with an "object".
@@ -324,6 +326,125 @@ func add_symbol(key: String, terrain_id: String, furniture_id: String) -> String
 	return ""
 
 
+# --- Computers -----------------------------------------------------------------
+
+## The computer the map itself defines for [param key] ("computers", else
+## "mapping"), the live object; null if it defines none there (it may come
+## from a palette, or be a list of several).
+func computer(key: String) -> Variant:
+	var member := _computer_member(key)
+	if member == "computers":
+		var v: Variant = object().computers[key]
+		return v if v is Dictionary else null
+	if member == "mapping":
+		var v: Variant = object().mapping[key].computers
+		return v if v is Dictionary else null
+	return null
+
+
+## Where [param key]'s computer is defined, e.g. "map" or "palette p"; "" if
+## the symbol places none.
+func computer_source(key: String) -> String:
+	var info: ResolvedMapgen.SymbolInfo = resolved.symbols.get(key)
+	if info == null or not info.extras.has("computers"):
+		return ""
+	return info.extras.computers[-1].source_label()
+
+
+## "computers" or "mapping" for the member holding the map's own computer
+## for [param key], or "".
+func _computer_member(key: String) -> String:
+	var obj := object()
+	if obj.get("computers") is Dictionary and obj.computers.has(key):
+		return "computers"
+	var mapping: Variant = obj.get("mapping")
+	if mapping is Dictionary and mapping.get(key) is Dictionary and mapping[key].has("computers"):
+		return "mapping"
+	return ""
+
+
+## Replaces the map's own computer for [param key] with [param data] (where
+## it is defined, else in "computers") as one undoable change. Returns an
+## error, or "" (also when nothing changed).
+func set_computer(key: String, data: Dictionary, name := "") -> String:
+	var obj := object()
+	var member := _computer_member(key)
+	if member.is_empty():
+		member = "computers"
+		if obj.has(member) and not obj[member] is Dictionary:
+			return "The map's \"computers\" isn't an object."
+	var old: Variant = computer(key)
+	if old != null and BnJson.stringify(old) == BnJson.stringify(data):
+		return ""
+	var c := Change.new()
+	c.name = name if name else "Edit computer '%s'" % key
+	file.touch(object_index)
+	c.order_before = obj.keys()
+	c.before[member] = _snapshot(member)
+	var value := data.duplicate(true)
+	if member == "mapping":
+		obj.mapping[key].computers = value
+	else:
+		var defs: Dictionary = obj.get("computers", {})
+		defs[key] = value
+		_set_member("computers", defs)
+	c.after[member] = _snapshot(member)
+	c.order_after = obj.keys()
+	_push(c)
+	return ""
+
+
+## [cell, Validator.Reach] for each console of symbol [param key] ("" for
+## none), as if its computer were [param data]: where the player can stand
+## and which doors each door action changes (rows and chunks; not doors a
+## "set" or place_terrain makes).
+func console_reaches(key: String, data: Dictionary) -> Array:
+	var out := []
+	var consoles := Validator.console_cells(resolved, _placements)
+	var grids := Validator.tile_grids(resolved, chunk_overlay(), consoles)
+	var cells: Array = consoles.keys()
+	cells.sort()
+	for at: Vector2i in cells:
+		if consoles[at][0] == key:
+			out.append([at, Validator.console_reach(index, resolved.size, grids, at, data)])
+	return out
+
+
+## Why add_computer_symbol([param key], ...) would fail, or "".
+func check_new_computer(key: String) -> String:
+	var problem := check_new_key(key)
+	if problem:
+		return problem
+	for member in ["terrain", "computers"]:
+		if object().has(member) and not object()[member] is Dictionary:
+			return "The map's \"%s\" isn't an object." % member
+	return ""
+
+
+## Defines [param key] in the map itself as terrain t_console with computer
+## [param data] (BN puts a console there anyway; the terrain keeps the
+## symbol valid without fill_ter). Returns an error, or "".
+func add_computer_symbol(key: String, data: Dictionary) -> String:
+	var problem := check_new_computer(key)
+	if problem:
+		return problem
+	var obj := object()
+	var c := Change.new()
+	c.name = "New computer '%s'" % key
+	file.touch(object_index)
+	c.order_before = obj.keys()
+	for pair: Array in [["terrain", Computer.CONSOLE], ["computers", data.duplicate(true)]]:
+		var member: String = pair[0]
+		c.before[member] = _snapshot(member)
+		var defs: Dictionary = obj.get(member, {})
+		defs[key] = pair[1]
+		_set_member(member, defs)
+		c.after[member] = _snapshot(member)
+	c.order_after = obj.keys()
+	_push(c)
+	return ""
+
+
 # --- Undo ----------------------------------------------------------------------
 
 func undo() -> void:
@@ -389,6 +510,7 @@ func _resolve() -> void:
 	resolved = MapgenResolver.resolve(index, mapgen())
 	_placements = Placement.read_all(mapgen(), resolved.size)
 	_overlay = null
+	forget_findings()
 	ref.palettes = DataIndex.palette_options(object())
 	ref.chunks = DataIndex.chunk_options(object())
 	_option_keys.clear()
@@ -427,7 +549,13 @@ func chunk_overlay() -> ChunkOverlay:
 ## Lays the chunks out again after a chunk or palette they use changed.
 func refresh_overlay() -> void:
 	_overlay = null
+	forget_findings()
 	overlay_changed.emit()
+
+
+func forget_findings() -> void:
+	_findings = []
+	_findings_built = false
 
 
 ## True when the current overlay draws chunk [param chunk_id], or a chunk
@@ -701,23 +829,37 @@ func om_ids() -> PackedStringArray:
 	return out
 
 
-## om_terrain ids with no overmap_terrain: BN never generates such a map.
+## om_terrain ids nothing uses: no overmap_terrain (nor a map extra or a Lua
+## hook) names them, so BN reports the map on every load and never
+## generates it. None for a map BN doesn't load (weight 0).
 func missing_overmap_terrain() -> PackedStringArray:
 	var out := PackedStringArray()
+	if ref.disabled or ref.kind != DataIndex.MapgenRef.OM_TERRAIN:
+		return out
 	for id in om_ids():
-		if not index.has_overmap_terrain(id):
+		if not index.mapgen_id_used(id):
 			out.append(id)
 	return out
 
 
-## The resolver's problems plus the editor's own checks.
+## What BN would say about this map (see Validator), and with
+## [param with_palettes] about the palettes it uses, errors first. Built
+## once per change.
+func findings(with_palettes := true) -> Array[Validator.Finding]:
+	if not _findings_built:
+		_findings = Validator.validate_map(index, ref, mapgen(), resolved, _placements, chunk_overlay())
+		_findings_built = true
+	var out := _findings.duplicate()
+	if with_palettes and not ref.disabled:
+		out.append_array(Validator.validate_palettes(index, DataIndex.palette_options(object())))
+	return Validator.sorted(out)
+
+
+## findings() as text, one line each.
 func problems() -> PackedStringArray:
-	var out := resolved.problems.duplicate()
-	for p in _placements:
-		out.append_array(p.problems)
-	out.append_array(chunk_overlay().problems())
-	for id in missing_overmap_terrain():
-		out.append("om_terrain \"%s\" has no overmap_terrain, so BN never generates this map (Edit > Add missing overmap_terrain)" % id)
+	var out := PackedStringArray()
+	for f in findings():
+		out.append(f.describe())
 	return out
 
 
