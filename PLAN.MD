@@ -1136,7 +1136,9 @@ Development stages (each ends with a headless-testable acceptance check):
        an entry that isn't an object, a non-int security. "options"/"failures" that aren't lists
        are skipped by BN (has_array): a warning. No options: a warning on used keys only.
      - Reach checks run on om_terrain maps only, over the rows plus chunk terrain; a chunk's own
-       consoles are judged in the chunk alone (8d judges them in their parents). A door option
+       consoles are judged in the chunk alone (8d judges them in their parents). (Corrected
+       after 8c: the code skips chunks entirely, validator.gd _check_map, so they're judged
+       nowhere yet.) A door option
        reaching nothing is a note, not a warning, when the map's "set"/place_terrain/translate_ter
        names the target terrain. elevator_on (whole z-level) isn't checked: other maps share it.
        place_computers counts only on a single cell (a range picks one at random).
@@ -1251,6 +1253,55 @@ Development stages (each ends with a headless-testable acceptance check):
      at each one.
    - Still unchecked after 8d: "set"/place_terrain doors (0 maps with their own consoles use them
      in core, so a note is enough), elevator_on (1 object in core), and other z-levels.
+ Checked after Stage 8c (2026-09-27, against BN 39f4883093 source and core data; reviews 8d; an
+ independent Python pass over data/json, palettes resolved, distributions included):
+   - Chunk computers, recounted: counting computers a chunk gets from its palettes too (the vault
+     chunks use lab_loot_bionic_vault / lab_loot_serum_vault), 44 chunk mapgens (28 ids) have a
+     computer their rows use, not 32 (22); 32 is the count of chunks defining it themselves. They
+     are placed 58 times, all by place_nested (0 through a "nested" symbol mapping): 38 by maps,
+     20 by other chunks. The four lab_*_vault ids are placed only through "else_chunks".
+   - Wrong direction: "judged in each parent through the overlay". The overlay draws one chunk
+     per placement (the heaviest "chunks" id, then that id's heaviest mapgen) and never
+     "else_chunks". 15 of the 58 placements pick a computer chunk that isn't the heaviest option
+     (lab_mutagen_8x8_vault_east is 5% beside lab_mutagen_8x8_east's 95%), the vaults are only
+     in else_chunks, and lab_mutagen_8x8_vault_west has 8 mapgens. Through the overlay most chunk
+     consoles would never be judged. Instead: in each parent, judge every computer chunk each
+     place_nested entry can pick (every "chunks" and "else_chunks" option, every mapgen of the
+     id, the entry's rotation), each laid alone over the parent's grid (rows + the drawn
+     overlay), and say which pick it is: "if chunk X (5%) is picked, its console at (x, y)
+     reaches nothing". A chunk placed by a chunk is judged in the top-level parent, and the
+     finding points at the top-level place_nested entry (with the path, as overlay findings do).
+     Several parents placing the same chunk each report it: one finding per (parent entry,
+     pick), not per door.
+   - Wrong assumption: "none of those chunks holds its target terrain directly". All 27 door
+     consoles in chunks have their target door inside the chunk: in its own rows ('=') or from
+     its palette ('L' in the vaults). So a chunk opened on its own does get a reach check (its
+     author edits it there; the 8c reach display already works in a chunk). The chunk is taken as
+     one tile (no OMT cut inside it). A console on the chunk's edge may have its stand cells in
+     the parent: with no stand cell inside the chunk, that's a note, not a warning; a door
+     option reaching nothing is a warning, as in maps.
+   - Found in BN (mapbuffer::add_computer, jmapgen_computer::apply): a computer whose cell isn't
+     in a resident submap gets nullptr, and apply() then calls cpu->add_option on it (a crash,
+     not a dropped console). So a chunk console on the overhang past its tile (ChunkOverlay's
+     overhang) is a warning at least, until residency during mapgen is checked. Not verified:
+     whether the neighbouring submaps are resident while a tile generates; no core case found
+     yet (count it in 8d).
+   - Palette computers: the plan holds. 5 palettes (industrial_center_palette 'A', school_palette
+     '6', lab_loot_bionic_vault '6', lab_loot_serum_vault '6', lab_palette_map_computer '6'),
+     none included by another palette or used through a distribution/param, listed directly by
+     2 + 4 + 5 + 5 + 2 = 18 mapgens; some of those are chunks (the vaults, lab_room_7x7_wall_nw),
+     so the impact warning must list chunk users "via" their parents (PaletteImpact does).
+     - PaletteImpact already sees a computer edit: key_signature compares every per-key kind,
+       extras included. Only the warning before applying is new.
+     - PaletteDocument snapshots only EDITED (palettes, mapping, terrain, furniture): "computers"
+       must join EDITED and MEMBER_ORDER, or its changes aren't undoable.
+     - ComputerDialog's reach list (per painted console) exists only for a map. For a palette key
+       it lists the using maps (PaletteImpact) with each one's reach line, or says the key is
+       judged in each map; it can't show one map's reach.
+   - 8d accept (revised): the independent pass counts, per parent place_nested entry and pick,
+     the chunk consoles with a door option reaching nothing (rotation included); the Validator
+     gives the same count, each looked at. Chunks alone: count the 27 door consoles' warnings
+     (the door is inside each chunk, but whether it's in range wasn't checked). The overhang count is recorded.
  Then the "Later milestones" list.
 
 Explicitly out of scope until the later milestones: tilesets, preview rolls, z-level linking, update_mapgen,
