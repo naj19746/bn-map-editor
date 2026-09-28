@@ -204,7 +204,18 @@ func test_main_scene_edits_map() -> void:
 	main._new_map_dialog.base_edit.text = "stage3_test_map"
 	main._new_map_dialog.width.value = 2
 	main._new_map_dialog._autofill()
-	check(not main._new_map_dialog.get_ok_button().disabled, main._new_map_dialog._info.text)
+	var fill: IdCompleter = main._new_map_dialog.fill_completer
+	main._new_map_dialog.fill_edit.text = "t_nope_"
+	main._new_map_dialog.fill_edit.text_changed.emit("t_nope_")
+	check(main._new_map_dialog.get_ok_button().disabled, "an unknown fill_ter is refused")
+	main._new_map_dialog.fill_edit.text = "t_gras"
+	fill.update()
+	var grass := range(fill.list.item_count).filter(func(i: int) -> bool:
+		return fill.list.get_item_text(i) == "t_grass")
+	if check_eq(grass.size(), 1, "fill_ter suggests terrain"):
+		fill.accept(grass[0])
+	check_eq(main._new_map_dialog.fill_edit.text, "t_grass")
+	check(not main._new_map_dialog.get_ok_button().disabled, "taking a suggestion re-checks the dialog: " + main._new_map_dialog._info.text)
 	main._new_map_dialog._on_confirmed()
 	check_eq(main.maps.size(), 2, "new map opened in a tab")
 	check_eq(main.current_map().doc.size(), Vector2i(48, 24))

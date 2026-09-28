@@ -446,8 +446,10 @@ func test_main_scene_palette_editor() -> void:
 	check(not ed.doc.file.is_dirty())
 
 	# Includes.
-	ed.include_edit.text = "inner"
-	ed.add_include()
+	ed.include_edit.text = "inn"
+	ed.include_completer.update()
+	check_eq(ed.include_completer.list.get_item_text(0), "inner", "palette ids suggested")
+	ed.include_completer.accept(0)
 	check_eq(ed.doc.includes(), ["inner"])
 	check_eq(ed.includes.item_count, 1)
 	ed.include_edit.text = "pal"

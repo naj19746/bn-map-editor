@@ -7,7 +7,8 @@ extends VBoxContainer
 ## one in N, a plain int for place_loot). Entries BN drops or reads oddly
 ## are listed in red with the reason. A place_nested entry also shows the
 ## chunk it draws and a chunk picker; a place_computers entry is edited
-## with a ComputerEditor instead of JSON fields.
+## with a ComputerEditor instead of JSON fields. Id fields (items, groups,
+## monsters, vehicles, terrain, ...) suggest known ids as they're typed.
 
 ## An entry was selected in the list ("" for none).
 signal placement_selected(member: String, index: int)
@@ -33,6 +34,8 @@ var list: Tree
 var kind_picker: OptionButton
 ## key -> the LineEdit editing that field of the selected entry.
 var editors := {}
+## key -> the IdCompleter of an id field's editor (items, monsters, ...).
+var completers := {}
 ## The chunk picker (place_nested only): an id, its weight, and matching ids.
 var chunk_edit: LineEdit
 var chunk_weight: SpinBox
@@ -452,6 +455,7 @@ func _rebuild_inspector() -> void:
 		_fields.remove_child(c)
 		c.queue_free()
 	editors.clear()
+	completers.clear()
 	var p := doc.placement(member, index) if doc and member else null
 	_problems.text = ""
 	if p == null:
@@ -515,6 +519,10 @@ func _add_field(p: Placement, key: String, type: String, help: String) -> void:
 			commit_field(key))
 	_fields.add_child(edit)
 	editors[key] = edit
+	var kind := Validator.field_id_kind(p.member, key, p.entry) if type == "id" else ""
+	if kind:
+		completers[key] = IdCompleter.new(edit, func() -> PackedStringArray:
+			return Validator.id_candidates(doc.index, kind) if doc else PackedStringArray())
 
 
 func _type_of(key: String) -> String:

@@ -968,6 +968,52 @@ func _known(kind: String, id: String) -> bool:
 	return index.has_id(kind, id)
 
 
+## The id kind (a key of ID_KINDS) field [param key] of a [param member]
+## entry names, as _check_piece reads it, or "" when it isn't an id. A
+## "set" entry's "id" depends on its operation in [param entry].
+static func field_id_kind(member: String, key: String, entry: Dictionary) -> String:
+	match member:
+		"place_loot":
+			return {"group": "item_group", "item": "item"}.get(key, "")
+		"place_monster":
+			if key == "monster":
+				return "monster"
+		"set":
+			if key != "id":
+				return ""
+			for form in ["point", "set", "line", "square"]:
+				if entry.get(form) is String:
+					return SET_OPERATIONS.get(entry[form], "")
+			return ""
+	var kind: String = MEMBER_PIECES.get(member, "")
+	if TILE_WRAPPERS.has(kind):
+		return ("trap" if kind == "traps" else kind) if key == TILE_WRAPPERS[kind] else ""
+	for spec: Array in PIECE_FIELDS.get(kind, []):
+		if spec[0] == key:
+			return spec[1]
+	return ""
+
+
+## Every id of [param kind] (a key of ID_KINDS) [param index] knows, sorted:
+## the ids _known accepts (the "nothing" id only where the index has it).
+static func id_candidates(index: DataIndex, kind: String) -> PackedStringArray:
+	var ids := {}
+	match kind:
+		"terrain": ids = index.terrain
+		"furniture": ids = index.furniture
+		"item_group": ids = index.item_groups
+		"group_or_item": ids = index.item_groups.merged(index.ids.get("item", {}))
+		"monster_group": ids = index.monster_groups
+		"vehicle_group": ids = index.ids.get("vehicle_group", {}).merged(index.ids.get("vehicle", {}))
+		"chunk": ids = index.nested
+		"oter_type": ids = index.overmap_terrain
+		"fuel": return PackedStringArray(FUELS.slice(1))
+		_: ids = index.ids.get(kind, {})
+	var out := PackedStringArray(ids.keys())
+	out.sort()
+	return out
+
+
 ## " in the loaded mods" when mods other than core are loaded: an id from a
 ## mod that isn't loaded is unknown here.
 func _mods_note() -> String:

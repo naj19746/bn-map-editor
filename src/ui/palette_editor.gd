@@ -33,6 +33,8 @@ var terrain: NewSymbolDialog.IdPicker
 var furniture: NewSymbolDialog.IdPicker
 var includes: ItemList
 var include_edit: LineEdit
+## Suggests palette ids in [member include_edit].
+var include_completer: IdCompleter
 var users: ItemList
 var move_keys: OptionButton
 var status: Label
@@ -177,6 +179,10 @@ func _init() -> void:
 	include_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	include_edit.text_submitted.connect(func(_t: String) -> void: add_include())
 	inc_buttons.add_child(include_edit)
+	include_completer = IdCompleter.new(include_edit, func() -> PackedStringArray:
+		var ids := PackedStringArray(session.index.palettes.keys() if session else [])
+		ids.sort()
+		return ids)
 	_button(inc_buttons, "Add", add_include)
 	_button(inc_buttons, "Remove", remove_include)
 	_button(inc_buttons, "Up", move_include.bind(-1))

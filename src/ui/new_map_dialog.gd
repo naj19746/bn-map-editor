@@ -16,6 +16,8 @@ var width: SpinBox
 var height: SpinBox
 var ids_edit: TextEdit
 var fill_edit: LineEdit
+## Suggests terrain ids in [member fill_edit].
+var fill_completer: IdCompleter
 var palettes_edit: LineEdit
 var path_edit: LineEdit
 var overmap_check: CheckBox
@@ -62,6 +64,8 @@ func _init() -> void:
 	fill_edit = _field(grid, "fill_ter:", LineEdit.new())
 	fill_edit.text = EditSession.DEFAULT_FILL
 	fill_edit.text_changed.connect(func(_t: String) -> void: _validate())
+	fill_completer = IdCompleter.new(fill_edit, func() -> PackedStringArray:
+		return Validator.id_candidates(_session.index, "terrain") if _session else PackedStringArray())
 	palettes_edit = _field(grid, "Palettes:", LineEdit.new())
 	palettes_edit.placeholder_text = "optional, e.g. standard_domestic_palette"
 	palettes_edit.text_changed.connect(func(_t: String) -> void: _validate())

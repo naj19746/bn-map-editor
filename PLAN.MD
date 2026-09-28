@@ -94,6 +94,12 @@ Later milestones:
    id pickers and structured editors, e.g. computer options; computers are planned as Stage 8).
  - The Select tool (copy/paste/move a block of rows, from the UI sketch) is still open from Stage 3;
    when it's built, moving a block should offer to carry the placements anchored in it.
+ - TODO: a weighted-id-list editor for place_nested "chunks" / "else_chunks" in the Placements
+   inspector (5788 options in core, edited today as JSON text next to the chunk picker): one row
+   per option with its id (IdCompleter over nested chunk ids, "null" allowed), weight (BN's
+   default 100: a plain id when 100, [id, weight] otherwise, keeping how each was written) and
+   remove/reorder. It can replace the chunk picker's "Add chunk" row. Reuse it for place_monster's
+   weighted "monster" list (89 entries, see "Added after 8d") and "monster" symbol mappings.
  - A preview roll can take each kind's chance meaning and default from Placement.KINDS, and must
    scale by BN's spawn-rate options the way each placement class does (see the field hints).
  - Conditional nested pieces (neighbors/joins/connections; noted after Stage 6): the overlay always
@@ -740,7 +746,8 @@ Development stages (each ends with a headless-testable acceptance check):
        map's problems; ids are Stage 7 (item/vehicle ids aren't indexed yet).
      - Test fixture pitfall: Godot's JSON.stringify sorts keys by default (TempTree uses it), so a
        fixture whose key order matters must be written as text (JSON.stringify(v, " ", false)).
-   - Not done / open: id pickers/autocomplete and id validation (Stage 7); a "set" line is drawn as its
+   - Not done / open: id pickers/autocomplete and id validation (Stage 7; autocomplete done after
+     8d: the Placements inspector's id fields suggest ids, see below); a "set" line is drawn as its
      bounding box, and resizing a line/square sets x/y and x2/y2 to single cells; stacked entries pick
      the smallest (others via the list; no click-cycling); dropped entries outside the map are only
      selectable from the list; labels can overlap on dense maps; no multi-select; "set" and
@@ -1373,6 +1380,25 @@ Development stages (each ends with a headless-testable acceptance check):
      the chunk consoles with a door option reaching nothing (rotation included); the Validator
      gives the same count, each looked at. Chunks alone: count the 27 door consoles' warnings
      (the door is inside each chunk, but whether it's in range wasn't checked). The overhang count is recorded.
+ Added after 8d (2026-09-27): id autocomplete in the Placements inspector.
+   - Every id field (place_items item, place_loot group/item, place_monster monster/group,
+     place_monsters, place_vehicles, place_terrain/furniture/traps, "set" id by its operation, fields,
+     npcs, rubble, ...) gets an IdCompleter: a dropdown of the known ids (prefix matches first, then
+     substring; at most 50), Up/Down + Enter/Tab or a click takes one and commits it as one edit.
+     Which ids a field names comes from Validator.field_id_kind (the same tables the id checks use),
+     the ids from Validator.id_candidates (what _known accepts). JSON text ("[..." / "{...") gets none.
+   - The list is a CanvasLayer child of the LineEdit, so it isn't clipped by the inspector's scroll
+     and a click on it doesn't take the field's focus (checked in a window: one undo step).
+   - Also on the palette editor's include field (palette ids) and the New map dialog's fill_ter
+     (terrain). Taking a suggestion emits text_changed too, so a dialog re-checks its fields; inside
+     a dialog the list shrinks to fit the dialog's window.
+   - Weighted monster lists, counted (core + mods): 89 of 1794 place_monster entries write
+     "monster" as a list (63 core, 26 mods, 22 files), with 299 plain ids and only 13 [id, weight]
+     pairs; plus 4 "monster" symbol mappings. Too few for a widget of their own, but the same
+     shape as place_nested "chunks"/"else_chunks" (5788 options in core, JSON text today): a shared
+     weighted-id-list editor (rows of id + weight, each id with an IdCompleter) would cover both.
+   - Not done: the New map dialog's Palettes field (several ids in one field: needs completing the
+     last word), snippets/zone types/factions (not indexed), the weighted-list editor above.
  Then the "Later milestones" list.
 
 Explicitly out of scope until the later milestones: tilesets, preview rolls, z-level linking, update_mapgen,

@@ -45,7 +45,8 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   console could go).
 - `src/ui/`: controls built in code (`MapCanvas`, `LegendPanel`, `MapBrowser`, `ModsDialog`,
   `NewSymbolDialog`, `NewMapDialog`, `SyncDialog`, `PaletteEditor`, `PlacementsPanel`,
-  `ProblemsPanel`, `ComputerEditor`, `ComputerDialog`). `main.gd`
+  `ProblemsPanel`, `ComputerEditor`, `ComputerDialog`, `IdCompleter`: an id dropdown under a
+  LineEdit). `main.gd`
   builds the window;
   `godot --path . -- --open <id> [--bn <path>] [--workspace <path>]` opens a map at startup.
 - `tests/test_*.gd`: test files; every `test_*` method runs. They extend

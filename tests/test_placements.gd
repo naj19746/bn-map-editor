@@ -50,6 +50,10 @@ func _setup() -> void:
 			{"type": "overmap_terrain", "id": ["tower_nw", "tower_ne", "tower_sw", "tower_se", "lawn"], "name": "x"},
 			{"type": "item_group", "id": "stuff", "items": []},
 			{"type": "monstergroup", "name": "GROUP_ZOMBIE", "monsters": []},
+			{"type": "MONSTER", "id": "mon_zombie"},
+			{"type": "MONSTER", "id": "mon_dog"},
+			{"type": "GENERIC", "id": "rock"},
+			{"type": "item_group", "id": "rocks_pile", "items": []},
 			{"type": "palette", "id": "pal", "terrain": {"x": "t_grass"}, "items": {"x": {"item": "stuff", "chance": 5}}},
 		],
 		# Written in key order (TempTree's JSON.stringify would sort keys).
@@ -352,6 +356,63 @@ func test_field_text() -> void:
 	check_eq(P.value_text(null, "int"), "")
 
 
+func test_id_completion() -> void:
+	var V := Validator
+	check_eq(V.field_id_kind("place_items", "item", {}), "group_or_item")
+	check_eq(V.field_id_kind("place_item", "item", {}), "item")
+	check_eq(V.field_id_kind("place_loot", "group", {}), "item_group")
+	check_eq(V.field_id_kind("place_loot", "item", {}), "item")
+	check_eq(V.field_id_kind("place_monster", "monster", {}), "monster")
+	check_eq(V.field_id_kind("place_monster", "group", {}), "monster_group")
+	check_eq(V.field_id_kind("place_monsters", "monster", {}), "monster_group")
+	check_eq(V.field_id_kind("place_vehicles", "vehicle", {}), "vehicle_group")
+	check_eq(V.field_id_kind("place_terrain", "ter", {}), "terrain")
+	check_eq(V.field_id_kind("place_traps", "trap", {}), "trap")
+	check_eq(V.field_id_kind("set", "id", {"point": "furniture"}), "furniture")
+	check_eq(V.field_id_kind("set", "id", {"point": "radiation"}), "")
+	check_eq(V.field_id_kind("place_items", "chance", {}), "")
+	check_eq(V.field_id_kind("place_nested", "chunks", {}), "")
+
+	_setup()
+	check_eq(V.id_candidates(_index, "group_or_item"), PackedStringArray(["rock", "rocks_pile", "stuff"]))
+	check_eq(V.id_candidates(_index, "monster"), PackedStringArray(["mon_dog", "mon_zombie"]))
+	check_eq(V.id_candidates(_index, "monster_group"), PackedStringArray(["GROUP_ZOMBIE"]))
+	_cleanup()
+
+	var ids := PackedStringArray(["a_rock", "rock", "rocks_pile", "Rocky", "stuff"])
+	check_eq(IdCompleter.matches(ids, "rock"), PackedStringArray(["rock", "rocks_pile", "Rocky", "a_rock"]),
+			"prefix matches first, case ignored")
+	check_eq(IdCompleter.matches(ids, ""), ids, "everything for no text")
+	check_eq(IdCompleter.matches(ids, "ROCK", 2), PackedStringArray(["rock", "rocks_pile"]), "limited")
+
+	var edit := LineEdit.new()
+	var submitted := []
+	edit.text_submitted.connect(func(t: String) -> void: submitted.append(t))
+	var c := IdCompleter.new(edit, func() -> PackedStringArray: return ids)
+	edit.text = "stuff"
+	c.update()
+	check(not c.is_open(), "closed when only the text itself matches")
+	edit.text = "[\"rock\", 5]"
+	c.update()
+	check(not c.is_open(), "no suggestions for JSON")
+	edit.text = "roc"
+	c.update()
+	check_eq(c.list.item_count, 4)
+	var down := InputEventKey.new()
+	down.pressed = true
+	down.keycode = KEY_DOWN
+	c._on_edit_input(down)
+	c._on_edit_input(down)
+	var enter := InputEventKey.new()
+	enter.pressed = true
+	enter.keycode = KEY_ENTER
+	c._on_edit_input(enter)
+	check_eq(edit.text, "rocks_pile", "Down, Down, Enter takes the second")
+	check_eq(submitted, ["rocks_pile"], "and submits it")
+	check(not c.is_open())
+	edit.free()
+
+
 func test_main_scene_placements() -> void:
 	if not JsonFormatter.new().is_available():
 		skip("json_formatter not built")
@@ -415,9 +476,17 @@ func test_main_scene_placements() -> void:
 	canvas.cell_released.emit(Vector2i(4, 3), false)
 	check_eq(doc.object().get("place_monster"), [{"monster": "", "x": [2, 4], "y": [2, 3]}])
 	check_eq([panel.member, panel.index], ["place_monster", 0], "the new entry is selected")
-	panel.editors["monster"].text = "mon_zombie"
-	panel.commit_field("monster")
-	check_eq(doc.object().place_monster[0].monster, "mon_zombie")
+	var completer: IdCompleter = panel.completers.get("monster")
+	if check(completer != null, "the monster field suggests ids"):
+		panel.editors["monster"].text = "zom"
+		completer.update()
+		check(completer.is_open(), "suggestions shown")
+		check_eq(completer.list.get_item_text(0), "mon_zombie")
+		completer.accept(0)
+	check_eq(doc.object().place_monster[0].monster, "mon_zombie", "taking a suggestion commits it")
+	check_eq(panel.editors["monster"].text, "mon_zombie")
+	check(panel.completers.has("group"), "and the group field")
+	check(not panel.completers.has("chance"), "not a number field")
 	main.undo()
 	main.undo()
 	check(not doc.object().has("place_monster"), "undone")
