@@ -183,22 +183,7 @@ func reach_text() -> String:
 	if reaches.is_empty():
 		return "'%s' isn't painted yet." % _editing
 	for pair: Array in reaches:
-		var at: Vector2i = pair[0]
-		var reach: Validator.Reach = pair[1]
-		var parts := PackedStringArray()
-		for a in actions:
-			if not reach.targets.has(a):
-				parts.append("%s works on the whole z-level" % a)
-				continue
-			var cells: Array = reach.targets[a]
-			var shown := cells.slice(0, 4).map(func(c: Vector2i) -> String: return "(%d, %d)" % [c.x, c.y])
-			parts.append("%s reaches %d door%s%s" % [a, cells.size(), "" if cells.size() == 1 else "s",
-					": " + ", ".join(shown) + (" ..." if cells.size() > 4 else "") if cells.size() else " (nothing)"])
-		var where := "At (%d, %d): " % [at.x, at.y]
-		if reach.stands.is_empty():
-			lines.append(where + "no cell next to it can be stood on")
-		else:
-			lines.append(where + "; ".join(parts))
+		lines.append(ConsoleReachView.line(pair[0], pair[1], actions))
 	return "\n".join(lines)
 
 

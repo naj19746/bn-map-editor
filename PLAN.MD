@@ -1029,7 +1029,7 @@ Development stages (each ends with a headless-testable acceptance check):
      mark symbols with findings; findings of unopened maps (a project-wide scan) and of palettes
      outside the current map's use; saving with load errors only warns; the Problems tab can't
      fix anything itself (Add missing overmap_terrain stays in the Edit menu).
- Stage 8 - Computers (from the later milestones; planned 2026-09-27).  [8a, 8b DONE 2026-09-27]
+ Stage 8 - Computers (from the later milestones; planned 2026-09-27).  [8a, 8b, 8c DONE 2026-09-27]
    - Goal: a user can make a computer that unlocks a door without reading computer_session.cpp. It
      doesn't have to cover every action; door control must be easy, and the editor must show whether
      the door is actually reached.
@@ -1150,8 +1150,58 @@ Development stages (each ends with a headless-testable acceptance check):
      - Door-option warnings read "it does nothing in game" rather than "BN silently skips it".
      - Found: Godot 4.7 doesn't emit a Range's value_changed outside the scene tree; UI tests emit
        it themselves.
-   - Not done / open (8c, 8d): the canvas reach display, "Control with a computer..." on a door
-     cell, computers in the palette editor (the legend says it can't edit them yet), chunk computers judged in their parents, "set"/place_terrain doors in reach.
+   - Result (8c): tools/run_tests.sh passes 122 tests. tests/test_computers_bn.gd: police "5" at
+     (1, 10) has stand cells (1, 9), (2, 9), (2, 10) and "6" at (22, 5) has (21, 4), (22, 4),
+     (21, 5) (checked against the rows); each view's targets are exactly {(2, 11)} / {(21, 6)},
+     reached from every stand cell. tests/test_computers.gd (fake BN): full vs partial targets (a
+     door 9 below the console is reached only from the stand cell above it), other locked doors,
+     the area 8 below the lowest stand cell, a radius-25 "open" covering (0, 0)..(23, 23) and
+     nothing past x 23, a range place_computers entry (no console, a note), the cache dropped on
+     change, door_controllers, grouped undo, and the main-scene flow: right-click menu on floor
+     (disabled, "Not a door (t_floor).") and on a t_door_c in a wall -> "Make it a locked metal
+     door" (adds '+', one undo step) -> spots on both sides of the wall, not the door, the wall or
+     cells too far -> click -> '6' Door control painted, "No problems", the reach drawn with the
+     door solid and explained in the legend, gone on the Browser tab; again on the same door says
+     it's already unlocked; a second door reuses '6'; a secured computer isn't reused. Also the
+     Problems tab: selecting a NO_DOOR warning draws that console's reach. Drawing checked with a
+     non-headless screenshot of police_station ("5", "6", the spots for its (12, 14) door, and the
+     console placed at (7, 7)).
+   - Code (8c): src/view/console_reach_view.gd (ConsoleReachView: build() from Validator.console_reach
+     per console: consoles, stands, area (union of every stand cell's cut reach), outline
+     (segments), targets cell -> full, other_locked, lines for the panel; line() (also used by the
+     ComputerDialog); controllers(); console_spots()). MapDocument: consoles() and tile_grids()
+     cached, reach_view(key, place_index) cached per selection, all dropped on every change and
+     every painted cell; terrain_at(), chunk_terrain_source(), door_controllers(), console_spots(),
+     door_console_key(); begin_group()/end_group() merge the changes between them into one undo
+     step. MapCanvas: reach and spots drawn between the grid and the placements (stand cells blue,
+     reach outline cyan, doors green, faded when partial, other locked doors a red X, consoles
+     ringed); cell_context on a right click that doesn't move, Shift+F10 or the Menu key.
+     main.gd: _update_reach (Legend: the brush; Placements: the selected place_computers entry;
+     Problems: the selected console finding), the cell menu (Use as brush, Edit computer...,
+     Control with a computer...), control_door / lock_door / place_door_console /
+     cancel_console_mode (Esc, tab or tool change), show_drawer_tab + drawer_tab. Legend and
+     Placements panels: a reach_label with a color key and the per-console lines.
+   - Decisions (8c):
+     - Also on the Problems tab: selecting a console finding (NO_DOOR, NO_STAND, DOOR_ELSEWHERE,
+       OTHER_LOCKED, SHARED_DOOR) draws that console's reach; that's where a user looks when a door
+       isn't reached.
+     - The area is the union over stand cells and door actions, drawn as an outline only (no
+       shading), so radius 25 stays readable; stand cells and targets are shaded.
+     - "A door cell" = terrain id containing "door". A door whose terrain comes from a chunk is
+       refused with a reason (painting the parent's row wouldn't change it). The swap is a
+       confirmation, not silent: it changes the door's kind.
+     - Two undo steps, "Lock door at (x, y)" (add '+' if needed + paint) and "Door console at
+       (x, y)" (add the symbol if needed + paint), so cancelling the console keeps the lock.
+     - Spots: passable cells (not the door, not a console) in the door's tile with a passable
+       neighbour within 8 of the door. Walls aren't offered: consoles go on floor. BN's reach ignores
+       walls, so spots on the far side of a wall are offered too (both sides are legitimate).
+     - Reuse: only a map-own computer with an "unlock" option and security 0. Found with the
+       screenshot: police_station's "5" (security 3, failures) was reused, which drags a hack and
+       failures along unasked.
+     - Found: TabContainer ignores current_tab outside the tree (it stays 0), so main.gd records
+       the tab it asks for in drawer_tab (show_drawer_tab) and tests read that.
+   - Not done / open (8d): computers in the palette editor (the legend says it can't edit them
+     yet), chunk computers judged in their parents, "set"/place_terrain doors in reach.
  Checked after Stage 8b (2026-09-27, against BN 39f4883093 and core data; reviews 8c, 8d):
    - Done early: "can stand here" (DataIndex TileDef.move_cost, passable()) went into 8a for the
      validator, so 8c needs no index work. Validator.Reach already has what the display draws:

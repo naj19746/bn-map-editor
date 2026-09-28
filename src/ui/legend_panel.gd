@@ -34,6 +34,8 @@ var _editable := true
 var _new_button: Button
 var _new_computer_button: Button
 var _edit_computer_button: Button
+## What the selected computer reaches (see set_reach()).
+var reach_label: Label
 
 
 func _init() -> void:
@@ -88,6 +90,34 @@ func _init() -> void:
 		_tree.deselect_all()
 		key_selected.emit(""))
 	add_child(_tree)
+	reach_label = reach_label_new()
+	add_child(reach_label)
+
+
+## A label for set_reach() text.
+static func reach_label_new() -> Label:
+	var l := Label.new()
+	l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	l.visible = false
+	l.custom_minimum_size = Vector2(200, 0)
+	return l
+
+
+## Shows what [param view] (the selected computer's reach, drawn on the
+## map) means, or hides the text for null.
+func set_reach(view: ConsoleReachView) -> void:
+	show_reach(reach_label, view)
+
+
+static func show_reach(label: Label, view: ConsoleReachView) -> void:
+	label.visible = view != null
+	if view == null:
+		return
+	var lines := PackedStringArray(["Console reach (on the map): blue = where the player stands, " \
+			+ "outline = what door actions reach, green = doors they change (faded: from some stand cells " \
+			+ "only), red X = other locked doors they never open."])
+	lines.append_array(view.lines)
+	label.text = "\n".join(lines)
 
 
 ## Shows [param ascii]'s symbols. [param editable] enables "New symbol...".

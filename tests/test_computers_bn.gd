@@ -93,6 +93,29 @@ func test_police_station_reach() -> void:
 		check(not reach.other_locked.is_empty(), key + " has other locked doors nearby")
 
 
+## The canvas's view of police "5" and "6": exactly the doors above, from
+## every cell a player can stand next to each console.
+func test_police_station_reach_view() -> void:
+	var index := _core_index()
+	if index == null:
+		return
+	var ws := TempTree.make({})
+	var session := EditSession.new(index, Workspace.open(ws, BnEnv.bn_path()))
+	var doc := session.open(index.mapgens_for("police")[0])
+	var want := {"5": Vector2i(2, 11), "6": Vector2i(21, 6)}
+	for key: String in want:
+		var v := doc.reach_view(key)
+		check_eq(v.consoles.size(), 1, key)
+		print("     '%s' at %s: stands %s, %d cells in reach, other locked %s" % [key, v.consoles[0],
+				v.stands.keys(), v.area.size(), v.other_locked.keys()])
+		check_eq(v.targets, {want[key]: true}, "'%s' reaches its door from every stand cell" % key)
+		for s: Vector2i in v.stands:
+			check((s - v.consoles[0]).abs().x <= 1 and (s - v.consoles[0]).abs().y <= 1, "next to it")
+			check(v.area.has(s), "a stand cell is in reach of itself")
+	session.close(doc)
+	TempTree.remove(ws)
+
+
 func test_edit_one_option_diff() -> void:
 	var index := _core_index()
 	if index == null:

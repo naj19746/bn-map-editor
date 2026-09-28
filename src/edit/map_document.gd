@@ -69,6 +69,13 @@ var _option_keys := {}
 var _overlay: ChunkOverlay
 var _findings: Array[Validator.Finding] = []
 var _findings_built := false
+## Changes pushed between begin_group() and end_group() go into this one.
+var _group: Change
+## Console cells and tile grids, and reach views by selection; built on
+## first use after each change (the canvas asks on every redraw).
+var _consoles: Variant = null
+var _grids: Array[PackedStringArray] = []
+var _reach_views := {}
 
 
 ## Returns null if objects[[param i]] isn't a mapgen with an "object".
@@ -153,6 +160,7 @@ func set_cells(points: Array[Vector2i], key: String) -> void:
 		rows[p.y] = true
 	if not rows.is_empty():
 		_write_rows(rows.keys())
+		_forget_reach()
 		cells_changed.emit(changed_points)
 
 
@@ -400,14 +408,109 @@ func set_computer(key: String, data: Dictionary, name := "") -> String:
 ## "set" or place_terrain makes).
 func console_reaches(key: String, data: Dictionary) -> Array:
 	var out := []
-	var consoles := Validator.console_cells(resolved, _placements)
-	var grids := Validator.tile_grids(resolved, chunk_overlay(), consoles)
+	var consoles := consoles()
 	var cells: Array = consoles.keys()
 	cells.sort()
 	for at: Vector2i in cells:
 		if consoles[at][0] == key:
-			out.append([at, Validator.console_reach(index, resolved.size, grids, at, data)])
+			out.append([at, Validator.console_reach(index, resolved.size, tile_grids(), at, data)])
 	return out
+
+
+## Validator.console_cells() of the map as it is now.
+func consoles() -> Dictionary:
+	if _consoles == null:
+		_consoles = Validator.console_cells(resolved, _placements)
+	return _consoles
+
+
+## Validator.tile_grids() of the map as it is now: [terrain, furniture]
+## ids per cell, rows plus chunks, consoles as t_console.
+func tile_grids() -> Array[PackedStringArray]:
+	if _grids.is_empty():
+		_grids = Validator.tile_grids(resolved, chunk_overlay(), consoles())
+	return _grids
+
+
+## The terrain id at [param cell] (see tile_grids()).
+func terrain_at(cell: Vector2i) -> String:
+	return tile_grids()[0][cell.y * resolved.size.x + cell.x]
+
+
+## The chunk placing [param cell]'s terrain, or "" if the map's own rows do.
+func chunk_terrain_source(cell: Vector2i) -> String:
+	var overlay := chunk_overlay()
+	if overlay.size != resolved.size or overlay.ter[cell.y * resolved.size.x + cell.x].is_empty():
+		return ""
+	for st in overlay.stamps_at(cell):
+		return st.chunk_id
+	return "a nested chunk"
+
+
+## What the canvas shows for the computer of symbol [param key] (or, with
+## [param place_index] >= 0, of place_computers #place_index). Null if
+## there is no such computer.
+func reach_view(key: String, place_index := -1) -> ConsoleReachView:
+	var id := "%s#%d" % [key, place_index]
+	if _reach_views.has(id):
+		return _reach_views[id]
+	var data: Variant = null
+	var cells: Array[Vector2i] = []
+	var consoles := consoles()
+	var sorted: Array = consoles.keys()
+	sorted.sort()
+	for at: Vector2i in sorted:
+		var c: Array = consoles[at]
+		if (place_index < 0 and c[0] == key and key) or (place_index >= 0 and c[0] == "" and c[3] == place_index):
+			cells.append(at)
+			data = c[1]
+	var note := ""
+	if data == null and place_index >= 0:
+		var p := placement("place_computers", place_index)
+		if p and p.entry is Dictionary:
+			data = p.entry
+			note = "Its x/y is a range: BN puts the console on one random cell of it, so no reach is shown." \
+					if p.status == Placement.Status.OK else "BN doesn't place it (see Problems)."
+	elif data == null and key:
+		var info: ResolvedMapgen.SymbolInfo = resolved.symbols.get(key)
+		if info and info.extras.has("computers"):
+			var list := Computer.all_in(info.extras.computers[-1].value)
+			if not list.is_empty():
+				data = list[-1]
+				note = "'%s' isn't painted yet: paint it where the console goes." % key
+	if data == null:
+		_reach_views[id] = null
+		return null
+	var v := ConsoleReachView.build(index, resolved.size, tile_grids(), cells, data)
+	if note:
+		v.lines.append(note)
+	_reach_views[id] = v
+	return v
+
+
+## The consoles whose unlock or open options change [param door]:
+## [console cell, key ("" for a placement)].
+func door_controllers(door: Vector2i) -> Array:
+	return ConsoleReachView.controllers(index, resolved.size, tile_grids(), consoles(), door)
+
+
+## Where a new Door control console could go to unlock [param door].
+func console_spots(door: Vector2i) -> Array[Vector2i]:
+	return ConsoleReachView.console_spots(index, resolved.size, tile_grids(), door)
+
+
+## A symbol to reuse for a new door console: the first one (by key) whose
+## computer the map itself defines, has an "unlock" option and needs no
+## hack (security 0), else "". A secured computer isn't reused: its
+## failures and login would come along unasked.
+func door_console_key() -> String:
+	var keys: Array = resolved.symbols.keys()
+	keys.sort()
+	for key: String in keys:
+		var data: Variant = computer(key)
+		if data is Dictionary and Computer.of(data).actions().has("unlock") and Computer.of(data).security() == 0:
+			return key
+	return ""
 
 
 ## Why add_computer_symbol([param key], ...) would fail, or "".
@@ -466,10 +569,50 @@ func redo() -> void:
 
 
 func _push(c: Change) -> void:
+	if _group:
+		_merge(_group, c)
+		_redo.clear()
+		_resolve()
+		changed.emit(_is_full(c))
+		return
 	_undo.append(c)
 	_redo.clear()
 	_resolve()
 	changed.emit(_is_full(c))
+
+
+## Makes the changes until end_group() one undo step named [param name].
+func begin_group(name: String) -> void:
+	end_stroke()
+	_group = Change.new()
+	_group.name = name
+
+
+func end_group() -> void:
+	end_stroke()
+	var g := _group
+	_group = null
+	if g and not g.is_empty():
+		_undo.append(g)
+
+
+## Adds [param c] (made after [param into]) to [param into].
+static func _merge(into: Change, c: Change) -> void:
+	for p: Vector2i in c.cells:
+		if into.cells.has(p):
+			into.cells[p][1] = c.cells[p][1]
+		else:
+			into.cells[p] = c.cells[p].duplicate()
+	for member: String in c.before:
+		if not into.before.has(member):
+			into.before[member] = c.before[member]
+	for member: String in c.after:
+		into.after[member] = c.after[member]
+	if into.order_before.is_empty():
+		into.order_before = c.order_before
+	if not c.order_after.is_empty():
+		into.order_after = c.order_after
+	into.rows_created = into.rows_created or c.rows_created
 
 
 static func _is_full(c: Change) -> bool:
@@ -556,6 +699,13 @@ func refresh_overlay() -> void:
 func forget_findings() -> void:
 	_findings = []
 	_findings_built = false
+	_forget_reach()
+
+
+func _forget_reach() -> void:
+	_consoles = null
+	_grids = []
+	_reach_views.clear()
 
 
 ## True when the current overlay draws chunk [param chunk_id], or a chunk

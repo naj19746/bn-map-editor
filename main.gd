@@ -9,6 +9,13 @@ extends Control
 ## Palette editor window edits palettes in the same session, and the Sync
 ## window pushes workspace files into BN.
 ##
+## With a computer selected (the brush symbol places one on the Legend tab,
+## a place_computers entry on the Placements tab, or a console finding on
+## the Problems tab) the canvas draws its reach. A right click on a cell
+## opens a cell menu; "Control with a computer..." on a door locks it (a
+## t_door_metal_locked symbol) and, unless a console already unlocks it,
+## offers the cells where a Door control console would reach it.
+##
 ## Command line (after "--"): --bn <path> overrides the BN checkout,
 ## --workspace <path> the workspace folder, and --open <id> opens a mapgen by
 ## om_terrain / nested id once loaded.
@@ -23,7 +30,14 @@ enum Menu {
 	NEW_MAP, NEW_CHUNK, SAVE, SAVE_ALL, WORKSPACE,
 	UNDO, REDO, NEW_SYMBOL, NEW_COMPUTER, ADD_OVERMAP, PALETTES, CHUNK_PARENTS,
 	SYNC,
+	CELL_PICK, CELL_EDIT_COMPUTER, CELL_DOOR_COMPUTER,
 }
+
+## The door terrain computers unlock (Computer.EFFECTS "unlock").
+const LOCKED_DOOR := "t_door_metal_locked"
+## Findings about a console: selecting one shows its reach.
+const CONSOLE_CODES := [Validator.Code.NO_STAND, Validator.Code.NO_DOOR, Validator.Code.DOOR_ELSEWHERE,
+		Validator.Code.OTHER_LOCKED, Validator.Code.SHARED_DOOR]
 
 const SEASONS := ["Spring", "Summer", "Autumn", "Winter"]
 ## Tool button hotkeys, by MapTool.Kind.
@@ -49,6 +63,11 @@ class OpenMap:
 	## The selected placement ("" for none).
 	var sel_member := ""
 	var sel_index := -1
+	## The console whose reach the Problems tab shows: [key, place_computers
+	## index] (see MapDocument.reach_view), or [].
+	var problem_console := []
+	## The door a new console is being placed for; x < 0 when not.
+	var console_door := -Vector2i.ONE
 
 
 ## False to skip loading on _ready (tests call load_index themselves).
@@ -81,6 +100,9 @@ var _canvas_area: Control
 var _empty_label: Label
 var _split: HSplitContainer
 var _drawer: TabContainer
+## The drawer's current tab (TabContainer ignores current_tab outside the
+## tree, so tests read this).
+var drawer_tab: Control
 var _browser: MapBrowser
 var _legend: LegendPanel
 var _placements_panel: PlacementsPanel
@@ -102,6 +124,12 @@ var _new_map_dialog: NewMapDialog
 var _sync_dialog: SyncDialog
 var _palette_editor: PaletteEditor
 var _unsaved_dialog: ConfirmationDialog
+var _cell_menu: PopupMenu
+## The cell the cell menu was opened on.
+var _menu_cell := -Vector2i.ONE
+## "Make it a locked metal door?" for "Control with a computer...".
+var _door_dialog: ConfirmationDialog
+var _pending_door := -Vector2i.ONE
 var _unsaved_files := PackedStringArray()
 var _after_unsaved := Callable()
 var _bn_override := ""
@@ -200,7 +228,7 @@ func load_index(path: String) -> void:
 		errors.append(session.workspace.error)
 	_errors_button.visible = not errors.is_empty()
 	_errors_button.text = "%d load errors" % errors.size()
-	_drawer.current_tab = _browser.get_index()
+	show_drawer_tab(_browser)
 	index_loaded.emit()
 
 
@@ -244,6 +272,7 @@ func _add_tab(doc: MapDocument) -> OpenMap:
 	m.canvas.cell_pressed.connect(_on_cell_pressed.bind(m))
 	m.canvas.cell_dragged.connect(_on_cell_dragged.bind(m))
 	m.canvas.cell_released.connect(_on_cell_released.bind(m))
+	m.canvas.cell_context.connect(_on_cell_context.bind(m))
 	doc.cells_changed.connect(_on_doc_cells_changed.bind(m))
 	doc.changed.connect(_on_doc_changed.bind(m))
 	doc.overlay_changed.connect(_on_overlay_changed.bind(m))
@@ -275,6 +304,7 @@ func close_tab(i: int, force := false) -> void:
 		_confirm_unsaved(PackedStringArray([rel]), func() -> void: close_tab(maps.find(m), true))
 		return
 	tool.cancel()
+	cancel_console_mode()
 	session.close(m.doc)
 	m.canvas.queue_free()
 	maps.remove_at(i)
@@ -300,10 +330,12 @@ func set_brush(key: String) -> void:
 	m.canvas.highlight_key = key
 	_legend.select_key(key)
 	_update_brush_label()
+	_update_reach(m)
 
 
 func set_tool(kind: MapTool.Kind) -> void:
 	tool.cancel()
+	cancel_console_mode()
 	placement_tool.cancel()
 	if kind != MapTool.Kind.PLACE:
 		placement_tool.armed = ""
@@ -327,6 +359,9 @@ func _update_brush_label() -> void:
 
 
 func _on_cell_pressed(cell: Vector2i, alt: bool, shift: bool, m: OpenMap) -> void:
+	if m.console_door.x >= 0 and not alt:
+		place_door_console(cell)
+		return
 	if tool.kind == MapTool.Kind.PLACE and not alt:
 		placement_tool.press(m.doc, cell, shift)
 		m.canvas.placement_preview = placement_tool.preview
@@ -359,7 +394,7 @@ func _on_picked(key: String) -> void:
 	set_brush(key)
 	var m := current_map()
 	if m:
-		_drawer.current_tab = _legend.get_index()
+		show_drawer_tab(_legend)
 		var info: ResolvedMapgen.SymbolInfo = m.doc.resolved.symbols.get(key)
 		if info == null:
 			_status.text = "'%s' isn't defined; define it with New symbol to paint it." % key
@@ -368,6 +403,7 @@ func _on_picked(key: String) -> void:
 func _on_doc_cells_changed(cells: Array[Vector2i], m: OpenMap) -> void:
 	m.ascii.update_cells(cells)
 	m.canvas.queue_redraw()
+	_update_reach(m)
 
 
 ## The document was re-resolved. Painted cells were already redrawn
@@ -386,6 +422,7 @@ func _on_doc_changed(full: bool, m: OpenMap) -> void:
 		_legend.show_map(m.ascii)
 		_update_problems()
 		_update_brush_label()
+	_update_reach(m)
 
 
 ## Gives [param m]'s view the map's current chunk overlay. True when the
@@ -404,6 +441,7 @@ func _on_overlay_changed(m: OpenMap) -> void:
 	if _update_overlay(m):
 		m.ascii.refresh()
 	m.canvas.queue_redraw()
+	_update_reach(m)
 	if m == current_map():
 		_placements_panel.refresh()
 		_update_problems()
@@ -455,6 +493,209 @@ func _on_computer_added(key: String, door_key: String) -> void:
 		", then '%s' for the door (within 8 cells of a cell next to the console, same overmap tile)" % door_key if door_key else ""]
 
 
+## Shows [param tab] in the side drawer.
+func show_drawer_tab(tab: Control) -> void:
+	_drawer.current_tab = tab.get_index()
+	if drawer_tab != tab:
+		drawer_tab = tab
+		if current_map():
+			_update_reach(current_map())
+
+
+## Shows the reach of [param m]'s selected computer on its canvas and in
+## the drawer tab that selects it (see the class notes).
+func _update_reach(m: OpenMap) -> void:
+	if m == null or _drawer == null:
+		return
+	var view: ConsoleReachView = null
+	var tab := drawer_tab
+	if m == current_map():
+		if tab == _legend and m.brush:
+			view = m.doc.reach_view(m.brush)
+		elif tab == _placements_panel and m.sel_member == "place_computers":
+			view = m.doc.reach_view("", m.sel_index)
+		elif tab == _problems_panel and not m.problem_console.is_empty():
+			view = m.doc.reach_view(m.problem_console[0], m.problem_console[1])
+	m.canvas.reach = view
+	if m == current_map():
+		_legend.set_reach(view if tab == _legend else null)
+		_placements_panel.set_reach(view if tab == _placements_panel else null)
+
+
+func _on_cell_context(cell: Vector2i, at: Vector2, m: OpenMap) -> void:
+	open_cell_menu(cell)
+	if is_inside_tree():
+		_cell_menu.popup(Rect2i(Vector2i(m.canvas.get_screen_position() + at), Vector2i.ZERO))
+
+
+## Fills the cell menu for [param cell] of the current map.
+func open_cell_menu(cell: Vector2i) -> void:
+	var m := current_map()
+	if m == null:
+		return
+	_menu_cell = cell
+	_cell_menu.clear()
+	var key := m.doc.resolved.cells[cell.y][cell.x]
+	_cell_menu.add_item("Use '%s' as the brush" % LegendPanel._show_key(key), Menu.CELL_PICK)
+	if m.doc.computer_source(key):
+		var why := _legend.computer_state(key)
+		_cell_menu.add_item("Edit computer '%s'..." % LegendPanel._show_key(key), Menu.CELL_EDIT_COMPUTER)
+		if why:
+			var i := _cell_menu.get_item_index(Menu.CELL_EDIT_COMPUTER)
+			_cell_menu.set_item_disabled(i, true)
+			_cell_menu.set_item_tooltip(i, why)
+	_cell_menu.add_item("Control with a computer...", Menu.CELL_DOOR_COMPUTER)
+	var problem := door_problem(cell)
+	if problem:
+		var i := _cell_menu.get_item_index(Menu.CELL_DOOR_COMPUTER)
+		_cell_menu.set_item_disabled(i, true)
+		_cell_menu.set_item_tooltip(i, problem)
+	else:
+		_cell_menu.set_item_tooltip(_cell_menu.get_item_index(Menu.CELL_DOOR_COMPUTER),
+				"Lock this door (a locked metal door) and place a console that unlocks it")
+
+
+func _on_cell_menu(id: int) -> void:
+	var m := current_map()
+	if m == null or _menu_cell.x < 0:
+		return
+	var key := m.doc.resolved.cells[_menu_cell.y][_menu_cell.x]
+	match id:
+		Menu.CELL_PICK:
+			show_drawer_tab(_legend)
+			set_brush(key)
+		Menu.CELL_EDIT_COMPUTER:
+			set_brush(key)
+			edit_computer(key)
+		Menu.CELL_DOOR_COMPUTER:
+			control_door(_menu_cell)
+
+
+## Why "Control with a computer..." can't work on [param cell], or "".
+func door_problem(cell: Vector2i) -> String:
+	var m := current_map()
+	var ter := m.doc.terrain_at(cell)
+	if not ter.contains("door"):
+		return "Not a door (%s)." % (ter if ter else "no terrain")
+	var chunk := m.doc.chunk_terrain_source(cell)
+	if chunk:
+		return "This door comes from chunk %s; open the chunk to change it." % chunk
+	return ""
+
+
+## "Control with a computer..." on door [param cell]: asks to make it a
+## locked metal door if it isn't one, then goes on as lock_door().
+func control_door(cell: Vector2i) -> void:
+	var m := current_map()
+	if m == null:
+		return
+	var problem := door_problem(cell)
+	if problem:
+		_status.text = problem
+		return
+	cancel_console_mode()
+	var ter := m.doc.terrain_at(cell)
+	if ter == LOCKED_DOOR:
+		_after_door_locked(cell)
+		return
+	_pending_door = cell
+	var keys := m.doc.matching_keys(LOCKED_DOOR, "")
+	var how := "Paint it with '%s'." % LegendPanel._show_key(keys[0]) if keys.size() \
+			else "Adds the symbol '%s' for it to the map." % LegendPanel._show_key(m.doc.suggest_key(LOCKED_DOOR))
+	_door_dialog.dialog_text = ("This door is %s. A computer only unlocks locked metal doors (%s): " \
+			+ "the player can't open them any other way.\n%s") % [ter, LOCKED_DOOR, how]
+	if is_inside_tree():
+		_door_dialog.popup_centered()
+
+
+## Makes door [param cell] of the current map a locked metal door (one undo
+## step), then looks for a console that unlocks it (see _after_door_locked).
+func lock_door(cell: Vector2i) -> void:
+	var m := current_map()
+	if m == null or cell.x < 0:
+		return
+	var keys := m.doc.matching_keys(LOCKED_DOOR, "")
+	var key := keys[0] if keys.size() else m.doc.suggest_key(LOCKED_DOOR)
+	m.doc.begin_group("Lock door at (%d, %d)" % [cell.x, cell.y])
+	var err := "" if keys.size() else m.doc.add_symbol(key, LOCKED_DOOR, "")
+	if err.is_empty():
+		m.doc.paint([cell], key)
+	m.doc.end_group()
+	if err:
+		_status.text = "Can't add a door symbol: " + err
+		return
+	_after_door_locked(cell)
+
+
+## A locked metal door at [param cell]: shows the console that already
+## unlocks it, or offers the cells where a new one would.
+func _after_door_locked(cell: Vector2i) -> void:
+	var m := current_map()
+	var by := m.doc.door_controllers(cell)
+	if not by.is_empty():
+		var at: Vector2i = by[0][0]
+		var key: String = by[0][1]
+		if key:
+			show_drawer_tab(_legend)
+			set_brush(key)
+		else:
+			var i: int = m.doc.consoles()[at][3]
+			show_drawer_tab(_placements_panel)
+			select_placement("place_computers", i)
+		_status.text = "The console at (%d, %d) already unlocks the door at (%d, %d)." % [at.x, at.y, cell.x, cell.y]
+		return
+	var spots := m.doc.console_spots(cell)
+	if spots.is_empty():
+		_status.text = "No floor cell near the door at (%d, %d) can hold a console that reaches it (within %d of a cell next to the console, same overmap tile)." % [
+			cell.x, cell.y, ConsoleReachView.DOOR_RADIUS]
+		return
+	m.console_door = cell
+	m.canvas.spots = spots
+	m.canvas.focus = Rect2i(cell, Vector2i.ONE)
+	_status.text = "Click a green cell to put a door console there: it unlocks the door at (%d, %d). Esc cancels." % [cell.x, cell.y]
+
+
+## Puts a Door control console at [param cell] for the door being
+## controlled (one undo step): reuses a symbol whose computer unlocks, else
+## adds one. Returns an error, or "".
+func place_door_console(cell: Vector2i) -> String:
+	var m := current_map()
+	if m == null or m.console_door.x < 0:
+		return "Not placing a console."
+	if not m.canvas.spots.has(cell):
+		_status.text = "A console there wouldn't reach the door; click a green cell (Esc cancels)."
+		return _status.text
+	var door := m.console_door
+	var key := m.doc.door_console_key()
+	var added := key.is_empty()
+	m.doc.begin_group("Door console at (%d, %d)" % [cell.x, cell.y])
+	var err := ""
+	if added:
+		key = m.doc.suggest_key(Computer.CONSOLE)
+		err = m.doc.add_computer_symbol(key, Computer.preset("door"))
+	if err.is_empty():
+		m.doc.paint([cell], key)
+	m.doc.end_group()
+	cancel_console_mode()
+	if err:
+		_status.text = "Can't add a console symbol: " + err
+		return err
+	show_drawer_tab(_legend)
+	set_brush(key)
+	_status.text = "%s console '%s' at (%d, %d); it unlocks the door at (%d, %d). Edit computer... changes what it does." % [
+		"Added a Door control" if added else "Placed the", LegendPanel._show_key(key), cell.x, cell.y, door.x, door.y]
+	return ""
+
+
+## Leaves the "place a console" mode, if on.
+func cancel_console_mode() -> void:
+	for m in maps:
+		if m.console_door.x >= 0:
+			m.console_door = -Vector2i.ONE
+			m.canvas.spots = [] as Array[Vector2i]
+			m.canvas.focus = Rect2i()
+
+
 # --- Placements ----------------------------------------------------------------
 
 ## Selects placement [param member] #[param index] of the current map ("" for
@@ -470,11 +711,12 @@ func _on_placement_selected(member: String, index: int) -> void:
 	m.sel_member = member
 	m.sel_index = index
 	m.canvas.select_placement(member, index)
+	_update_reach(m)
 	_placements_panel.select(member, index)
 	var p := m.doc.placement(member, index) if member else null
 	if p:
 		if not _from_problems:
-			_drawer.current_tab = _placements_panel.get_index()
+			show_drawer_tab(_placements_panel)
 		_status.text = "%s: %s   %s" % [p.title(), p.label(), p.what()]
 
 
@@ -663,6 +905,14 @@ func _update_problems() -> void:
 func show_finding(f: Validator.Finding) -> void:
 	var m := current_map()
 	_status.text = f.describe()
+	if m:
+		m.problem_console = []
+		if f.code in CONSOLE_CODES:
+			if f.target == Validator.Target.CELL and f.key:
+				m.problem_console = [f.key, -1]
+			elif f.target == Validator.Target.PLACEMENT and f.member == "place_computers":
+				m.problem_console = ["", f.index]
+		_update_reach(m)
 	if f.target == Validator.Target.PALETTE_KEY:
 		open_palette_editor(f.palette)
 		if f.key:
@@ -745,6 +995,7 @@ func _refresh_maps() -> void:
 
 func _on_tab_changed(i: int) -> void:
 	tool.cancel()
+	cancel_console_mode()
 	for j in maps.size():
 		maps[j].canvas.visible = j == i
 	var m := current_map()
@@ -758,7 +1009,7 @@ func _on_tab_changed(i: int) -> void:
 	_legend.show_map(m.ascii if m else null)
 	tool.key = m.brush if m else ""
 	if m:
-		_drawer.current_tab = _legend.get_index()
+		show_drawer_tab(_legend)
 		if m.brush:
 			_legend.select_key(m.brush)
 		var r := m.ascii.resolved
@@ -768,12 +1019,17 @@ func _on_tab_changed(i: int) -> void:
 			_status.text += "   (a nested chunk: Edit > Maps placing this chunk)"
 	_update_problems()
 	_update_brush_label()
+	if m:
+		_update_reach(m)
 
 
 func _on_cell_hovered(cell: Vector2i, m: OpenMap) -> void:
 	if cell.x < 0:
 		return
 	var text := m.ascii.describe_cell(cell.x, cell.y)
+	if m.console_door.x >= 0:
+		text = ("Click to put the door console here   |   " if m.canvas.spots.has(cell) \
+				else "Click a green cell for the console (Esc cancels)   |   ") + text
 	var here := PackedStringArray()
 	for p in m.doc.placements_at(cell):
 		if layer_mask & (1 << p.layer()):
@@ -806,14 +1062,18 @@ func _show_report(title: String, lines: PackedStringArray) -> void:
 
 func _on_problems_pressed() -> void:
 	_drawer.visible = true
-	_drawer.current_tab = _problems_panel.get_index()
+	show_drawer_tab(_problems_panel)
 
 
 func _unhandled_input(event: InputEvent) -> void:
 	var k := event as InputEventKey
 	if k == null or not k.pressed:
 		return
-	if k.keycode == KEY_ESCAPE and (tool.is_active() or placement_tool.is_active() or placement_tool.armed):
+	if k.keycode == KEY_ESCAPE and current_map() and current_map().console_door.x >= 0:
+		cancel_console_mode()
+		_status.text = "Cancelled placing a console."
+		accept_event()
+	elif k.keycode == KEY_ESCAPE and (tool.is_active() or placement_tool.is_active() or placement_tool.armed):
 		tool.cancel()
 		placement_tool.cancel()
 		placement_tool.armed = ""
@@ -888,7 +1148,7 @@ func _on_menu(id: int) -> void:
 			_drawer.visible = not _drawer.visible
 		Menu.FIND:
 			_drawer.visible = true
-			_drawer.current_tab = _browser.get_index()
+			show_drawer_tab(_browser)
 			_browser.focus_search()
 		Menu.SPRING, Menu.SUMMER, Menu.AUTUMN, Menu.WINTER:
 			set_season(id - Menu.SPRING)
@@ -1084,10 +1344,15 @@ func _build_ui() -> void:
 
 	_drawer = TabContainer.new()
 	_drawer.custom_minimum_size = Vector2(380, 0)
+	_drawer.tab_changed.connect(func(_t: int) -> void:
+		drawer_tab = _drawer.get_current_tab_control()
+		if current_map():
+			_update_reach(current_map()))
 	_split.add_child(_drawer)
 	_browser = MapBrowser.new()
 	_browser.open_requested.connect(func(ref: DataIndex.MapgenRef) -> void: open_ref(ref))
 	_drawer.add_child(_browser)
+	drawer_tab = _browser
 	_legend = LegendPanel.new()
 	_legend.key_selected.connect(_on_key_selected)
 	_legend.new_symbol_requested.connect(_on_menu.bind(Menu.NEW_SYMBOL))
@@ -1162,6 +1427,14 @@ func _build_ui() -> void:
 	_sync_dialog = SyncDialog.new()
 	_sync_dialog.files_changed.connect(_on_sync_files_changed)
 	add_child(_sync_dialog)
+	_cell_menu = PopupMenu.new()
+	_cell_menu.id_pressed.connect(_on_cell_menu)
+	add_child(_cell_menu)
+	_door_dialog = ConfirmationDialog.new()
+	_door_dialog.title = "Control with a computer"
+	_door_dialog.ok_button_text = "Make it a locked metal door"
+	_door_dialog.confirmed.connect(func() -> void: lock_door(_pending_door))
+	add_child(_door_dialog)
 	_unsaved_dialog = ConfirmationDialog.new()
 	_unsaved_dialog.title = "Unsaved changes"
 	_unsaved_dialog.ok_button_text = "Save"

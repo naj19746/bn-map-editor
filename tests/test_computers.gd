@@ -29,6 +29,15 @@ static func _map(id: Variant, obj: Dictionary) -> Dictionary:
 	return {"type": "mapgen", "method": "json", "om_terrain": id, "object": obj}
 
 
+## A wall across row 10 with a door "d" at (10, 10).
+static func _wall_with_door() -> Dictionary:
+	var marks := {}
+	for x in 24:
+		marks[Vector2i(x, 10)] = "#"
+	marks[Vector2i(10, 10)] = "d"
+	return marks
+
+
 const DOOR_PC := {"name": "Door", "options": [{"name": "Unlock", "action": "unlock"}]}
 const TER := {".": "t_floor", "#": "t_wall", "D": "t_door_metal_locked", "L": "t_door_locked"}
 
@@ -36,10 +45,11 @@ const TER := {".": "t_floor", "#": "t_wall", "D": "t_door_metal_locked", "L": "t
 func _setup() -> void:
 	var things := []
 	for t: Array in [["t_floor", ".", 2], ["t_wall", "#", 0], ["t_console", "6", 0],
-			["t_door_metal_locked", "+", 0], ["t_door_metal_c", "'", 2], ["t_door_locked", "+", 0]]:
+			["t_door_metal_locked", "+", 0], ["t_door_metal_c", "'", 2], ["t_door_locked", "+", 0],
+			["t_door_c", "'", 2]]:
 		things.append({"type": "terrain", "id": t[0], "symbol": t[1], "color": "white", "move_cost": t[2]})
 	things.append({"type": "overmap_terrain", "id": ["cmp_ok", "cmp_far", "cmp_w", "cmp_e", "cmp_walled",
-		"cmp_bad", "cmp_set", "cmp_shared", "cmp_pal", "cmp_new", "cmp_new_e", "cmp_place"], "name": "x"})
+		"cmp_bad", "cmp_set", "cmp_shared", "cmp_pal", "cmp_new", "cmp_new_e", "cmp_place", "cmp_door"], "name": "x"})
 	var walled := {}
 	for d: Vector2i in [Vector2i(-1, -1), Vector2i(0, -1), Vector2i(1, -1), Vector2i(-1, 0), Vector2i(1, 0),
 			Vector2i(-1, 1), Vector2i(0, 1), Vector2i(1, 1)]:
@@ -80,6 +90,9 @@ func _setup() -> void:
 			_map("cmp_new", {"fill_ter": "t_floor", "terrain": {".": "t_floor"}, "rows": _rows({})}),
 			_map([["cmp_new_e", "cmp_place"]], {"fill_ter": "t_floor", "terrain": {".": "t_floor"},
 				"rows": _rows({}, 48), "place_computers": [{"name": "P", "x": 5, "y": 5, "options": [{"name": "Unlock", "action": "unlock"}]}]}),
+			# A plain closed door in a wall, for "Control with a computer...".
+			_map("cmp_door", {"fill_ter": "t_floor", "terrain": {".": "t_floor", "#": "t_wall", "d": "t_door_c"},
+				"rows": _rows(_wall_with_door())}),
 		],
 	}
 	_root = TempTree.make(files)
@@ -295,6 +308,13 @@ func test_main_scene_door_computer() -> void:
 	_paint(m.doc, Vector2i(5, 15), "+")
 	check_eq(_summary(m.doc.findings()), PackedStringArray(["W NO_DOOR 6@5,5"]))
 	check_eq(main._problems_button.text, "1 warning")
+	# Selecting the warning draws that console's reach.
+	main.show_drawer_tab(main._problems_panel)
+	main.show_finding(m.doc.findings()[0])
+	check(m.canvas.reach != null, "the Problems tab shows the console's reach")
+	check_eq(m.canvas.reach.consoles, [Vector2i(5, 5)] as Array[Vector2i])
+	check(m.canvas.reach.targets.is_empty(), "reaching nothing")
+	main.show_drawer_tab(main._legend)
 	# Back within 8: fine again.
 	_paint(m.doc, Vector2i(5, 15), ".")
 	_paint(m.doc, Vector2i(5, 14), "+")
@@ -365,3 +385,156 @@ static func _item_of(b: OptionButton, action: String) -> int:
 		if b.get_item_metadata(i) == action:
 			return i
 	return -1
+
+
+## ConsoleReachView: stand cells, targets (full or from some stand cells
+## only), other locked doors, and the reach area cut at the stand cells'
+## overmap tile, also for a radius-25 action.
+func test_reach_view() -> void:
+	_setup()
+	var ws := TempTree.make({})
+	var session := EditSession.new(_index, Workspace.open(ws, _root))
+	var doc := session.open(_index.mapgens_for("cmp_ok")[0])
+	var v := doc.reach_view("6")
+	check_eq(v.consoles, [Vector2i(5, 5)] as Array[Vector2i])
+	check_eq(v.stands.size(), 8, "all eight neighbours are floor")
+	check_eq(v.targets, {Vector2i(5, 10): true}, "every stand cell reaches the door")
+	check_eq(v.other_locked.keys(), [Vector2i(7, 7)], "the plain locked door")
+	check(v.area.has(Vector2i(5, 14)) and not v.area.has(Vector2i(5, 15)), "8 below the lowest stand cell")
+	check(not v.outline.is_empty() and v.outline.size() % 2 == 0, "outline segments")
+	check(v.lines[0] == "At (5, 5): unlock reaches 1 door: (5, 10)", v.lines[0])
+	check_eq(v.lines[-1], "Doors a \"set\" or place_terrain entry makes aren't shown.")
+	check(doc.reach_view("6") == v, "cached until the map changes")
+	check(doc.reach_view(".") == null, "no computer")
+	# 13 below the console: only the stand cell straight above reaches it.
+	_paint(doc, Vector2i(5, 10), ".")
+	_paint(doc, Vector2i(5, 14), "D")
+	check(doc.reach_view("6") != v, "a change drops the cached view")
+	v = doc.reach_view("6")
+	check_eq(v.targets, {Vector2i(5, 14): false}, "from some stand cells only")
+	check_eq(doc.door_controllers(Vector2i(5, 14)), [[Vector2i(5, 5), "6"]])
+	check_eq(doc.door_controllers(Vector2i(7, 7)), [], "unlock never opens t_door_locked")
+	session.close(doc)
+
+	# Radius 25 (open), next to an overmap tile edge: the area stops at x 23.
+	var wide := session.open(_index.mapgens_for("cmp_w")[0])
+	var data: Dictionary = wide.computer("6").duplicate(true)
+	Computer.of(data).set_option(0, "Open", "open", 0)
+	check_eq(wide.set_computer("6", data), "")
+	v = wide.reach_view("6")
+	check(v.area.has(Vector2i(0, 0)) and v.area.has(Vector2i(23, 23)), "most of the tile")
+	check(v.area.keys().all(func(c: Vector2i) -> bool: return c.x < 24), "cut at the tile")
+	check_eq(v.targets, {}, "the door is in the next tile")
+	# A range place_computers entry has no single console cell.
+	var placed := session.open(_index.mapgens_for("cmp_place")[0])
+	check_eq(placed.reach_view("", 0).consoles, [Vector2i(5, 5)] as Array[Vector2i])
+	placed.set_placement_fields("place_computers", 0, {"x": [3, 6]})
+	v = placed.reach_view("", 0)
+	check(v.consoles.is_empty() and v.lines[-1].contains("random cell"), str(v.lines))
+	session.close(wide)
+	session.close(placed)
+	TempTree.remove(ws)
+	_cleanup()
+
+
+## Changes between begin_group() and end_group() undo as one.
+func test_grouped_undo() -> void:
+	_setup()
+	var ws := TempTree.make({})
+	var session := EditSession.new(_index, Workspace.open(ws, _root))
+	var doc := session.open(_index.mapgens_for("cmp_new")[0])
+	var before := BnJson.stringify(doc.object())
+	doc.begin_group("Both")
+	check_eq(doc.add_computer_symbol("6", Computer.preset("door")), "")
+	doc.paint([Vector2i(2, 2)], "6")
+	doc.paint([Vector2i(3, 2), Vector2i(2, 2)], "6")
+	doc.end_group()
+	check_eq(doc.undo_name(), "Both")
+	var after := BnJson.stringify(doc.object())
+	doc.undo()
+	check_eq(BnJson.stringify(doc.object()), before, "one undo reverts all")
+	check(not doc.can_undo(), "nothing else recorded")
+	doc.redo()
+	check_eq(BnJson.stringify(doc.object()), after)
+	check_eq(doc.resolved.cells[2][3], "6")
+	session.close(doc)
+	TempTree.remove(ws)
+	_cleanup()
+
+
+## "Control with a computer..." on a plain closed door: it becomes a locked
+## metal door, the cells a console could go are offered, and a click puts a
+## Door control there; the Problems tab is empty and the reach is drawn.
+func test_main_scene_control_door() -> void:
+	_setup()
+	var ws := TempTree.make({})
+	var main: Control = load("res://main.tscn").instantiate()
+	main.auto_start = false
+	main._ready()
+	main._workspace_override = ws
+	main.load_index(_root)
+	var m = main.open_id("cmp_door")
+	var door := Vector2i(10, 10)
+	var menu: PopupMenu = main._cell_menu
+	var item: int = main.Menu.CELL_DOOR_COMPUTER
+	main.open_cell_menu(Vector2i(3, 3))
+	check(menu.is_item_disabled(menu.get_item_index(item)), "floor isn't a door")
+	check_eq(menu.get_item_tooltip(menu.get_item_index(item)), "Not a door (t_floor).")
+	main.open_cell_menu(door)
+	check(not menu.is_item_disabled(menu.get_item_index(item)), "a door")
+	main._on_cell_menu(item)
+	check(main._door_dialog.dialog_text.contains("t_door_c"), main._door_dialog.dialog_text)
+	check(main._door_dialog.dialog_text.contains("'+'"), "offers the locked door's own symbol")
+	main._door_dialog.confirmed.emit()
+	check_eq(m.doc.terrain_at(door), "t_door_metal_locked")
+	check_eq(m.doc.undo_name(), "Lock door at (10, 10)")
+	check_eq(m.console_door, door, "placing a console")
+	var spots: Array[Vector2i] = m.canvas.spots
+	check(spots.has(Vector2i(10, 12)) and spots.has(Vector2i(10, 8)), "both sides of the wall")
+	check(not spots.has(door) and not spots.has(Vector2i(9, 10)), "not the door, not the wall")
+	check(not spots.has(Vector2i(10, 20)), "too far")
+	# A click off the spots does nothing; on one, places the console.
+	check(main.place_door_console(Vector2i(10, 22)) != "", "too far")
+	main._on_cell_pressed(Vector2i(10, 12), false, false, m)
+	check_eq(m.console_door, -Vector2i.ONE, "done")
+	check(m.canvas.spots.is_empty(), "spots cleared")
+	check_eq(m.doc.resolved.cells[12][10], "6")
+	check_eq(m.doc.computer("6"), Computer.preset("door"))
+	check_eq(m.doc.undo_name(), "Door console at (10, 12)")
+	check_eq(m.brush, "6", "the console is selected")
+	check_eq(main._problems_panel.findings.size(), 0, "no problems: " + "\n".join(m.doc.problems()))
+	check(m.canvas.reach != null, "its reach is drawn")
+	check_eq(m.canvas.reach.targets, {door: true})
+	check(main._legend.reach_label.visible, "and explained in the legend")
+	main.show_drawer_tab(main._browser)
+	check(m.canvas.reach == null, "only while the Legend shows the computer")
+	# Again on the same door: already unlocked, nothing added.
+	main.control_door(door)
+	check_eq(m.console_door, -Vector2i.ONE)
+	check(main._status.text.begins_with("The console at (10, 12) already unlocks"), main._status.text)
+	# A second door reuses the console symbol; Esc-style cancel works.
+	_paint(m.doc, Vector2i(20, 10), "d")
+	main.control_door(Vector2i(20, 10))
+	main._door_dialog.confirmed.emit()
+	check_eq(m.console_door, Vector2i(20, 10))
+	main.cancel_console_mode()
+	check_eq(m.console_door, -Vector2i.ONE)
+	main.control_door(Vector2i(20, 10))
+	check_eq(m.console_door, Vector2i(20, 10), "already locked: straight to the spots")
+	check_eq(main.place_door_console(Vector2i(20, 8)), "")
+	check_eq(m.doc.resolved.cells[8][20], "6", "reused")
+	check_eq(m.doc.object().computers.keys(), ["6"])
+	# A secured computer isn't reused.
+	var data: Dictionary = m.doc.computer("6").duplicate(true)
+	Computer.of(data).set_security(3)
+	m.doc.set_computer("6", data)
+	check_eq(m.doc.door_console_key(), "", "security 3")
+	m.doc.undo()
+	# Each step undoes as one.
+	m.doc.undo()
+	m.doc.undo()
+	check_eq(m.doc.resolved.cells[10][20], "d")
+	main.free()
+	TempTree.remove(ws)
+	_cleanup()
+

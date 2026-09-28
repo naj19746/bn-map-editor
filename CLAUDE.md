@@ -39,7 +39,9 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   `ObjectMembers` (member snapshots for undo).
 - `src/app/app_settings.gd` (`AppSettings`): settings in user://settings.cfg.
 - `src/view/`: display logic without nodes, testable headless. `AsciiMap` (what each cell looks like,
-  wall joining, hover text), `BnColors` (BN color names -> RGB).
+  wall joining, hover text), `BnColors` (BN color names -> RGB), `ConsoleReachView` (what the canvas
+  draws for a selected computer: stand cells, reach outline, doors reached; where a new door
+  console could go).
 - `src/ui/`: controls built in code (`MapCanvas`, `LegendPanel`, `MapBrowser`, `ModsDialog`,
   `NewSymbolDialog`, `NewMapDialog`, `SyncDialog`, `PaletteEditor`, `PlacementsPanel`,
   `ProblemsPanel`, `ComputerEditor`, `ComputerDialog`). `main.gd`
@@ -84,4 +86,7 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   it, so pass a fixture as text when its key order matters.
 - A Range (SpinBox, slider) outside the scene tree doesn't emit `value_changed` when its value is
   set; a UI test emits it itself after setting the value.
+- A TabContainer outside the tree ignores `current_tab`. main.gd switches drawer tabs with
+  `show_drawer_tab()`, which also sets `drawer_tab`; code and tests read that, not `current_tab`.
+- `MapDocument.begin_group()`/`end_group()` make several edits one undo step.
 - Commit the `*.uid` and `*.import` files Godot generates next to scripts and assets.

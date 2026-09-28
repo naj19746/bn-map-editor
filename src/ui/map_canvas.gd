@@ -8,9 +8,13 @@ extends Control
 ## Cells whose symbol itself places items, monsters, ... get a corner mark.
 ## With the Nested layer shown, each placed chunk's footprint is outlined
 ## (dotted for chunks placed by chunks), and the part reaching past its
-## overmap tile is shaded red. Wheel zooms around the cursor;
-## middle or right drag (or space + left drag) pans. A left drag is reported
-## as cell_pressed / cell_dragged / cell_released for the drawing tools.
+## overmap tile is shaded red. With a computer selected, its consoles'
+## reach is drawn (see ConsoleReachView): stand cells, the reach outline,
+## the doors it changes and other locked doors. Wheel zooms around the
+## cursor; middle or right drag (or space + left drag) pans. A left drag is
+## reported as cell_pressed / cell_dragged / cell_released for the drawing
+## tools; a right click that doesn't move (or Shift+F10, or the Menu key,
+## on the hovered cell) as cell_context.
 
 ## The cell under the mouse changed; (-1, -1) when it left the map.
 signal cell_hovered(cell: Vector2i)
@@ -21,6 +25,9 @@ signal cell_pressed(cell: Vector2i, alt: bool, shift: bool)
 signal cell_dragged(cell: Vector2i, shift: bool)
 ## The left button was released (the cell is clamped to the map).
 signal cell_released(cell: Vector2i, shift: bool)
+## A cell menu was asked for on [param cell], at [param at] (this
+## control's coordinates).
+signal cell_context(cell: Vector2i, at: Vector2)
 
 const OMT := MapgenResolver.OMT_SIZE
 const RULER := 28.0
@@ -43,6 +50,16 @@ const PLACEMENT_PROBLEM := Color(1.0, 0.15, 0.25)
 const LABEL_BG := Color(0, 0, 0, 0.65)
 const OVERHANG := Color(1.0, 0.15, 0.25, 0.22)
 const FOCUS := Color(1.0, 0.3, 1.0)
+## Console reach: stand cells, the reach outline, doors reached (faded when
+## only some stand cells reach them), other locked doors.
+const REACH_STAND := Color(0.35, 0.65, 1.0)
+const REACH_AREA := Color(0.4, 0.9, 1.0)
+const REACH_TARGET := Color(0.45, 1.0, 0.45)
+const REACH_OTHER := Color(1.0, 0.3, 0.3)
+## Cells a new console could go.
+const SPOT := Color(0.45, 1.0, 0.45)
+## A right press that moves less than this (pixels) is a click.
+const CLICK_SLOP := 4.0
 
 ## Line characters drawn as lines, so walls join whatever the font:
 ## sides as [N, E, S, W].
@@ -103,6 +120,16 @@ var focus := Rect2i():
 	set(v):
 		focus = v
 		queue_redraw()
+## The selected computer's reach (null for none).
+var reach: ConsoleReachView:
+	set(v):
+		reach = v
+		queue_redraw()
+## Cells offered for a new console (empty for none).
+var spots: Array[Vector2i] = []:
+	set(v):
+		spots = v
+		queue_redraw()
 var cell_size := 18.0
 ## Screen position of cell (0, 0)'s top-left corner.
 var origin := Vector2(RULER + 8, RULER + 8)
@@ -113,6 +140,8 @@ var _panning := false
 var _space := false
 var _dragging := false
 var _drag_cell := -Vector2i.ONE
+## Where the right button went down; x < 0 once it moved too far.
+var _right_press := -Vector2.ONE
 
 
 func _init() -> void:
@@ -186,6 +215,14 @@ func _gui_input(event: InputEvent) -> void:
 		elif mb.button_index in [MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_RIGHT] \
 				or (mb.button_index == MOUSE_BUTTON_LEFT and _space):
 			_panning = mb.pressed
+			if mb.button_index == MOUSE_BUTTON_RIGHT:
+				if mb.pressed:
+					_right_press = mb.position
+				elif _right_press.x >= 0:
+					_right_press = -Vector2.ONE
+					var c := cell_at(mb.position)
+					if c.x >= 0:
+						cell_context.emit(c, mb.position)
 			accept_event()
 		elif mb.button_index == MOUSE_BUTTON_LEFT:
 			if mb.pressed:
@@ -203,6 +240,8 @@ func _gui_input(event: InputEvent) -> void:
 		if _panning:
 			origin += mm.relative
 			queue_redraw()
+			if _right_press.x >= 0 and mm.position.distance_to(_right_press) > CLICK_SLOP:
+				_right_press = -Vector2.ONE
 		_set_hovered(cell_at(mm.position))
 		if _dragging:
 			var c := cell_at_clamped(mm.position)
@@ -213,6 +252,9 @@ func _gui_input(event: InputEvent) -> void:
 		var k := event as InputEventKey
 		if k.keycode == KEY_SPACE:
 			_space = k.pressed
+			accept_event()
+		elif k.pressed and hovered.x >= 0 and (k.keycode == KEY_MENU or (k.keycode == KEY_F10 and k.shift_pressed)):
+			cell_context.emit(hovered, origin + (Vector2(hovered) + Vector2(0.5, 0.5)) * cell_size)
 			accept_event()
 
 
@@ -288,6 +330,8 @@ func _draw() -> void:
 
 	_draw_preview(font_size, baseline, draw_text)
 	_draw_grid(x0, y0, x1, y1)
+	_draw_reach()
+	_draw_spots()
 	_draw_placements()
 	if focus.has_area():
 		var r := Rect2(origin + Vector2(focus.position) * cs, Vector2(focus.size) * cs)
@@ -315,6 +359,47 @@ func _draw_preview(font_size: int, baseline: float, draw_text: bool) -> void:
 				var tw := _font.get_string_size(look.ch, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
 				draw_string(_font, Vector2(p.x + (cs - tw) / 2.0, p.y + baseline), look.ch,
 						HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, look.colors.fg)
+
+
+## The selected computer's reach: stand cells shaded, the reach area
+## outlined (an outline, not shading: a radius-25 action covers most of a
+## tile), doors it changes boxed (faded when only some stand cells reach
+## them), other locked doors crossed out, consoles ringed.
+func _draw_reach() -> void:
+	if reach == null:
+		return
+	var cs := cell_size
+	var width := maxf(1.5, cs / 9.0)
+	for c: Vector2i in reach.stands:
+		draw_rect(Rect2(origin + Vector2(c) * cs, Vector2(cs, cs)), Color(REACH_STAND, 0.35))
+	if not reach.outline.is_empty():
+		var pts := PackedVector2Array()
+		pts.resize(reach.outline.size())
+		for i in reach.outline.size():
+			pts[i] = origin + reach.outline[i] * cs
+		draw_multiline(pts, Color(REACH_AREA, 0.85), width)
+	for c: Vector2i in reach.targets:
+		var r := Rect2(origin + Vector2(c) * cs, Vector2(cs, cs))
+		var full: bool = reach.targets[c]
+		draw_rect(r, Color(REACH_TARGET, 0.4 if full else 0.15))
+		draw_rect(r.grow(-1.0), Color(REACH_TARGET, 1.0 if full else 0.5), false, width * (1.5 if full else 1.0))
+	for c: Vector2i in reach.other_locked:
+		var r := Rect2(origin + Vector2(c) * cs, Vector2(cs, cs)).grow(-cs * 0.15)
+		draw_rect(r, REACH_OTHER, false, width)
+		draw_line(r.position, r.end, REACH_OTHER, width)
+		draw_line(Vector2(r.end.x, r.position.y), Vector2(r.position.x, r.end.y), REACH_OTHER, width)
+	for c in reach.consoles:
+		var center := origin + (Vector2(c) + Vector2(0.5, 0.5)) * cs
+		draw_arc(center, cs * 0.7, 0, TAU, 24, REACH_AREA, width)
+
+
+## Cells offered for a new console: shaded with a dotted box.
+func _draw_spots() -> void:
+	var cs := cell_size
+	for c in spots:
+		var r := Rect2(origin + Vector2(c) * cs, Vector2(cs, cs))
+		draw_rect(r, Color(SPOT, 0.3))
+		draw_rect(r.grow(-maxf(1.0, cs * 0.1)), Color(SPOT, 0.8), false, 1.0)
 
 
 ## A corner triangle in the color of the first layer in [param marks]:

@@ -39,6 +39,8 @@ var chunk_weight: SpinBox
 var chunk_list: ItemList
 ## Edits a place_computers entry (a copy; committed as field changes).
 var computer_editor: ComputerEditor
+## What the selected place_computers entry reaches (see set_reach()).
+var reach_label: Label
 
 var _filter: LineEdit
 var _header: Label
@@ -126,6 +128,8 @@ func _init() -> void:
 	_problems.add_theme_color_override("font_color", PROBLEM_COLOR)
 	inner.add_child(_problems)
 	_build_chunk_picker(inner)
+	reach_label = LegendPanel.reach_label_new()
+	inner.add_child(reach_label)
 	computer_editor = ComputerEditor.new()
 	computer_editor.visible = false
 	computer_editor.committed.connect(func() -> void:
@@ -135,6 +139,12 @@ func _init() -> void:
 			_problems.text = err)
 	inner.add_child(computer_editor)
 	_update_buttons()
+
+
+## Shows what [param view] (the selected computer's reach) means; null
+## hides it.
+func set_reach(view: ConsoleReachView) -> void:
+	LegendPanel.show_reach(reach_label, view)
 
 
 func _build_chunk_picker(parent: Control) -> void:
