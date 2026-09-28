@@ -13,6 +13,25 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
 - Tests call `godot --headless --path . --import` first. Without it, a fresh checkout has no
   class_name cache and `-s` scripts can't see `BnJson` etc.
 
+## MCP server
+
+`tools/mcp_server.sh [--bn <path>] [--workspace <path>] [--mods <id,id>]` runs a stdio MCP server
+(`tools/mcp_server.gd`; defaults are the editor's saved settings). Register it with Claude Code:
+`claude mcp add bn-map-editor -- /abs/path/to/bn_map_editor/tools/mcp_server.sh`, or in `.mcp.json`:
+
+```json
+{"mcpServers": {"bn-map-editor": {"command": "/abs/path/to/bn_map_editor/tools/mcp_server.sh", "args": []}}}
+```
+
+- Tools so far (read-only): search_maps, get_map, get_palette, validate_map, validate_palette,
+  lookup_id, list_mods, sync_status. Stage 9 in PLAN.MD lists what comes next.
+- Only MCP messages may reach stdout: never `print()` in src/ (errors go to stderr).
+- A handler returns a Dictionary or an `McpTools.Failure`; tests call them via `call_tool`, which
+  checks the arguments against the tool's schema. Output values must be JSON types
+  (`BnJson.stringify` rejects PackedStringArray: wrap with `Array()`).
+- The index reads palettes with Godot's JSON (floats); `McpTools._exact_palettes` points the
+  definitions a map uses at BnJson-read objects before resolving, so values come back as written.
+
 ## Layout
 
 - `src/json/bn_json.gd` (`BnJson`): the JSON reader/writer used for anything that gets saved.
@@ -39,6 +58,8 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   including maps placing a changed chunk, "via" it; where using maps paint a palette's console),
   `ObjectMembers` (member snapshots for undo).
 - `src/app/app_settings.gd` (`AppSettings`): settings in user://settings.cfg.
+- `src/mcp/`: the MCP server, no nodes. `McpServer` (JSON-RPC 2.0 over stdio lines: initialize,
+  tools/list, tools/call), `McpTools` (tool name -> schema -> handler, loading the session on first use).
 - `src/view/`: display logic without nodes, testable headless. `AsciiMap` (what each cell looks like,
   wall joining, hover text), `BnColors` (BN color names -> RGB), `ConsoleReachView` (what the canvas
   draws for a selected computer: stand cells, reach outline, doors reached; where a new door
@@ -54,7 +75,7 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
 - `tests/test_*.gd`: test files; every `test_*` method runs. They extend
   `tests/support/test_case.gd` (`check`, `check_eq`, `skip`). `tests/support/bn_env.gd` finds BN;
   `tests/support/temp_tree.gd` builds fake BN checkouts in a temp dir.
-- `tools/`: shell scripts. `build/`: local binaries (gitignored).
+- `tools/`: shell scripts, and `mcp_server.gd` (the MCP server's `-s` entry point). `build/`: local binaries (gitignored).
 
 ## Rules
 
@@ -96,4 +117,6 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
 - A TabContainer outside the tree ignores `current_tab`. main.gd switches drawer tabs with
   `show_drawer_tab()`, which also sets `drawer_tab`; code and tests read that, not `current_tab`.
 - `MapDocument.begin_group()`/`end_group()` make several edits one undo step.
+- `OS.execute` joins its arguments into one shell command, so a quoted `sh -c` script gets mangled;
+  write a script file and run that (see `tests/test_mcp.gd::test_stdio`).
 - Commit the `*.uid` and `*.import` files Godot generates next to scripts and assets.

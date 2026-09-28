@@ -1554,6 +1554,48 @@ Stage 9 - MCP server (planned 2026-09-27).
      severity and "won't load"), lookup_id (Validator.id_candidates), list_mods, sync_status
      (WorkspaceSync summary). Accept: handler tests; validate_map on every core map returns no
      errors (as test_validation_bn).
+   - 9a + 9b done (2026-09-28, one session).
+     - Checked: OS.read_string_from_stdin is fgets + rstrip("\n"), so an empty line and EOF both
+       read "", and a line of exactly n-1 bytes leaves its newline for the next call (another "").
+       OS.read_buffer_from_stdin(n) returns the bytes available, blocking until there are some,
+       and none only at EOF. printraw writes UTF-8 (box-drawing survives the pipe). Core loads in
+       ~0.7 s, so the index loads on the first tool call and initialize answers at once.
+     - Deviations: the server reads with read_buffer_from_stdin and cuts lines from the bytes (a
+       UTF-8 character split between reads is joined). Messages are read with BnJson and written
+       with BnJson.stringify (an int id stays an int; no raw newline inside a message). Tool
+       results are one text block of indented JSON (McpServer.pretty: a container that fits in
+       100 columns stays on one line, so rows and ascii lines read as a grid); no
+       structuredContent (it would double the tokens). Bad arguments (checked against the
+       schema: unknown/missing members, types, enums) and handler failures are tool results with
+       isError; an unknown tool or method is a JSON-RPC error. A --mods argument (comma list) was
+       added; defaults are the editor's AppSettings (BN path, workspace, mods).
+     - The index reads palettes with Godot's JSON, so legend values came out as 30.0. Before
+       resolving a map (and in get_palette) McpTools._exact_palettes points the index definitions
+       of the map's palette closure at their BnJson-read objects (EditSession.get_file, the same
+       JsonFile an open palette would use), as EditSession already does for open palettes.
+     - Tools: search_maps (id/file substring, kind filter, limit; variant n of m for ids with
+       several entries), get_map (header, size, fill_ter, palettes, raw rows, a legend of the used
+       symbols with value as written and "from" = Binding.source_label, an undefined " "/"." shown as
+       fill_ter; placements as written with status/problems; the chunks drawn; AsciiMap lines with
+       season/show_furniture/show_chunks; problem counts; dirty), get_palette (keys with sources,
+       includes, its own JSON), validate_map (the open document's findings, else the same checks
+       without opening it: McpTools.map_findings), validate_palette (with its includes by default),
+       lookup_id (Validator.ID_KINDS + "palette"; known + substring matches; terrain/furniture with
+       name and symbol), list_mods, sync_status (WorkspaceSync.scan + unsaved files). get_map opens
+       the map in the session (as the editor would), ready for the 9c edit tools.
+     - Result: tools/run_tests.sh passes 149 tests. tests/test_mcp.gd: the protocol (versions, ids,
+       notifications, errors, argument checks), each handler against a TempTree BN (palette values
+       stay ints, sources via included palettes, a broken map's findings, open vs unopened
+       findings equal, sync after a save), and test_stdio runs the real -s process with requests
+       piped in (one reply line per request, nothing else on stdout, exits at EOF, writes nothing).
+       tests/test_mcp_bn.gd: validate_map on every core json map (4615) and validate_palette on
+       every palette through the handlers find no errors (~17 s); get_map house_01 and get_palette
+       read real data.
+     - Code: src/mcp/mcp_server.gd (McpServer), src/mcp/mcp_tools.gd (McpTools),
+       tools/mcp_server.gd, tools/mcp_server.sh; CLAUDE.md "MCP server" (registering it).
+     - Not done: not yet tried from a live Claude Code session (the piped test uses the same
+       messages); no .mcp.json in the repo (the snippet is in CLAUDE.md; a checked-in one would
+       point at the user's saved settings for anyone opening the repo).
    - 9c. Map edit tools: paint_cells / paint_rect, add_symbol, undo, save (workspace only; returns
      the object summary). Each call is one undo group (begin_group/end_group). Accept: paint, save,
      untouched objects byte-identical, undo, in a temp workspace.
