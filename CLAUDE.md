@@ -74,7 +74,7 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   into the BnJson object), `JsonFile` (a parsed file; untouched top-level objects are written back as their
   original text), `Workspace` (workspace folder + manifest.json, never inside BN), `WorkspaceSync`
   (workspace vs BN status, object summary, push into BN), `MapTool`
-  (Paint/Line/Rect/Fill/Pick on press/move/release), `PlacementTool` (Place: select/move/resize/add
+  (Paint/Erase/Line/Rect/Fill/Pick on press/move/release; Erase paints `blank_key`, an undefined " " or "."), `PlacementTool` (Place: select/move/resize/add
   placements, kept inside one OMT), `Shapes`, `PaletteDocument` (one palette: a
   key's terrain/furniture and computer, includes, its own undo), `PaletteImpact` (which maps an edit changes,
   including maps placing a changed chunk, "via" it; where using maps paint a palette's console),

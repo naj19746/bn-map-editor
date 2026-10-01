@@ -294,6 +294,23 @@ func test_shapes_and_tools() -> void:
 	check_eq(doc.object().rows[1], "#hhhh" + "#".repeat(19), "fill stops at other symbols")
 	doc.undo()
 	check_eq(doc.object().rows[10], "#" + ".".repeat(22) + "#", "fill is one undo step")
+
+	tool.kind = MapTool.Kind.ERASE
+	tool.key = ""
+	check(tool.press(doc, Vector2i(1, 1)), "erase needs no brush")
+	tool.move(Vector2i(3, 1))
+	tool.release(Vector2i(3, 1))
+	check_eq(doc.object().rows[1], "#   h" + ".".repeat(18) + "#", "a drag erases to ' '")
+	check_eq(doc.undo_name(), "Erase")
+	check_eq(doc.problems(), PackedStringArray(), "undefined ' ' is fine with fill_ter")
+	doc.undo()
+	check_eq(doc.object().rows[1], "#hhhh" + ".".repeat(18) + "#", "erase is one undo step")
+	var res := ResolvedMapgen.new()
+	check_eq(MapTool.blank_key(res), " ")
+	res.symbols[" "] = ResolvedMapgen.SymbolInfo.new()
+	check_eq(MapTool.blank_key(res), ".", "' ' means something, '.' is the blank")
+	res.symbols["."] = ResolvedMapgen.SymbolInfo.new()
+	check_eq(MapTool.blank_key(res), "", "no blank left")
 	_cleanup()
 
 

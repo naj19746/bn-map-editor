@@ -54,9 +54,10 @@ const STAIR_CODES := [Validator.Code.STAIRS, Validator.Code.STAIRS_OFFSET, Valid
 
 const SEASONS := ["Spring", "Summer", "Autumn", "Winter"]
 ## Tool button hotkeys, by MapTool.Kind.
-const TOOL_KEYS := [KEY_B, KEY_L, KEY_R, KEY_F, KEY_I, KEY_P]
+const TOOL_KEYS := [KEY_B, KEY_E, KEY_L, KEY_R, KEY_F, KEY_I, KEY_P]
 const TOOL_TIPS := [
 	"Paint: drag to draw with the brush symbol",
+	"Erase: drag to clear cells to an undefined ' ' (or '.'): fill_ter, or what a nested chunk lands on",
 	"Line: drag a straight line",
 	"Rect: drag a rectangle outline; hold Shift to fill it",
 	"Fill: fill the connected area of one symbol",
@@ -434,7 +435,10 @@ func _on_cell_pressed(cell: Vector2i, alt: bool, shift: bool, m: OpenMap) -> voi
 		m.canvas.placement_preview = placement_tool.preview
 		return
 	if not tool.press(m.doc, cell, alt, shift):
-		_status.text = "Choose a brush first: a symbol in the Legend, or Alt+click a cell."
+		if tool.kind == MapTool.Kind.ERASE:
+			_status.text = "Nothing to erase with: this map gives both ' ' and '.' a meaning."
+		else:
+			_status.text = "Choose a brush first: a symbol in the Legend, or Alt+click a cell."
 	m.canvas.preview_key = tool.key
 	m.canvas.preview = tool.preview
 
