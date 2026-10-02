@@ -1,0 +1,60 @@
+name: Release
+
+# Pushing a tag like v0.1.0 builds the Linux export and publishes it as a GitHub release.
+# Running the workflow by hand builds the export as a workflow artifact only.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  GODOT_VERSION: 4.7.2
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Godot and the Linux export template
+        run: |
+          base="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable"
+          curl -fsSL -o godot.zip "$base/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          unzip -q godot.zip
+          sudo mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
+          curl -fsSL -o templates.tpz "$base/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+          dir="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+          mkdir -p "$dir"
+          unzip -q -j templates.tpz templates/linux_release.x86_64 templates/version.txt -d "$dir"
+          rm godot.zip templates.tpz
+          godot --version
+
+      - name: Export
+        run: |
+          godot --headless --path . --import
+          mkdir -p export/linux
+          godot --headless --path . --export-release Linux export/linux/bn_map_editor.x86_64
+          test -x export/linux/bn_map_editor.x86_64
+
+      - name: Package
+        id: package
+        run: |
+          name="bn_map_editor-${GITHUB_REF_NAME//\//-}-linux-x86_64"
+          mkdir "$name"
+          cp export/linux/bn_map_editor.x86_64 README.md LICENSE "$name/"
+          tar -czf "$name.tar.gz" "$name"
+          echo "file=$name.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: ${{ steps.package.outputs.file }}
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "${{ steps.package.outputs.file }}" --title "$GITHUB_REF_NAME" --generate-notes
