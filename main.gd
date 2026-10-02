@@ -715,7 +715,7 @@ func new_level_map(tile: BuildingLevels.Tile) -> void:
 	var fill := ""
 	if m and m.doc.object() is Dictionary:
 		fill = str(m.doc.object().get("fill_ter", ""))
-	var defaults := BuildingLevels.new_level_defaults(index, z, tile.tile.oter.ends_with("_roof"), fill,
+	var defaults := BuildingLevels.new_level_defaults(index, z, BuildingLevels.is_roof_id(tile.tile.oter), fill,
 			m.place.origin.z if m and m.place else 0)
 	_new_map_dialog.prefill(tile.tile.oter, m.ref.source.path if m else "", defaults[0], defaults[1])
 	if is_inside_tree():

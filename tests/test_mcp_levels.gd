@@ -200,6 +200,36 @@ func test_create_level() -> void:
 	_cleanup()
 
 
+func test_roof_detection() -> void:
+	_setup()
+	# "roof" as a word anywhere in the ids, as in a grid's tile ids.
+	var got := _call("create_mapgen", {"file": TALL, "om_terrain": [["tall_roof_nw"]],
+		"level": {"building": "tall", "point": [0, 0, 2]}})
+	check_eq([got.get("fill_ter"), got.get("palettes")], ["t_flat_roof", ["roof_palette"]], "tall_roof_nw")
+	check_eq(got.get("level", {}).has("roof_hint"), false)
+	_call("discard", {"file": TALL})
+	# level.roof says so for any name, and overrides the name.
+	got = _call("create_mapgen", {"file": TALL, "om_terrain": "tall_top",
+		"level": {"building": "tall", "point": [0, 0, 2], "roof": true}})
+	check_eq(got.get("fill_ter"), "t_flat_roof", "roof: true")
+	_call("discard", {"file": TALL})
+	got = _call("create_mapgen", {"file": TALL, "om_terrain": "tall_roof",
+		"level": {"building": "tall", "point": [0, 0, 2], "roof": false}})
+	check_eq(got.get("fill_ter"), "t_grass", "roof: false keeps the floor below's fill")
+	check_eq(got.get("level", {}).has("roof_hint"), false, "roof said explicitly")
+	_call("discard", {"file": TALL})
+	# A top level not named a roof: the answer says how to get a roof.
+	got = _call("create_mapgen", {"file": TALL, "om_terrain": "tall_3",
+		"level": {"building": "tall", "point": [0, 0, 2]}})
+	check(str(got.get("level", {}).get("roof_hint")).contains("level.roof: true"), str(got.get("level")))
+	_fails("create_mapgen", {"file": TALL, "om_terrain": "tall_4",
+		"level": {"building": "tall", "point": [0, 0, 3], "roof": "yes"}}, "level.roof must be")
+	check_eq(BuildingLevels.is_roof_id("house_roof"), true)
+	check_eq(BuildingLevels.is_roof_id("house_Roof_2"), true)
+	check_eq(BuildingLevels.is_roof_id("roofing_store"), false)
+	_cleanup()
+
+
 func _index_tiles(id: String, z: int) -> Array:
 	return _tools.session.index.buildings[id].level(z).map(func(t: DataIndex.BuildingTile) -> String: return t.oter)
 

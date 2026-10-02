@@ -161,6 +161,12 @@ static func new_level_id(index: DataIndex, id: String, dz: int, roof := false) -
 	return out
 
 
+## True when om_terrain [param id] names a roof: "roof" is one of its
+## "_"-separated words ("house_roof", "house_roof_nw", "roof_2").
+static func is_roof_id(id: String) -> bool:
+	return id.to_lower().split("_").has("roof")
+
+
 ## [fill_ter, palettes] to start a new level at [param z] with (suggestions,
 ## from core's city buildings): a roof t_flat_roof and roof_palette; below
 ## ground t_thconc_floor; an upper floor [param fill_near] (the fill of the

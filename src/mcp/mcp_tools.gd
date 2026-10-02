@@ -866,10 +866,11 @@ func _add_placement_tools() -> void:
 				+ "BN uses the map (default true)."),
 		"level": _object("Make the map a level of a building: {\"building\": id, \"point\": [x, y, z] of the " \
 				+ "map's top-left tile, \"dir\": north|east|south|west|none (default: the rotation of the " \
-				+ "building's tile at the same x, y on another level, else north)}. Tiles the building doesn't " \
+				+ "building's tile at the same x, y on another level, else north), \"roof\": true|false (default: " \
+				+ "whether an id has the word \"roof\", e.g. house_roof or house_roof_nw)}. Tiles the building doesn't " \
 				+ "list yet are added to its \"overmaps\" (in the definition supplying the list: with copy-from " \
 				+ "that is the base's, maybe in another file); tiles it lists with these ids are just drawn. " \
-				+ "Omitted fill_ter / palettes get suggestions (a roof, an id ending in _roof: t_flat_roof and " \
+				+ "Omitted fill_ter / palettes get suggestions (a roof: t_flat_roof and " \
 				+ "roof_palette; below ground t_thconc_floor; above, the floor below's fill), and new " \
 				+ "overmap_terrain copy the point's other levels'. save of the map's file saves the building's " \
 				+ "file too; discard takes both back."),
@@ -1503,8 +1504,8 @@ func _level_spec(args: Dictionary, spec: EditSession.NewMapgen) -> Variant:
 	var index := session.index
 	var level: Dictionary = args.level
 	for k: String in level:
-		if not k in ["building", "point", "dir"]:
-			return Failure.new("Unknown level member \"%s\" (takes: building, point, dir)." % k)
+		if not k in ["building", "point", "dir", "roof"]:
+			return Failure.new("Unknown level member \"%s\" (takes: building, point, dir, roof)." % k)
 	if not level.get("building") is String:
 		return Failure.new("level.building must be a city_building / overmap_special id.")
 	var p: Variant = level.get("point")
@@ -1541,7 +1542,13 @@ func _level_spec(args: Dictionary, spec: EditSession.NewMapgen) -> Variant:
 		out["tiles_added"] = entries.map(func(e: Array) -> Dictionary:
 				return {"point": [e[0].x, e[0].y, e[0].z], "overmap": e[1]})
 		out["note"] = session.level_tiles_note(b.id)
-	var roof := spec.ids[0][0].ends_with("_roof")
+	if level.has("roof") and not level.roof is bool:
+		return Failure.new("level.roof must be true or false.")
+	var named_roof := false
+	for row in spec.ids:
+		for id in row:
+			named_roof = named_roof or BuildingLevels.is_roof_id(id)
+	var roof: bool = level.get("roof", named_roof)
 	var fill_near := ""
 	if near and not BuildingLevels.mapgens(index, near.oter).is_empty():
 		var obj: Variant = session.objects.object_for(BuildingLevels.mapgens(index, near.oter)[0]).get("object")
@@ -1558,7 +1565,21 @@ func _level_spec(args: Dictionary, spec: EditSession.NewMapgen) -> Variant:
 	spec.overmap_base = session.level_stub_base(b.id, origin, roof)
 	if not suggested.is_empty():
 		out["defaults_used"] = suggested
+	if not roof and not level.has("roof") and origin.z > 0 and not args.has("fill_ter") \
+			and _nothing_above(b, origin, spec.ids):
+		out["roof_hint"] = "Nothing is above this level yet: if it is the roof, pass level.roof: true " \
+				+ "(or name the ids with a \"roof\" word) for t_flat_roof and roof_palette."
 	return out
+
+
+## True when [param b] has no tile above any tile of a map of [param ids]
+## (rows of ids) with its top-left at [param origin].
+static func _nothing_above(b: DataIndex.Building, origin: Vector3i, ids: Array) -> bool:
+	for y in ids.size():
+		for x in ids[y].size():
+			if b.at(origin + Vector3i(x, y, 1)):
+				return false
+	return true
 
 
 func create_building(args: Dictionary) -> Variant:
