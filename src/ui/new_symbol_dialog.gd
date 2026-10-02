@@ -113,9 +113,16 @@ var _key_touched := false
 func _init() -> void:
 	title = "New symbol"
 	ok_button_text = "Add symbol"
-	min_size = Vector2i(720, 460)
+	# Small enough for any window; open() sizes it to the window, and the
+	# content scrolls when the window is smaller than the content.
+	min_size = Vector2i(420, 300)
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	add_child(scroll)
 	var box := VBoxContainer.new()
-	add_child(box)
+	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	box.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.add_child(box)
 	var note := Label.new()
 	note.text = "The symbol is defined in this map's own \"terrain\"/\"furniture\" (palettes are edited in the palette editor)."
 	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -151,7 +158,7 @@ func _init() -> void:
 ## Sets the dialog up for [param doc] and shows it.
 func open(doc: MapDocument) -> void:
 	setup(doc)
-	popup_centered()
+	popup_centered_clamped(Vector2i(900, 640), 0.9)
 	terrain.search.grab_focus()
 
 

@@ -187,6 +187,8 @@ var _levels_stale := false
 var _disk_banner: PanelContainer
 var _disk_label: Label
 var _disk_timer: Timer
+## Below this the side drawer and the map no longer both fit.
+const MIN_WINDOW_SIZE := Vector2i(900, 600)
 ## How often the files on disk are checked, in seconds.
 const DISK_CHECK_SECONDS := 3.0
 
@@ -202,6 +204,7 @@ func _ready() -> void:
 	if is_inside_tree():
 		# Closing the window asks about unsaved changes first.
 		get_tree().auto_accept_quit = false
+		get_window().min_size = MIN_WINDOW_SIZE
 	if auto_start:
 		_start()
 
@@ -1974,7 +1977,9 @@ func _build_ui() -> void:
 	root.add_theme_constant_override("separation", 0)
 	add_child(root)
 
-	var top := HBoxContainer.new()
+	# The toolbar wraps its groups onto more rows in a narrow window, so it
+	# never pushes the side drawer off screen.
+	var top := HFlowContainer.new()
 	root.add_child(top)
 	var menu_bar := MenuBar.new()
 	top.add_child(menu_bar)
@@ -2040,7 +2045,8 @@ func _build_ui() -> void:
 	_view_menu.add_child(_season_menu)
 	_view_menu.add_submenu_node_item("Season", _season_menu)
 
-	top.add_child(VSeparator.new())
+	var tools := _toolbar_group(top)
+	tools.add_child(VSeparator.new())
 	var group := ButtonGroup.new()
 	for kind in MapTool.NAMES.size():
 		var b := Button.new()
@@ -2055,42 +2061,44 @@ func _build_ui() -> void:
 		b.shortcut.events = [key]
 		b.shortcut_in_tooltip = false
 		b.pressed.connect(set_tool.bind(kind))
-		top.add_child(b)
+		tools.add_child(b)
 		_tool_buttons.append(b)
 	_brush_label = _label("")
 	_brush_label.clip_text = true
 	_brush_label.custom_minimum_size = Vector2(160, 0)
 	_brush_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	top.add_child(_brush_label)
-	top.add_child(_label("Show:"))
+	var show := _toolbar_group(top)
+	show.add_child(_label("Show:"))
 	_furniture_button = _toggle("Furniture", true, "Draw furniture over terrain (Ctrl+U)", set_show_furniture)
-	top.add_child(_furniture_button)
+	show.add_child(_furniture_button)
 	_keys_button = _toggle("Row symbols", false, "Draw the characters from \"rows\" (Ctrl+K)", set_show_keys)
-	top.add_child(_keys_button)
+	show.add_child(_keys_button)
 	_chunks_button = _toggle("Chunks", true, "Draw the nested chunks the map places over its cells (Ctrl+J)",
 			set_show_chunks)
-	top.add_child(_chunks_button)
+	show.add_child(_chunks_button)
 	var fit := Button.new()
 	fit.text = "Fit"
 	fit.flat = true
 	fit.tooltip_text = "Fit the map to the window (Ctrl+0)"
 	fit.pressed.connect(_on_menu.bind(Menu.FIT))
-	top.add_child(fit)
-	top.add_child(VSeparator.new())
-	top.add_child(_label("Level:"))
+	show.add_child(fit)
+	var level := _toolbar_group(top)
+	level.add_child(VSeparator.new())
+	level.add_child(_label("Level:"))
 	_level_picker = OptionButton.new()
 	_level_picker.fit_to_longest_item = false
 	_level_picker.custom_minimum_size = Vector2(150, 0)
 	_level_picker.clip_text = true
 	_level_picker.item_selected.connect(set_level_place)
-	top.add_child(_level_picker)
+	level.add_child(_level_picker)
 	_z_spin = SpinBox.new()
 	_z_spin.prefix = "z"
 	_z_spin.min_value = -10
 	_z_spin.max_value = 10
 	_z_spin.tooltip_text = "The level shown: the map at this z of the same building (PgUp / PgDn)"
 	_z_spin.value_changed.connect(func(v: float) -> void: go_to_level(int(v)))
-	top.add_child(_z_spin)
+	level.add_child(_z_spin)
 	_ghost_picker = OptionButton.new()
 	# Ids are settings.ghost + 1.
 	_ghost_picker.add_item("Ghost: below", 0)
@@ -2099,9 +2107,9 @@ func _build_ui() -> void:
 	_ghost_picker.select(_ghost_picker.get_item_index(settings.ghost + 1))
 	_ghost_picker.tooltip_text = "The level drawn under the map, through its open air, with its stairs to this level marked"
 	_ghost_picker.item_selected.connect(func(i: int) -> void: set_ghost(_ghost_picker.get_item_id(i) - 1))
-	top.add_child(_ghost_picker)
+	level.add_child(_ghost_picker)
 	_dim_button = _toggle("Dim", settings.ghost_dim, "Draw the ghost level faded (off: at full color)", set_ghost_dim)
-	top.add_child(_dim_button)
+	level.add_child(_dim_button)
 
 	_split = HSplitContainer.new()
 	_split.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -2148,7 +2156,7 @@ func _build_ui() -> void:
 	_disk_timer.autostart = true
 	_disk_timer.timeout.connect(check_disk)
 	add_child(_disk_timer)
-	var layer_bar := HBoxContainer.new()
+	var layer_bar := HFlowContainer.new()
 	left.add_child(layer_bar)
 	layer_bar.add_child(_label(" Placements:"))
 	for layer in Placement.LAYER_NAMES.size():
@@ -2301,6 +2309,13 @@ func _menu(bar: MenuBar, title: String, items: Array) -> PopupMenu:
 	menu.id_pressed.connect(_on_menu)
 	bar.add_child(menu)
 	return menu
+
+
+## Controls that wrap together onto the next toolbar row.
+func _toolbar_group(top: Control) -> HBoxContainer:
+	var g := HBoxContainer.new()
+	top.add_child(g)
+	return g
 
 
 func _label(text: String) -> Label:

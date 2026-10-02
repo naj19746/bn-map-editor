@@ -71,7 +71,7 @@ func _init() -> void:
 	palette_button.tooltip_text = "Edit the palette that defines the selected symbol (Ctrl+Shift+E)"
 	palette_button.pressed.connect(func() -> void: palette_requested.emit(selected_palette()))
 	top.add_child(palette_button)
-	var row := HBoxContainer.new()
+	var row := HFlowContainer.new()
 	add_child(row)
 	_new_computer_button = Button.new()
 	_new_computer_button.text = "New computer..."

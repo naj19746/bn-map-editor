@@ -104,6 +104,8 @@ func _init() -> void:
 	bottom.add_child(bar)
 	kind_picker = OptionButton.new()
 	kind_picker.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	kind_picker.fit_to_longest_item = false
+	kind_picker.clip_text = true
 	for m: String in Placement.ADDABLE:
 		kind_picker.add_item(m)
 	bar.add_child(kind_picker)
@@ -113,9 +115,6 @@ func _init() -> void:
 	_duplicate_button = _button(bar, "Duplicate", duplicate_selected)
 	_delete_button = _button(bar, "Delete", delete_selected)
 
-	_header = Label.new()
-	_header.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	bottom.add_child(_header)
 	var scroll := ScrollContainer.new()
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
@@ -123,6 +122,10 @@ func _init() -> void:
 	var inner := VBoxContainer.new()
 	inner.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.add_child(inner)
+	# In the scroll: a long chunk list would make the drawer taller than the window.
+	_header = Label.new()
+	_header.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	inner.add_child(_header)
 	piece = PieceEditor.new(func(fields: Dictionary) -> String:
 		var p := doc.placement(member, index) if doc and member else null
 		if p == null:

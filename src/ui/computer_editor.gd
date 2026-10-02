@@ -91,6 +91,7 @@ func _init() -> void:
 	add_child(opt_head)
 	var opt_label := _label("Options (the menu the player sees)")
 	opt_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	opt_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	opt_head.add_child(opt_label)
 	var add := Button.new()
 	add.text = "Add option"
@@ -104,8 +105,7 @@ func _init() -> void:
 	var fail_label := _label("Failures (one fires at random when a hack fails; none: the console locks for 45 minutes)")
 	fail_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	add_child(fail_label)
-	var fails := GridContainer.new()
-	fails.columns = 2
+	var fails := HFlowContainer.new()
 	add_child(fails)
 	for f: String in Computer.FAILURES:
 		var box := CheckBox.new()
@@ -195,7 +195,8 @@ func _rebuild() -> void:
 func _add_option_row(i: int, o: Dictionary, count: int) -> void:
 	var box := VBoxContainer.new()
 	_options_box.add_child(box)
-	var row := HBoxContainer.new()
+	# Wraps the security and buttons under the name in a narrow drawer.
+	var row := HFlowContainer.new()
 	box.add_child(row)
 	var name_e := _line_edit("What the menu line says")
 	name_e.text = Computer._text(o.get("name"))
@@ -208,10 +209,12 @@ func _add_option_row(i: int, o: Dictionary, count: int) -> void:
 	sec.prefix = "sec"
 	sec.value = int(o.get("security", 0)) if Placement.IntRange._is_int(o.get("security", 0)) else 0
 	sec.tooltip_text = "The option's own security. " + Computer.OPTION_SECURITY_HINT
-	row.add_child(sec)
-	var up := _small_button(row, "↑", "Move up", i > 0)
-	var down := _small_button(row, "↓", "Move down", i < count - 1)
-	var del := _small_button(row, "✕", "Remove this option", true)
+	var sec_row := HBoxContainer.new()
+	row.add_child(sec_row)
+	sec_row.add_child(sec)
+	var up := _small_button(sec_row, "↑", "Move up", i > 0)
+	var down := _small_button(sec_row, "↓", "Move down", i < count - 1)
+	var del := _small_button(sec_row, "✕", "Remove this option", true)
 	var what := _label(Computer.action_text(str(o.get("action", ""))))
 	what.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	what.add_theme_color_override("font_color", HINT_COLOR)
