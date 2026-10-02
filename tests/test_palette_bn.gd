@@ -42,9 +42,6 @@ func test_edit_palette_in_mapgen_file() -> void:
 	if bn.is_empty():
 		skip("no BN checkout (set BN_PATH)")
 		return
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
-		return
 	var ws := TempTree.make({})
 	var index := DataIndex.load_bn(bn, PackedStringArray(), null, ws)
 	var session := EditSession.new(index, Workspace.open(ws, bn))

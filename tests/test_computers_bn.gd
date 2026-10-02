@@ -120,9 +120,6 @@ func test_edit_one_option_diff() -> void:
 	var index := _core_index()
 	if index == null:
 		return
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
-		return
 	var ws := TempTree.make({})
 	index.workspace_path = ws
 	var session := EditSession.new(index, Workspace.open(ws, index.bn_path))
@@ -156,9 +153,6 @@ func test_edit_one_option_diff() -> void:
 func test_edit_palette_computer_diff() -> void:
 	var index := _core_index()
 	if index == null:
-		return
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
 		return
 	var ws := TempTree.make({})
 	index.workspace_path = ws

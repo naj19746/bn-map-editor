@@ -55,7 +55,6 @@ Running from source needs [Godot 4.7](https://godotengine.org/download) and a BN
 default `../Cataclysm-BN`, or set `BN_PATH`):
 
 ```sh
-tools/build_json_formatter.sh [BN_PATH]   # BN's formatter, used when saving
 godot --path .                            # run the editor
 godot --path . -- --open fire_station     # ...opening a map at startup
 tools/run_tests.sh [FILTER]               # tests, headless

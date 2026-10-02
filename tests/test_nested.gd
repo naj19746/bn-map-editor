@@ -277,9 +277,6 @@ func test_new_chunk() -> void:
 
 
 func test_main_scene_places_new_chunk() -> void:
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built")
-		return
 	_setup()
 	var main: Control = load("res://main.tscn").instantiate()
 	main.auto_start = false
@@ -459,9 +456,6 @@ func test_symbol_piece_data() -> void:
 
 
 func test_main_scene_symbol_pieces() -> void:
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built")
-		return
 	_setup()
 	var main: Control = load("res://main.tscn").instantiate()
 	main.auto_start = false
@@ -549,9 +543,6 @@ func test_main_scene_symbol_pieces() -> void:
 ## The other mapping kinds (items, toilets, vendingmachines, ...) in the
 ## legend and the palette editor.
 func test_main_scene_item_pieces() -> void:
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built")
-		return
 	_setup()
 	var main: Control = load("res://main.tscn").instantiate()
 	main.auto_start = false

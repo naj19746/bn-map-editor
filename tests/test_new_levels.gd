@@ -148,15 +148,12 @@ func test_new_level() -> void:
 	check_eq(tall.levels(), PackedInt32Array([0, 1]))
 	check_eq(_index.buildings_using("tall_3").size(), 0)
 
-	if JsonFormatter.new().is_available():
-		doc = session.create_mapgen(spec)
-		check_eq(session.save_all(), PackedStringArray())
-		var saved := FileAccess.get_file_as_string(_ws.path_join(b_rel))
-		check(saved.contains("{ \"point\": [ 0, 0, 2 ], \"overmap\": \"tall_3_north\", \"locations\": [ \"land\" ] }"), saved)
-		var again := DataIndex.load_bn(_root, PackedStringArray(), null, _ws)
-		check_eq(again.buildings["twin"].at(Vector3i(0, 0, 2)).oter, "tall_3", "read back")
-	else:
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
+	doc = session.create_mapgen(spec)
+	check_eq(session.save_all(), PackedStringArray())
+	var saved := FileAccess.get_file_as_string(_ws.path_join(b_rel))
+	check(saved.contains("{ \"point\": [ 0, 0, 2 ], \"overmap\": \"tall_3_north\", \"locations\": [ \"land\" ] }"), saved)
+	var again := DataIndex.load_bn(_root, PackedStringArray(), null, _ws)
+	check_eq(again.buildings["twin"].at(Vector3i(0, 0, 2)).oter, "tall_3", "read back")
 	_cleanup()
 
 

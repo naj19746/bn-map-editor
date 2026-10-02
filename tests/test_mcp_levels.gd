@@ -188,15 +188,12 @@ func test_create_level() -> void:
 	check_eq(_index_tiles("tall", -1), ["tall_cellar"])
 
 	# save of the map's file saves the building's too; discard takes both back.
-	if JsonFormatter.new().is_available():
-		var saved := _call("save", {"file": TALL})
-		var files: Array = saved.get("saved", []).map(func(e: Dictionary) -> String: return e.file)
-		files.sort()
-		check_eq(files, [BUILDINGS, TALL])
-		var text := FileAccess.get_file_as_string(_ws.path_join(BUILDINGS))
-		check(text.contains("\"overmap\": \"tall_3_north\""), text)
-	else:
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
+	var saved := _call("save", {"file": TALL})
+	var files: Array = saved.get("saved", []).map(func(e: Dictionary) -> String: return e.file)
+	files.sort()
+	check_eq(files, [BUILDINGS, TALL])
+	var text := FileAccess.get_file_as_string(_ws.path_join(BUILDINGS))
+	check(text.contains("\"overmap\": \"tall_3_north\""), text)
 	_cleanup()
 
 

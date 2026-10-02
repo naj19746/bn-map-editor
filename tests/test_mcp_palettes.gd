@@ -188,14 +188,12 @@ func test_includes_and_history() -> void:
 
 func test_create_save_discard() -> void:
 	_setup()
-	var formatter := JsonFormatter.new()
-	if formatter.is_available():
-		# As BN's files are, so objects the save doesn't touch compare equal.
-		var path := _root.path_join(HOUSE)
-		var clean := formatter.format(FileAccess.get_file_as_string(path)).text
-		var f := FileAccess.open(path, FileAccess.WRITE)
-		f.store_string(clean)
-		f.close()
+	# As BN's files are, so objects the save doesn't touch compare equal.
+	var path := _root.path_join(HOUSE)
+	var clean := JsonFormatter.format(FileAccess.get_file_as_string(path)).text
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	f.store_string(clean)
+	f.close()
 	var rel := "data/json/mapgen_palettes/mine.json"
 	var made := _call("create_palette", {"file": rel, "id": "mine"})
 	check_eq(made, {"palette": "mine", "file": rel, "index": 0, "dirty": true})
@@ -208,15 +206,12 @@ func test_create_save_discard() -> void:
 	check_eq(_ids(_call("edit_palette_key", {"id": "mine", "key": "o", "terrain": "t_wall",
 		"dry_run": true}).would_change), [], "no row uses o")
 
-	if not formatter.is_available():
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
-	else:
-		# A palette in a BN file: only the palette changes in the saved copy.
-		_call("edit_palette_key", {"id": "house_pal", "key": "x", "furniture": "f_chair"})
-		var saved := _call("save", {"file": HOUSE})
-		check_eq(saved.get("saved", [{}])[0].get("changes"), ["changed palette house_pal"])
-		var got := BnJson.parse(FileAccess.get_file_as_string(_ws.path_join(HOUSE)))
-		check(got.ok() and got.value[1].furniture.x == "f_chair", "the edit saved")
+	# A palette in a BN file: only the palette changes in the saved copy.
+	_call("edit_palette_key", {"id": "house_pal", "key": "x", "furniture": "f_chair"})
+	var saved := _call("save", {"file": HOUSE})
+	check_eq(saved.get("saved", [{}])[0].get("changes"), ["changed palette house_pal"])
+	var got := BnJson.parse(FileAccess.get_file_as_string(_ws.path_join(HOUSE)))
+	check(got.ok() and got.value[1].furniture.x == "f_chair", "the edit saved")
 	# Discard takes the new palette out of the index again.
 	_call("discard", {"file": rel})
 	_fails("get_palette", {"id": "mine"}, "No palette")

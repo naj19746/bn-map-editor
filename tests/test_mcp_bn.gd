@@ -102,10 +102,6 @@ func test_core_edit_and_save() -> void:
 	var tools := _tools(ws)
 	if tools == null:
 		return
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
-		TempTree.remove(ws)
-		return
 	var m: Dictionary = tools.call_tool("get_map", {"id": "house_01"})
 	var rel: String = m.file
 	var bn_file := tools.session.index.bn_path.path_join(rel)
@@ -152,10 +148,6 @@ func test_core_palette_edit() -> void:
 	check(ms < 20000, "measured in %d ms" % ms)
 	var pal: Variant = tools.call_tool("get_palette", {"id": "standard_domestic_palette", "include_json": false})
 	check_eq(pal.keys.h.furniture.value, "f_chair", "a dry run edits nothing")
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
-		TempTree.remove(ws)
-		return
 	var r: Variant = tools.call_tool("edit_palette_key", {"id": "standard_domestic_palette", "key": "h",
 		"furniture": "f_stool"})
 	check(r is Dictionary and r.maps_changed.count == dry.would_change.count, "edit: %s" % [r])

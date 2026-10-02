@@ -115,11 +115,9 @@ func save_manifest() -> String:
 	for k: String in keys:
 		sorted[k] = files[k]
 	var text := BnJson.stringify({"files": sorted})
-	var fmt := JsonFormatter.new()
-	if fmt.is_available():
-		var r := fmt.format(text)
-		if r.ok():
-			text = r.text
+	var r := JsonFormatter.format(text)
+	if r.ok():
+		text = r.text
 	DirAccess.make_dir_recursive_absolute(root)
 	var f := FileAccess.open(path(MANIFEST), FileAccess.WRITE)
 	if f == null:

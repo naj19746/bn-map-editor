@@ -323,9 +323,6 @@ func test_tool_select_create_and_click() -> void:
 
 
 func test_save_refuses_crossing_range() -> void:
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built")
-		return
 	_setup()
 	var session := _session()
 	var doc := _open(session, "tower_nw")
@@ -452,9 +449,6 @@ func test_weighted_options() -> void:
 
 
 func test_main_scene_placements() -> void:
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built")
-		return
 	_setup()
 	var main: Control = load("res://main.tscn").instantiate()
 	main.auto_start = false

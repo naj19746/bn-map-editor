@@ -108,9 +108,6 @@ func _edit_one(id: String, member: String, i: int, edit: Callable) -> void:
 	var index := _core_index()
 	if index == null:
 		return
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built")
-		return
 	var ws := TempTree.make({})
 	index.workspace_path = ws
 	var session := EditSession.new(index, Workspace.open(ws, index.bn_path))

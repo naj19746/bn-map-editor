@@ -61,13 +61,6 @@ func _open(session: EditSession, id: String) -> MapDocument:
 	return doc
 
 
-func _formatter_or_skip() -> bool:
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
-		return false
-	return true
-
-
 func test_top_level_spans() -> void:
 	var text := "[ {\"a\": 1} ,\n  [2, 3], \"x\" ]"
 	var r := BnJson.parse(text)
@@ -316,9 +309,6 @@ func test_shapes_and_tools() -> void:
 
 func test_save_to_workspace() -> void:
 	_setup()
-	if not _formatter_or_skip():
-		_cleanup()
-		return
 	var bn_file := _root.path_join("data/json/mapgen/house.json")
 	var bn_before := FileAccess.get_file_as_bytes(bn_file)
 	var session := _session()
@@ -430,15 +420,14 @@ func test_create_mapgen() -> void:
 	check_eq(session.add_missing_overmap_terrain(doc), PackedStringArray(["shed_1_1", "shed_2_1"]))
 	check_eq(doc.problems(), PackedStringArray())
 
-	if _formatter_or_skip():
-		check_eq(session.save(spec.rel_path), "")
-		check_eq(Workspace.open(_ws, _root).files[spec.rel_path], {"new": true})
-		_index = DataIndex.load_bn(_root, PackedStringArray(), null, _ws)
-		check_eq(_index.mapgens_for("shed_1_1").size(), 1, "loads from the workspace")
-		check(_index.has_overmap_terrain("shed_2_1"))
-		var r := MapgenResolver.resolve(_index, _index.read_object(_index.mapgens_for("shed_1_1")[0].source))
-		check_eq(r.problems, PackedStringArray())
-		check_eq(r.size, Vector2i(48, 24))
+	check_eq(session.save(spec.rel_path), "")
+	check_eq(Workspace.open(_ws, _root).files[spec.rel_path], {"new": true})
+	_index = DataIndex.load_bn(_root, PackedStringArray(), null, _ws)
+	check_eq(_index.mapgens_for("shed_1_1").size(), 1, "loads from the workspace")
+	check(_index.has_overmap_terrain("shed_2_1"))
+	var r := MapgenResolver.resolve(_index, _index.read_object(_index.mapgens_for("shed_1_1")[0].source))
+	check_eq(r.problems, PackedStringArray())
+	check_eq(r.size, Vector2i(48, 24))
 	_cleanup()
 
 

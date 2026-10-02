@@ -151,9 +151,6 @@ func test_main_scene_edits_map() -> void:
 	var index := _core_index()
 	if index == null:
 		return
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built")
-		return
 	var main: Control = load("res://main.tscn").instantiate()
 	main.auto_start = false
 	main._ready()

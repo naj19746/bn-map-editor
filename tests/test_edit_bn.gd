@@ -14,9 +14,6 @@ func _core_index(workspace: String) -> DataIndex:
 	if bn.is_empty():
 		skip("no BN checkout (set BN_PATH)")
 		return null
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
-		return null
 	# The workspace is empty, so the index is plain BN plus that folder.
 	if _core == null:
 		_core = DataIndex.load_bn(bn)

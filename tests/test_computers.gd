@@ -260,19 +260,11 @@ func test_ascii_and_document() -> void:
 	_cleanup()
 
 
-func _formatter_or_skip() -> bool:
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
-		return false
-	return true
-
 
 ## The acceptance flow: New computer -> Door control -> paint the console ->
 ## paint the door within 8 -> save; then move the door out of reach and
 ## into the next overmap tile.
 func test_main_scene_door_computer() -> void:
-	if not _formatter_or_skip():
-		return
 	_setup()
 	var ws := TempTree.make({})
 	var main: Control = load("res://main.tscn").instantiate()

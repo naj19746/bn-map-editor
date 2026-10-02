@@ -349,10 +349,6 @@ func test_create_palette() -> void:
 	session.close_palette(doc)
 	check(_index.palette("mine") == null)
 
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
-		_cleanup()
-		return
 	doc = session.create_palette("data/json/mapgen_palettes/new.json", "mine")
 	doc.commit(doc.build_set_tiles("m", "t_dirt", "f_chair"))
 	check_eq(session.save(doc.file.rel_path), "")
@@ -477,7 +473,6 @@ func test_main_scene_palette_editor() -> void:
 	check_eq(m.doc.resolved.terrain_at(2, 2).source, "fresh")
 	check(main._all_dirty().has("data/json/mapgen_palettes/fresh.json"), "quitting asks about it")
 
-	if JsonFormatter.new().is_available():
-		ed.save()
-		check(FileAccess.file_exists(_ws.path_join("data/json/mapgen_palettes/fresh.json")), ed.status.text)
+	ed.save()
+	check(FileAccess.file_exists(_ws.path_join("data/json/mapgen_palettes/fresh.json")), ed.status.text)
 	main.free()

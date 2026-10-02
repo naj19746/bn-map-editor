@@ -143,10 +143,6 @@ func test_main_redraws_levels() -> void:
 ## edits a banner asks instead.
 func test_main_reloads_from_disk() -> void:
 	_setup()
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
-		_cleanup()
-		return
 	var main: Control = load("res://main.tscn").instantiate()
 	main.auto_start = false
 	main.settings_file = ""
@@ -221,10 +217,6 @@ func test_main_reloads_from_disk() -> void:
 ## The MCP server picks up the editor's saves before a call.
 func test_mcp_reloads_from_disk() -> void:
 	_setup()
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
-		_cleanup()
-		return
 	var tools := McpTools.new(McpTools.load_session.bind(_root, PackedStringArray(), _ws))
 	var got: Dictionary = tools.call_tool("get_map", {"id": "fb_ground"})
 	check(not got.has("reloaded"))

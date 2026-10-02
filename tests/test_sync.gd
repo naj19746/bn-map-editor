@@ -13,9 +13,6 @@ var _session: EditSession
 
 
 func _setup() -> bool:
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
-		return false
 	var rows := []
 	for y in 24:
 		rows.append("#".repeat(24) if y == 0 or y == 23 else "#" + ".".repeat(22) + "#")
@@ -36,10 +33,9 @@ func _setup() -> bool:
 	})
 	# TempTree writes JSON.stringify output; make BN's files formatter-clean,
 	# as real BN files are, so a save only differs where it was edited.
-	var fmt := JsonFormatter.new()
 	for rel in [HOUSE, "data/json/ter.json"]:
 		var path := _root.path_join(rel)
-		var text := fmt.format(BnJson.stringify(BnJson.parse(FileAccess.get_file_as_string(path)).value)).text
+		var text := JsonFormatter.format(BnJson.stringify(BnJson.parse(FileAccess.get_file_as_string(path)).value)).text
 		_write(path, text)
 	_ws = TempTree.make({})
 	_reload()
@@ -318,9 +314,6 @@ func test_push_real_map_into_bn_copy() -> void:
 	var bn := BnEnv.bn_path()
 	if bn.is_empty():
 		skip("no BN checkout (set BN_PATH)")
-		return
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
 		return
 	var ws := TempTree.make({})
 	var index := DataIndex.load_bn(bn, PackedStringArray(), null, ws)

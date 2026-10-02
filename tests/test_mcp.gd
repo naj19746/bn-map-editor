@@ -288,10 +288,6 @@ func test_list_mods() -> void:
 func test_sync_status() -> void:
 	_setup()
 	check_eq(_call("sync_status"), {"workspace": _ws, "files": [], "unsaved": []})
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
-		_cleanup()
-		return
 	_format_in_place(_root.path_join(HOUSE))
 	_call("get_map", {"id": "house"})
 	var doc := _tools.session.docs[0]
@@ -381,10 +377,6 @@ func test_paint_tools() -> void:
 ## Stage 9c: saving to the workspace.
 func test_save_tool() -> void:
 	_setup()
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
-		_cleanup()
-		return
 	_format_in_place(_root.path_join(HOUSE))
 	check_eq(_call("save"), {"saved": [], "note": "Nothing to save."})
 	_call("paint_cells", {"id": "house", "key": "x", "cells": [[3, 3]]})
@@ -413,10 +405,6 @@ func test_save_tool() -> void:
 ## Stage 9c: two processes on one workspace (the editor and the server).
 func test_save_guards() -> void:
 	_setup()
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
-		_cleanup()
-		return
 	var house := {"id": "house"}
 	var ws_house := _ws.path_join(HOUSE)
 	_call("paint_cells", house.merged({"key": "x", "cells": [[3, 3]]}))
@@ -567,9 +555,7 @@ func test_placement_tools() -> void:
 ## Stage 9d: new maps and chunks, saved and read back, or discarded.
 func test_create_mapgen() -> void:
 	_setup()
-	var formatter := JsonFormatter.new().is_available()
-	if formatter:
-		_format_in_place(_root.path_join(HOUSE))
+	_format_in_place(_root.path_join(HOUSE))
 	var rel := "data/json/mapgen/new.json"
 	var m := _call("create_mapgen", {"file": rel, "om_terrain": [["n_1", "n_2"]], "palettes": ["pal"]})
 	check_eq([m.get("ids"), m.get("size"), m.get("palettes"), m.get("fill_ter"), m.get("dirty")],
@@ -599,10 +585,6 @@ func test_create_mapgen() -> void:
 	check_eq(_call("search_maps", {"query": "chunk_c"}).get("total"), 0)
 	_fails("discard", {"file": "data/json/mapgen/other.json"}, "isn't open")
 
-	if not formatter:
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
-		_cleanup()
-		return
 	var saved: Array = _call("save").get("saved", [])
 	var by_file := {}
 	for e: Dictionary in saved:
@@ -626,7 +608,7 @@ func test_create_mapgen() -> void:
 ## Rewrites [param path] as json_formatter would, as BN's files are, so a
 ## save only differs where edited.
 static func _format_in_place(path: String) -> void:
-	var clean := JsonFormatter.new().format(BnJson.stringify(BnJson.parse(FileAccess.get_file_as_string(path)).value)).text
+	var clean := JsonFormatter.format(BnJson.stringify(BnJson.parse(FileAccess.get_file_as_string(path)).value)).text
 	_write(path, clean)
 
 

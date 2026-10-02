@@ -122,13 +122,6 @@ static func _count(doc: MapDocument, key: String) -> int:
 	return n
 
 
-func _formatter_or_skip() -> bool:
-	if not JsonFormatter.new().is_available():
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
-		return false
-	return true
-
-
 # --- JsonFile ----------------------------------------------------------------------
 
 func test_json_file_remove_insert() -> void:
@@ -347,20 +340,19 @@ func test_delete_palette() -> void:
 	check(session.files.has(PALETTES) and session.is_dirty(PALETTES))
 	check_eq(_index.palette("inner").source.index, 2, "before it: unmoved")
 
-	if _formatter_or_skip():
-		m2 = _open(session, "m2")
-		check_eq(session.delete_palette(_index.palette("doomed")), "")
-		m2.paint([Vector2i(1, 1)] as Array[Vector2i], "#")
-		check_eq(session.save_all(), PackedStringArray())
-		check_eq(session.deleted_palettes().size(), 0, "saved: for good")
-		check(session.restore_palette("doomed").contains("No deleted palette"))
-		var saved := BnJson.parse(FileAccess.get_file_as_string(_ws.path_join(MIXED))).value as Array
-		check_eq(saved.map(func(o: Dictionary) -> String: return str(o.get("om_terrain", o.get("id")))),
-				["m1", "m2", "tail_group"])
-		check_eq(saved[1].object.rows[1].substr(0, 2), "##")
-		var again := DataIndex.load_bn(_root, PackedStringArray(), null, _ws)
-		check(again.palette("doomed") == null and again.palette("lonely") == null)
-		check_eq(again.mapgens_for("m2")[0].source.index, 1)
+	m2 = _open(session, "m2")
+	check_eq(session.delete_palette(_index.palette("doomed")), "")
+	m2.paint([Vector2i(1, 1)] as Array[Vector2i], "#")
+	check_eq(session.save_all(), PackedStringArray())
+	check_eq(session.deleted_palettes().size(), 0, "saved: for good")
+	check(session.restore_palette("doomed").contains("No deleted palette"))
+	var saved := BnJson.parse(FileAccess.get_file_as_string(_ws.path_join(MIXED))).value as Array
+	check_eq(saved.map(func(o: Dictionary) -> String: return str(o.get("om_terrain", o.get("id")))),
+			["m1", "m2", "tail_group"])
+	check_eq(saved[1].object.rows[1].substr(0, 2), "##")
+	var again := DataIndex.load_bn(_root, PackedStringArray(), null, _ws)
+	check(again.palette("doomed") == null and again.palette("lonely") == null)
+	check_eq(again.mapgens_for("m2")[0].source.index, 1)
 	_cleanup()
 
 
@@ -435,9 +427,6 @@ func test_stub_undo_after_a_deletion() -> void:
 
 func test_stub_saved_undone_discarded() -> void:
 	_setup()
-	if not _formatter_or_skip():
-		_cleanup()
-		return
 	var session := _session()
 	var spec := EditSession.NewMapgen.new()
 	spec.rel_path = "data/json/mapgen/new.json"
@@ -739,8 +728,6 @@ func test_accept_bn() -> void:
 	var bn := BnEnv.bn_path()
 	if bn.is_empty():
 		skip("no BN checkout (set BN_PATH)")
-		return
-	if not _formatter_or_skip():
 		return
 	var ws := TempTree.make({})
 	var index := DataIndex.load_bn(bn, PackedStringArray(), null, ws)

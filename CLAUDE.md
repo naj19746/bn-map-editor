@@ -6,8 +6,6 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
 
 ## Commands
 
-- Build json_formatter from the BN checkout into `build/`: `tools/build_json_formatter.sh [BN_PATH]`
-  (uses `$CXX`, else clang++, else g++).
 - Run all tests headless: `tools/run_tests.sh [FILTER...]`. A filter matches a `file::method`
   substring, e.g. `tools/run_tests.sh roundtrip`. Exit code is 1 on any failure.
 - Tests call `godot --headless --path . --import` first. Without it, a fresh checkout has no
@@ -53,7 +51,9 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
 ## Layout
 
 - `src/json/bn_json.gd` (`BnJson`): the JSON reader/writer used for anything that gets saved.
-- `src/json/json_formatter.gd` (`JsonFormatter`): runs BN's json_formatter via a temp file.
+- `src/json/json_formatter.gd` (`JsonFormatter`): BN's json_formatter (tools/format) ported to
+  GDScript, byte-for-byte, so no native binary is needed. Its tests' expected texts came from the
+  real binary; re-check against it when BN's tools/format/format.cpp or JsonOut changes.
 - `src/data/`: read-only BN index. `ModCatalog` (mods, load order), `DataIndex` (terrain/furniture with
   copy-from, palettes, groups, mapgen refs by id), `MapgenResolver` -> `ResolvedMapgen` (a map's cells
   and what each symbol means, with sources), `DataIndex.buildings` (city_building / overmap_special
@@ -105,7 +105,7 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
 - `tests/test_*.gd`: test files; every `test_*` method runs. They extend
   `tests/support/test_case.gd` (`check`, `check_eq`, `skip`). `tests/support/bn_env.gd` finds BN;
   `tests/support/temp_tree.gd` builds fake BN checkouts in a temp dir.
-- `tools/`: shell scripts, and `mcp_server.gd` (the MCP server's `-s` entry point). `build/`: local binaries (gitignored).
+- `tools/`: shell scripts, and `mcp_server.gd` (the MCP server's `-s` entry point).
 
 ## Rules
 

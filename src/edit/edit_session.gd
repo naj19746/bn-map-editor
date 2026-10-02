@@ -5,7 +5,7 @@ extends RefCounted
 ## Maps and palettes from the same file share one JsonFile, so saving one
 ## keeps the others' edits. Files are read from the workspace copy if there
 ## is one, else from BN, and always saved to the workspace through
-## json_formatter.
+## JsonFormatter (BN's json_formatter layout).
 ##
 ## An open palette's DataIndex definition points at the live object, so
 ## every map resolved afterwards sees its edits; open maps that use it are
@@ -45,7 +45,6 @@ const DEFAULT_FILL := "t_grass"
 
 var index: DataIndex
 var workspace: Workspace
-var formatter: JsonFormatter
 ## rel path -> JsonFile, for files with open maps.
 var files := {}
 var docs: Array[MapDocument] = []
@@ -95,10 +94,9 @@ class DeletedPalette:
 	var edits_before := 0
 
 
-func _init(p_index: DataIndex, p_workspace: Workspace, p_formatter: JsonFormatter = null) -> void:
+func _init(p_index: DataIndex, p_workspace: Workspace) -> void:
 	index = p_index
 	workspace = p_workspace
-	formatter = p_formatter if p_formatter else JsonFormatter.new()
 	objects = MapgenObjects.new(index, _live_objects)
 	accept_external()
 
@@ -369,12 +367,10 @@ func save(rel: String) -> String:
 		var blocked := d.save_problems()
 		if not blocked.is_empty():
 			return _fail("%s: %s" % [d.ref.title(), blocked[0]])
-	if not formatter.is_available():
-		return _fail("can't save without json_formatter: %s isn't built (run tools/build_json_formatter.sh)" % formatter.executable)
 	var stale := check_on_disk(rel)
 	if stale:
 		return _fail(stale)
-	var formatted := formatter.format(f.compose())
+	var formatted := JsonFormatter.format(f.compose())
 	if not formatted.ok():
 		return _fail(formatted.error)
 	var err := workspace.write_file(rel, formatted.text, f.base_sha256)

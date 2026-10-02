@@ -12,10 +12,6 @@ func test_bn_files_round_trip() -> void:
 	if bn.is_empty():
 		skip("no BN checkout (set BN_PATH)")
 		return
-	var formatter := JsonFormatter.new()
-	if not formatter.is_available():
-		skip("json_formatter not built (tools/build_json_formatter.sh)")
-		return
 
 	var files := PackedStringArray()
 	for dir: String in DIRS:
@@ -35,7 +31,7 @@ func test_bn_files_round_trip() -> void:
 		elif not parsed.warnings.is_empty():
 			problem = "lossy: " + ", ".join(parsed.warnings)
 		else:
-			var formatted := formatter.format(BnJson.stringify(parsed.value))
+			var formatted := JsonFormatter.format(BnJson.stringify(parsed.value))
 			if not formatted.ok():
 				problem = formatted.error
 			elif formatted.text.to_utf8_buffer() != original:
