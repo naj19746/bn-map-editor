@@ -2,8 +2,8 @@
 
 A map editor for [Cataclysm: Bright Nights](https://github.com/cataclysmbnteam/Cataclysm-BN) JSON
 mapgen, built with Godot 4.7. It opens the maps, palettes and buildings in a BN checkout, lets you
-edit them as ASCII, checks them the way BN would on load, and saves files that round-trip through
-BN's own `json_formatter`.
+edit them as ASCII, checks them the way BN would on load, and saves files formatted exactly as BN's
+`json_formatter` would (a built-in port of it, so no BN tools are needed).
 
 ![A three-by-three school's upper floor, with the floor below showing through](docs/screenshots/building.png)
 
@@ -20,7 +20,8 @@ BN's own `json_formatter`.
 - **Buildings**: step between a building's z-levels, see the level above or below as a ghost, add
   new floors and roofs, and create new buildings with their overmap entries.
 - **Validation**: a Problems panel reports what BN would complain about, including stairs that
-  don't line up between levels, elevators and computer consoles that can't reach their doors.
+  don't line up between levels, elevators whose other floors BN won't offer, and computer consoles
+  that can't reach their doors.
 - **Workspace and sync**: edits are saved to a workspace folder, never into BN directly. The Sync
   window compares the workspace with BN and pushes changes when you're ready.
 - **MCP server**: the same editing operations are available to AI assistants over MCP (see below).
