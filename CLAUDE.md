@@ -14,7 +14,10 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
 ## MCP server
 
 `tools/mcp_server.sh [--bn <path>] [--workspace <path>] [--mods <id,id>]` runs a stdio MCP server
-(`tools/mcp_server.gd`; defaults are the editor's saved settings). Register it with Claude Code:
+(`tools/mcp_server.gd`; defaults are the editor's saved settings, `McpServer.serve_stdio`). An
+exported build runs the same server with `--headless --mcp [flags]`: the project's main loop is
+`AppLoop` (src/app/app_loop.gd), which frees the main scene and serves instead, and
+`application/run/print_header=false` keeps the engine banner off stdout. Register it with Claude Code:
 `claude mcp add bn-map-editor -- /abs/path/to/bn_map_editor/tools/mcp_server.sh`, or in `.mcp.json`:
 
 ```json
@@ -85,7 +88,8 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   including maps placing a changed chunk, "via" it; where using maps paint a palette's console),
   `ObjectMembers` (member snapshots for undo). `PaletteImpact.plan_rename`: a palette key rename's
   repainted and changed maps.
-- `src/app/app_settings.gd` (`AppSettings`): settings in user://settings.cfg.
+- `src/app/app_settings.gd` (`AppSettings`): settings in user://settings.cfg. `src/app/app_loop.gd`
+  (`AppLoop`): the main loop; `--mcp` runs the MCP server instead of the editor.
 - `src/mcp/`: the MCP server, no nodes. `McpServer` (JSON-RPC 2.0 over stdio lines: initialize,
   tools/list, tools/call), `McpTools` (tool name -> schema -> handler, loading the session on first use).
 - `src/view/`: display logic without nodes, testable headless. `AsciiMap` (what each cell looks like,

@@ -622,6 +622,16 @@ static func _write(path: String, text: String) -> void:
 ## The real process: requests piped in, one reply per request on stdout,
 ## nothing else there, and it exits when stdin closes.
 func test_stdio() -> void:
+	_check_stdio('-s tools/mcp_server.gd -- ')
+
+
+## The same through the main scene, as an exported build runs it: --mcp
+## (AppLoop), with the engine's header off and no "--".
+func test_stdio_main_loop() -> void:
+	_check_stdio('--mcp ')
+
+
+func _check_stdio(how: String) -> void:
 	_setup()
 	var requests := PackedStringArray([
 		'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},' \
@@ -640,7 +650,7 @@ func test_stdio() -> void:
 	# quoted "sh -c" script; a script file takes plain paths.
 	var runner := _ws.path_join("run.sh")
 	f = FileAccess.open(runner, FileAccess.WRITE)
-	f.store_string('exec "$1" --headless --no-header --path "$2" -s tools/mcp_server.gd -- ' \
+	f.store_string('exec "$1" --headless --path "$2" ' + how \
 			+ '--bn "$3" --workspace "$4" --mods bn < "$5" 2>/dev/null\n')
 	f.close()
 	var output := []

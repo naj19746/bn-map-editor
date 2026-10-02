@@ -44,6 +44,29 @@ func _init(p_tools: McpTools) -> void:
 	tools = p_tools
 
 
+## Serves MCP on stdio until stdin closes, with the session [param args]
+## ask for: [--bn <path>] [--workspace <path>] [--mods <id,id,...>].
+## Defaults are the editor's: $BN_PATH or the saved BN folder (else, from
+## source, ../Cataclysm-BN), the saved workspace (else the default one) and
+## the saved mods.
+static func serve_stdio(args: PackedStringArray) -> void:
+	var settings := AppSettings.load_from()
+	var bn := settings.effective_bn_path()
+	var project := ProjectSettings.globalize_path("res://")
+	if project and not OS.has_feature("template") \
+			and (bn.is_empty() or not DirAccess.dir_exists_absolute(bn.path_join("data/json"))):
+		bn = project.path_join("../Cataclysm-BN").simplify_path()
+	var ws := settings.workspace_path if settings.workspace_path else Workspace.default_root()
+	var mods := settings.mods
+	for i in range(0, args.size() - 1):
+		match args[i]:
+			"--bn": bn = args[i + 1]
+			"--workspace": ws = args[i + 1]
+			"--mods": mods = PackedStringArray(Array(args[i + 1].split(",", false)).map(
+					func(m: String) -> String: return m.strip_edges()))
+	McpServer.new(McpTools.new(McpTools.load_session.bind(bn, mods, ws))).run()
+
+
 ## Reads requests from stdin and answers them until stdin closes.
 func run() -> void:
 	var buffer := PackedByteArray()

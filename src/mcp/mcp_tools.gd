@@ -100,7 +100,9 @@ func _init(p_loader := Callable()) -> void:
 ## at [param workspace_root] layered on top, as the editor does: an
 ## EditSession, or a String saying why not.
 static func load_session(bn_path: String, mods: PackedStringArray, workspace_root: String) -> Variant:
-	if bn_path.is_empty() or not DirAccess.dir_exists_absolute(bn_path.path_join("data/json")):
+	if bn_path.is_empty():
+		return "no BN folder chosen (choose one in the editor, pass --bn or set BN_PATH)"
+	if not DirAccess.dir_exists_absolute(bn_path.path_join("data/json")):
 		return "no BN checkout at \"%s\" (pass --bn or set BN_PATH)" % bn_path
 	var ws_problem := Workspace.check_root(workspace_root, bn_path)
 	var index := DataIndex.load_bn(bn_path, mods, null, "" if ws_problem else workspace_root)

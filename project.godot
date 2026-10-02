@@ -13,6 +13,8 @@ config_version=5
 config/name="BN Map Editor"
 config/description="Map editor for Cataclysm-BN JSON mapgen."
 run/main_scene="res://main.tscn"
+run/main_loop_type="AppLoop"
+run/print_header=false
 config/features=PackedStringArray("4.7", "GL Compatibility")
 config/icon="res://icon.svg"
 
