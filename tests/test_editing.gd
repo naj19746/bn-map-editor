@@ -398,6 +398,9 @@ func test_create_mapgen() -> void:
 	bad.rel_path = "data/json/x.json"
 	bad.fill_ter = "t_nope"
 	check(not session.check_new_mapgen(bad).is_empty(), "unknown fill_ter")
+	bad.fill_ter = ""
+	check_eq(session.check_new_mapgen(bad), "", "no fill_ter is allowed")
+	check(not EditSession._new_mapgen_object(bad).object.has("fill_ter"), "and written as none")
 	bad.fill_ter = "t_grass"
 	bad.ids = [PackedStringArray(["a", "b"]), PackedStringArray(["c"])]
 	check(not session.check_new_mapgen(bad).is_empty(), "ragged grid")

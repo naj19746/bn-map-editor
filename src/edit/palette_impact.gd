@@ -30,6 +30,25 @@ class Affected:
 		return "%s (%s#%d): %s" % [ref.title(), ref.source.path, ref.source.index, what()]
 
 
+## What renaming a palette key does (see plan_rename).
+class RenamePlan:
+	var old := ""
+	var new_key := ""
+	## The palette's change; null when [member problem] is set.
+	var change: PaletteDocument.Change
+	## Why the rename can't be made, or "".
+	var problem := ""
+	## Maps whose rows use the old key and took it from the palette: their
+	## cells get the new key (keys: [old]).
+	var repainted: Array[Affected] = []
+	## Maps that look different afterwards: ones defining the old key
+	## themselves that took part of it from the palette (map keys win, so
+	## they keep the old key), repainted maps whose new key doesn't mean the
+	## same (another palette defines part of the old key), and the maps
+	## placing a chunk that changes ("via").
+	var changed: Array[Affected] = []
+
+
 var session: EditSession
 
 
@@ -58,6 +77,84 @@ static func measure(p_session: EditSession, palette_id: String, apply: Callable,
 	var out := diff(refs, before, after)
 	impact.add_parents(out)
 	return out
+
+
+## What renaming [param doc]'s own key [param old] to [param new_key] does to
+## the maps using the palette (open ones as edited). Refused
+## (RenamePlan.problem) when the palette or its includes define
+## [param new_key] (PaletteDocument.check_rename), or a using map would see
+## [param new_key] change meaning: its rows use it, or they use [param old]
+## and the map defines [param new_key] (itself or through another palette).
+static func plan_rename(p_session: EditSession, doc: PaletteDocument, old: String, new_key: String) -> RenamePlan:
+	var plan := RenamePlan.new()
+	plan.old = old
+	plan.new_key = new_key
+	plan.problem = doc.check_rename(old, new_key)
+	if plan.problem:
+		return plan
+	var c := doc.build_rename_key(old, new_key)
+	var impact := PaletteImpact.new(p_session)
+	var index := p_session.index
+	var refs := index.maps_using(doc.id)
+	refs.sort_custom(func(a: DataIndex.MapgenRef, b: DataIndex.MapgenRef) -> bool: return a.title() < b.title())
+	var conflicts := PackedStringArray()
+	# [ref, object, old's signature before] of the maps whose rows use old.
+	var using: Array = []
+	for ref in refs:
+		var o := impact.mapgen_object(ref)
+		if not o.get("object") is Dictionary:
+			continue
+		var variants := MapgenResolver.resolve_variants(index, o)
+		var used := variants[0].used_keys()
+		var uses_old := used.has(old)
+		if used.has(new_key) or (uses_old and variants.any(
+				func(r: ResolvedMapgen) -> bool: return r.symbols.has(new_key))):
+			conflicts.append(ref.title())
+		elif uses_old:
+			using.append([ref, o, _signature(variants, old)])
+	if not conflicts.is_empty():
+		plan.problem = "'%s' already means something in %d map(s) using %s: %s. Pick another key." % [
+			new_key, conflicts.size(), doc.id, ", ".join(conflicts.slice(0, 12)) + (" ..." if conflicts.size() > 12 else "")]
+		return plan
+	doc.apply(c, true)
+	for u: Array in using:
+		var ref: DataIndex.MapgenRef = u[0]
+		var o: Dictionary = u[1]
+		var variants := MapgenResolver.resolve_variants(index, o)
+		if _signature(variants, old) == u[2]:
+			continue
+		var a := Affected.new()
+		a.ref = ref
+		if _defines(o.object, old):
+			a.keys = PackedStringArray([old])
+			plan.changed.append(a)
+			continue
+		a.keys = PackedStringArray([old])
+		plan.repainted.append(a)
+		if _signature(variants, new_key) != u[2]:
+			var b := Affected.new()
+			b.ref = ref
+			b.keys = PackedStringArray([new_key])
+			plan.changed.append(b)
+	doc.apply(c, false)
+	impact.add_parents(plan.changed)
+	plan.change = c
+	return plan
+
+
+static func _signature(variants: Array[ResolvedMapgen], key: String) -> String:
+	var parts := PackedStringArray()
+	for r in variants:
+		parts.append(r.key_signature(key))
+	return "|".join(parts)
+
+
+## True when map object [param obj] defines [param key] itself (any kind).
+static func _defines(obj: Dictionary, key: String) -> bool:
+	for member: String in MapgenResolver.MAPPING_KINDS + ["mapping"]:
+		if obj.get(member) is Dictionary and obj[member].has(key):
+			return true
+	return false
 
 
 ## Appends the maps placing a chunk in [param affected] (and the maps placing

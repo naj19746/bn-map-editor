@@ -25,12 +25,17 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
 
 - Read tools: search_maps, get_map, get_palette, validate_map, validate_palette, lookup_id,
   list_mods, sync_status, get_building, validate_building. Edit tools (in memory, one undo step per call): paint_cells/rect/line,
-  fill, paint_rows, add_symbol, remove_symbol, undo, redo, add/update/remove_placement,
-  set_map_palettes, set_symbol_mapping, create_mapgen (with "level": a building's new floor);
+  fill, paint_rows (paint answers say what each key means: `keys`), add_symbol (or several: "symbols"),
+  remove_symbol, rename_symbol, undo, redo, add/update/remove_placement (add several: "entries"; a
+  batch is all or nothing, `MapDocument.cancel_group`), set_map_palettes, set_map_fields (fill_ter,
+  rotation, predecessor_mapgen), set_symbol_mapping, create_mapgen (with "level": a building's new
+  floor; a roof when an id has the word "roof", `BuildingLevels.is_roof_id`, or "level.roof");
   save (workspace only; a map's file also saves its linked building file), discard, reload.
   Levels: get_map's "levels", get_building, create_building. Palettes: edit_palette_key,
   set_palette_includes (both answer PaletteImpact's changed maps; dry_run measures only),
-  create_palette, undo/redo with "palette".
+  rename_key (repaints the maps taking the key from it), create_palette, delete_palette,
+  undo/redo with "palette" (undo also restores a deleted palette until its file is saved,
+  in order with edits of another definition of its id).
 - The editor and the server may share a workspace: a save refuses when the file changed on disk
   since it was read (`EditSession.check_on_disk`), and manifest changes go through
   `Workspace.set_entry`, which re-reads manifest.json first. Both notice the other's saves
@@ -78,7 +83,8 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   placements, kept inside one OMT), `Shapes`, `PaletteDocument` (one palette: a
   key's terrain/furniture and computer, includes, its own undo), `PaletteImpact` (which maps an edit changes,
   including maps placing a changed chunk, "via" it; where using maps paint a palette's console),
-  `ObjectMembers` (member snapshots for undo).
+  `ObjectMembers` (member snapshots for undo). `PaletteImpact.plan_rename`: a palette key rename's
+  repainted and changed maps.
 - `src/app/app_settings.gd` (`AppSettings`): settings in user://settings.cfg.
 - `src/mcp/`: the MCP server, no nodes. `McpServer` (JSON-RPC 2.0 over stdio lines: initialize,
   tools/list, tools/call), `McpTools` (tool name -> schema -> handler, loading the session on first use).
@@ -88,7 +94,7 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   turned multi-tile map split per tile; `placed()`, the map itself as placed, for View as placed), `ConsoleReachView` (what the canvas
   draws for a selected computer: stand cells, reach outline, doors reached; where a new door
   console could go), `RoofHints` (where a roof and the ghost level under it disagree).
-- `src/ui/`: controls built in code (`MapCanvas`, `LegendPanel`, `MapBrowser`, `ModsDialog`,
+- `src/ui/`: controls built in code (`MapCanvas`, `LegendPanel` (its fill_ter row: `MapDocument.set_fill_ter`, blank removes it), `MapBrowser`, `ModsDialog`,
   `NewSymbolDialog`, `NewMapDialog`, `NewBuildingDialog`, `SyncDialog`, `PaletteEditor`, `PlacementsPanel`,
   `ProblemsPanel`, `ComputerEditor`, `ComputerDialog`, `IdCompleter`: an id dropdown under a
   LineEdit, `WeightedIdList`: rows of id + weight for "chunks" and monster lists, `PieceEditor`:
@@ -140,7 +146,12 @@ roadmap live in `PLAN.MD`; read it before starting a stage. BN is expected at `.
   set; a UI test emits it itself after setting the value.
 - A TabContainer outside the tree ignores `current_tab`. main.gd switches drawer tabs with
   `show_drawer_tab()`, which also sets `drawer_tab`; code and tests read that, not `current_tab`.
-- `MapDocument.begin_group()`/`end_group()` make several edits one undo step.
+- `MapDocument.begin_group()`/`end_group()` make several edits one undo step. `undo()`/`redo()`
+  return an error when a step's file part refuses (the overmap_terrain stub, when something was
+  appended after it).
+- Take an object out of a file only through `EditSession._remove_object` (`JsonFile.remove`, then
+  `DataIndex.shift_sources` and the open documents' `object_index`): every later object moves down
+  one index, and everything holding an index must follow.
 - When an open map changes, EditSession tells the other open maps of its buildings
   (`MapDocument.levels_changed`: their stair/elevator findings are forgotten) and emits `map_edited`;
   main redraws the current tab's neighbour/ghost pieces from it once a frame (`flush_level_views`,

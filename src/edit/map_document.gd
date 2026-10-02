@@ -47,9 +47,14 @@ class Change:
 	var order_after := []
 	## The map had no "rows"; this change created them.
 	var rows_created := false
+	## For a change to the file outside the map (an overmap_terrain added
+	## next to it): each returns "" once done, or why it can't be (and does
+	## nothing), which refuses the undo or redo.
+	var file_undo := Callable()
+	var file_redo := Callable()
 
 	func is_empty() -> bool:
-		return cells.is_empty() and before.is_empty() and not rows_created
+		return cells.is_empty() and before.is_empty() and not rows_created and not file_undo.is_valid()
 
 
 var index: DataIndex
@@ -601,22 +606,37 @@ func add_computer_symbol(key: String, data: Dictionary) -> String:
 
 # --- Undo ----------------------------------------------------------------------
 
-func undo() -> void:
+## Undoes the last change. Returns why it can't (see Change.file_undo),
+## or "".
+func undo() -> String:
 	if not can_undo():
-		return
-	var c: Change = _undo.pop_back()
+		return ""
+	var c: Change = _undo[-1]
+	if c.file_undo.is_valid():
+		var err: String = c.file_undo.call()
+		if err:
+			return err
+	_undo.pop_back()
 	_apply(c, false)
 	_redo.append(c)
 	changed.emit(_is_full(c))
+	return ""
 
 
-func redo() -> void:
+## Redoes the last undone change. Returns why it can't, or "".
+func redo() -> String:
 	if not can_redo():
-		return
-	var c: Change = _redo.pop_back()
+		return ""
+	var c: Change = _redo[-1]
+	if c.file_redo.is_valid():
+		var err: String = c.file_redo.call()
+		if err:
+			return err
+	_redo.pop_back()
 	_apply(c, true)
 	_undo.append(c)
 	changed.emit(_is_full(c))
+	return ""
 
 
 func _push(c: Change) -> void:
@@ -647,6 +667,17 @@ func end_group() -> void:
 		_undo.append(g)
 
 
+## Ends the group begin_group() started by taking back every change made in
+## it, recording nothing (a batch edit that failed part way).
+func cancel_group() -> void:
+	end_stroke()
+	var g := _group
+	_group = null
+	if g and not g.is_empty():
+		_apply(g, false)
+		changed.emit(_is_full(g))
+
+
 ## Adds [param c] (made after [param into]) to [param into].
 static func _merge(into: Change, c: Change) -> void:
 	for p: Vector2i in c.cells:
@@ -664,6 +695,13 @@ static func _merge(into: Change, c: Change) -> void:
 	if not c.order_after.is_empty():
 		into.order_after = c.order_after
 	into.rows_created = into.rows_created or c.rows_created
+	if c.file_undo.is_valid():
+		if into.file_undo.is_valid():
+			# Undone last first; each part checks before it changes anything,
+			# so only the first can refuse cleanly: keep them apart instead.
+			push_error("MapDocument: two file changes in one undo step")
+		into.file_undo = c.file_undo
+		into.file_redo = c.file_redo
 
 
 static func _is_full(c: Change) -> bool:
@@ -801,20 +839,61 @@ func palette_list() -> Array:
 ## Replaces the map's "palettes" (removing the member when empty) as one
 ## undoable change.
 func set_palettes(list: Array, name := "Palettes") -> void:
-	if JSON.stringify(list) == JSON.stringify(palette_list()):
+	set_object_member("palettes", null if list.is_empty() else list, name)
+
+
+## Sets object member [param member] (fill_ter, rotation, ...) to
+## [param value], or removes it when null, as one undoable change. Nothing
+## happens when it already is that.
+func set_object_member(member: String, value: Variant, name := "") -> void:
+	var obj := object()
+	if (value == null and not obj.has(member)) \
+			or (obj.has(member) and value != null and BnJson.stringify(obj[member]) == BnJson.stringify(value)):
 		return
 	var c := Change.new()
-	c.name = name
+	c.name = name if name else "Set " + member
 	file.touch(object_index)
-	c.order_before = object().keys()
-	c.before["palettes"] = _snapshot("palettes")
-	if list.is_empty():
-		object().erase("palettes")
+	c.order_before = obj.keys()
+	c.before[member] = _snapshot(member)
+	if value == null:
+		obj.erase(member)
 	else:
-		_set_member("palettes", list.duplicate(true))
-	c.after["palettes"] = _snapshot("palettes")
-	c.order_after = object().keys()
+		_set_member(member, value.duplicate(true) if value is Array or value is Dictionary else value)
+	c.after[member] = _snapshot(member)
+	c.order_after = obj.keys()
 	_push(c)
+
+
+## Why set_fill_ter([param id]) would fail, or "". BN reads fill_ter only
+## as a plain terrain id, and only in om_terrain maps.
+func check_fill_ter(id: String) -> String:
+	if ref.kind != DataIndex.MapgenRef.OM_TERRAIN:
+		return "A chunk has no fill_ter (BN ignores it there); paint its terrain instead."
+	if id and not index.terrain.has(id):
+		return "Unknown terrain \"%s\"." % id
+	return ""
+
+
+## Sets the map's fill_ter to terrain [param id], or removes it when
+## empty, as one undo step. Returns an error, or "".
+func set_fill_ter(id: String) -> String:
+	var why := check_fill_ter(id)
+	if why.is_empty():
+		set_object_member("fill_ter", id if id else null,
+				"Set fill_ter " + id if id else "Remove fill_ter")
+	return why
+
+
+## Used keys that get no terrain (nor t_null) from their symbol: they show
+## fill_ter, or nothing without one.
+func keys_without_terrain() -> PackedStringArray:
+	var out := PackedStringArray()
+	for key in resolved.used_keys():
+		var info: ResolvedMapgen.SymbolInfo = resolved.symbols.get(key)
+		if info == null or (info.terrain == null and not info.null_terrain):
+			out.append(key)
+	out.sort()
+	return out
 
 
 ## Adds palette [param id] after the others (it wins over them).
@@ -851,20 +930,37 @@ func own_value(key: String, member: String) -> Variant:
 	return defs.get(key) if defs is Dictionary else null
 
 
-## Removes [param key] from the map's own "terrain"/"furniture" (a member
-## left empty goes too) as one undoable change.
-func remove_own_symbol(key: String, name := "") -> void:
-	commit(build_remove_own_symbol(key, name))
+## Keys the map defines itself in any mapping kind (terrain, items,
+## computers, ...; plain members and "mapping"), sorted.
+func defined_keys() -> PackedStringArray:
+	var out := PackedStringArray()
+	var obj := object()
+	for member: String in MapgenResolver.MAPPING_KINDS + ["mapping"]:
+		var defs: Variant = obj.get(member)
+		if defs is Dictionary:
+			for key: String in defs:
+				if not out.has(key):
+					out.append(key)
+	out.sort()
+	return out
+
+
+## Removes [param key] from the map's own "terrain"/"furniture" (with
+## [param every_kind], from every mapping kind and "mapping"; a member left
+## empty goes too) as one undoable change.
+func remove_own_symbol(key: String, name := "", every_kind := false) -> void:
+	commit(build_remove_own_symbol(key, name, every_kind))
 
 
 ## Like remove_own_symbol, but only returns the change (null if there's
 ## nothing to remove); commit() it, or apply_change() it for a preview.
-func build_remove_own_symbol(key: String, name := "") -> Change:
+func build_remove_own_symbol(key: String, name := "", every_kind := false) -> Change:
 	var c := Change.new()
 	c.name = name if name else "Remove '%s' from the map" % key
 	file.touch(object_index)
 	c.order_before = object().keys()
-	for member in ["terrain", "furniture"]:
+	var members: Array = MapgenResolver.MAPPING_KINDS + ["mapping"] if every_kind else ["terrain", "furniture"]
+	for member: String in members:
 		var defs: Variant = object().get(member)
 		if not (defs is Dictionary and defs.has(key)):
 			continue
@@ -878,6 +974,79 @@ func build_remove_own_symbol(key: String, name := "") -> Change:
 		return null
 	_apply(c, false)
 	return c
+
+
+## Why [param old] can't be renamed [param new_key], or "".
+func check_rename(old: String, new_key: String) -> String:
+	if not defined_keys().has(old):
+		return "'%s' isn't defined in the map itself (its own symbols: %s)." % [old, " ".join(defined_keys())]
+	if old == new_key:
+		return "The new symbol is the same as the old one."
+	var problem := check_new_key(new_key)
+	if problem:
+		return problem
+	var info: ResolvedMapgen.SymbolInfo = resolved.symbols.get(old)
+	var from := PackedStringArray()
+	if info:
+		for b: ResolvedMapgen.Binding in _bindings(info):
+			if b.from_palette() and not from.has(b.source_label()):
+				from.append(b.source_label())
+	if not from.is_empty():
+		return "'%s' also takes definitions from %s, which the renamed cells would lose; " % [old, ", ".join(from)] \
+				+ "remove them there, or move the map's own into that palette."
+	if _option_keys.has(old):
+		return "'%s' is also defined by %s, another option of a palette choice." % [old, _option_keys[old]]
+	return ""
+
+
+## Renames the map's own symbol [param old] to [param new_key]: every
+## definition the map itself has for it (each mapping kind, "mapping"),
+## each keeping its place, and every cell painted with it, as one undoable
+## change. Returns an error (see check_rename), or "".
+func rename_own_symbol(old: String, new_key: String) -> String:
+	var problem := check_rename(old, new_key)
+	if problem:
+		return problem
+	var obj := object()
+	var c := Change.new()
+	c.name = "Rename '%s' to '%s'" % [old, new_key]
+	file.touch(object_index)
+	for member: String in MapgenResolver.MAPPING_KINDS + ["mapping"]:
+		var defs: Variant = obj.get(member)
+		if defs is Dictionary and defs.has(old):
+			c.before[member] = _snapshot(member)
+			rename_key_in(defs, old, new_key)
+			c.after[member] = _snapshot(member)
+	for y in resolved.cells.size():
+		var row := resolved.cells[y]
+		for x in row.size():
+			if row[x] == old:
+				c.cells[Vector2i(x, y)] = [old, new_key]
+	_apply(c, false)
+	commit(c)
+	return ""
+
+
+## Renames key [param old] of [param defs] to [param new_key] in place,
+## keeping its position.
+static func rename_key_in(defs: Dictionary, old: String, new_key: String) -> void:
+	var items := defs.duplicate()
+	defs.clear()
+	for k: String in items:
+		defs[new_key if k == old else k] = items[k]
+
+
+static func _bindings(info: ResolvedMapgen.SymbolInfo) -> Array:
+	var out: Array = [info.terrain, info.furniture]
+	for kind: String in info.extras:
+		out.append_array(info.extras[kind])
+	return out.filter(func(b: Variant) -> bool: return b != null)
+
+
+## Records [param c], whose file part (Change.file_redo) is already done
+## and which changes nothing in the map itself, for undo.
+func record(c: Change) -> void:
+	_push(c)
 
 
 ## Applies [param c] (from a build_* function) and records it for undo.

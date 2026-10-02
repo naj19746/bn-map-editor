@@ -8,7 +8,9 @@ extends RefCounted
 ## byte-identical even in files BnJson can't reproduce (\u escapes, duplicate
 ## keys; see BnJson.ParseResult.warnings).
 ##
-## Callers must call touch(i) before changing object i.
+## Callers must call touch(i) before changing object i. remove(i) takes an
+## object out (every later one moves down an index) and insert() puts it
+## back, original text included.
 
 ## Relative to the BN checkout / workspace, e.g. "data/json/mapgen/house.json".
 var rel_path := ""
@@ -38,6 +40,19 @@ var _pristine := {}
 ## index -> BnJson.stringify as last saved, for is_dirty().
 var _saved := {}
 var _saved_count := 0
+
+
+## A top-level object remove() took out, with what insert() needs to put it
+## back as it was.
+class Removed:
+	var index := 0
+	var object: Variant
+	## Its original text's span, or (-1, -1) for an object added since the
+	## file was read.
+	var span := Vector2i(-1, -1)
+	var pristine: Variant = null
+	var saved: Variant = null
+	var single_object := false
 
 
 ## Reads [param abs_path]. Returns null and sets [param error_out][0] on failure.
@@ -117,6 +132,54 @@ func append(o: Dictionary) -> int:
 	single_object = false
 	objects.append(o)
 	return objects.size() - 1
+
+
+## Takes objects[[param i]] out; the later objects move down one index.
+func remove(i: int) -> Removed:
+	var r := Removed.new()
+	r.index = i
+	r.object = objects[i]
+	r.single_object = single_object
+	if i < _spans.size():
+		r.span = _spans[i]
+		_spans.remove_at(i)
+	r.pristine = _pristine.get(i)
+	r.saved = _saved.get(i)
+	objects.remove_at(i)
+	single_object = false
+	_pristine = _shift_keys(_pristine, i, -1)
+	_saved = _shift_keys(_saved, i, -1)
+	return r
+
+
+## Puts back what remove() took out, at the same index (the later objects
+## move up one). An original object is written back as its original text
+## again. Undo removals last first: an original can only go back while the
+## originals before it are in place.
+func insert(r: Removed) -> void:
+	var i := r.index
+	objects.insert(i, r.object)
+	if r.span.x >= 0:
+		_spans.insert(i, r.span)
+	_pristine = _shift_keys(_pristine, i, 1)
+	_saved = _shift_keys(_saved, i, 1)
+	if r.pristine != null:
+		_pristine[i] = r.pristine
+	if r.saved != null:
+		_saved[i] = r.saved
+	single_object = r.single_object and objects.size() == 1
+
+
+## [param d] (index -> value) with the entries for [param i] and after
+## moved by [param delta]; a removal (-1) drops entry [param i].
+static func _shift_keys(d: Dictionary, i: int, delta: int) -> Dictionary:
+	var out := {}
+	for k: int in d:
+		if k < i:
+			out[k] = d[k]
+		elif k > i or delta > 0:
+			out[k + delta] = d[k]
+	return out
 
 
 ## Unsaved changes: an object changed since the last save, or objects added.

@@ -180,7 +180,8 @@ static func _check_args(schema: Dictionary, args: Dictionary) -> String:
 		if ok and type == "array" and props[k].has("items"):
 			var item_type: String = props[k].items.type
 			ok = args[k].all(func(e: Variant) -> bool: return _is_type(e, item_type))
-			type = "list of " + {"string": "strings", "integer": "integers", "array": "lists"}[item_type]
+			type = "list of " + {"string": "strings", "integer": "integers", "array": "lists",
+				"object": "objects"}[item_type]
 		if not ok:
 			return "\"%s\" must be %s." % [k, "one of " + ", ".join(props[k].enum) if props[k].has("enum") \
 					else {"string": "a string", "integer": "an integer", "boolean": "true or false",
@@ -786,17 +787,31 @@ func _add_edit_tools() -> void:
 		"skip": _string("A character that leaves the cell under it unchanged (default: none)."),
 	}), ["rows"], paint_rows)
 	_add("add_symbol", "Define a new symbol in the map's own terrain/furniture (never in a palette: palettes " \
-			+ "are shared by other maps). Give a terrain, a furniture or both.", _map_props({
+			+ "are shared by other maps). Give a terrain, a furniture or both; or several symbols at once with " \
+			+ "symbols (one undo step; if one is refused, none are added).", _map_props({
 		"key": _string("The new symbol: one character the map doesn't define yet (default: a free one, the " \
 				+ "furniture's or terrain's own symbol if it is free)."),
 		"terrain": _string("Terrain id (lookup_id finds ids)."),
 		"furniture": _string("Furniture id."),
+		"symbols": _array("Instead of key/terrain/furniture: a list of {\"key\", \"terrain\", \"furniture\"} " \
+				+ "objects, each as above.", "object"),
 	}), [], add_symbol)
 	_add("remove_symbol", "Remove a symbol from the map's own terrain/furniture (a palette's definition, if " \
 			+ "any, then applies). Cells still using it stay as they are.", _map_props({
 		"key": _string("The symbol."),
+		"every_kind": _bool("Also remove the map's own items, monsters, nested, computers, ... for it, and " \
+				+ "its \"mapping\" entry (default false)."),
 	}), ["key"], remove_symbol)
-	var palette := _string("Instead of a map: a palette id (its edits have an undo history of their own).")
+	_add("rename_symbol", "Rename a symbol the map defines itself: every definition the map has for it (terrain, " \
+			+ "furniture, items, computers, ..., \"mapping\") and every cell painted with it, as one undo step. " \
+			+ "Refused when the new symbol is already defined for the map (by it or a palette), or the old one " \
+			+ "also takes definitions from a palette (the cells would lose them). A palette's key is renamed " \
+			+ "with rename_key.", _map_props({
+		"key": _string("The symbol to rename."),
+		"new_key": _string("The new symbol: one character."),
+	}), ["key", "new_key"], rename_symbol)
+	var palette := _string("Instead of a map: a palette id (its edits have an undo history of their own; " \
+			+ "undo also brings back a palette delete_palette deleted, until its file is saved).")
 	_add("undo", "Undo the map's (or palette's) last edit (edits made in this session only).",
 			_map_props({"palette": palette}), [], undo)
 	_add("redo", "Redo the map's (or palette's) last undone edit.", _map_props({"palette": palette}), [], redo)
@@ -823,12 +838,14 @@ func _add_placement_tools() -> void:
 	_add("add_placement", "Add a coordinate placement (place_items, place_monster, place_nested, set, ...) to " \
 			+ "a map. x/y are an int or an inclusive [min, max] range, in map cells; they must stay inside one " \
 			+ "24x24 tile (BN refuses the map otherwise) and inside the map (BN drops it), and are never moved " \
-			+ "for you. Answers the entry as added and what BN would say about it (e.g. unknown ids).",
+			+ "for you. Answers the entry as added and what BN would say about it (e.g. unknown ids). Pass " \
+			+ "entries to add several at once (one undo step; if one is refused, none are added).",
 			_map_props({
 		"member": _enum("The placement list.", members),
 		"entry": _object("The entry, e.g. {\"group\": \"GROUP_ZOMBIE\", \"x\": [3, 8], \"y\": 5, \"chance\": 20}. " \
 				+ "\"set\" entries use tile-local x/y and are applied in every tile."),
-	}), ["member", "entry"], add_placement)
+		"entries": _array("Instead of member/entry: a list of {\"member\": list, \"entry\": {...}} objects.", "object"),
+	}), [], add_placement)
 	_add("update_placement", "Change fields of a placement (get_map lists them by member and index), and/or " \
 			+ "move it keeping its size and how its ranges are written.", _map_props({
 		"member": _enum("The placement list.", members),
@@ -845,6 +862,12 @@ func _add_placement_tools() -> void:
 			+ "map's own symbols win over all).", _map_props({
 		"palettes": _array("Palette ids (or distribution/param objects, as BN takes them); [] removes the list."),
 	}), ["palettes"], set_map_palettes)
+	_add("set_map_fields", "Set a map's own fields: fill_ter (the terrain of cells no symbol gives terrain), " \
+			+ "rotation and predecessor_mapgen. A null value removes the field. One undo step.", _map_props({
+		"fill_ter": _any("A terrain id; null (or \"\") removes it. BN reads only a plain id."),
+		"rotation": _any("Quarter turns: an int 0-3 or a [min, max] range; null removes it."),
+		"predecessor_mapgen": _any("An overmap_terrain id whose mapgen runs first (e.g. field); null removes it."),
+	}), [], set_map_fields)
 	_add("set_symbol_mapping", "Set what a symbol of the map places besides terrain/furniture: a nested chunk, " \
 			+ "monsters, items, a vehicle, toilet or vending machine. Written in the map itself (not a palette).",
 			_map_props({
@@ -934,10 +957,45 @@ func _paint(doc: MapDocument, by_key: Dictionary, name: String) -> Variant:
 	for key: String in by_key:
 		doc.paint(by_key[key], key, name)
 	doc.end_group()
-	var out := {"changed": changed}
+	var out := {"changed": changed, "keys": _key_summaries(doc, by_key.keys())}
 	if outside:
 		out["outside"] = "%d cell(s) outside the %dx%d map were skipped." % [outside, size.x, size.y]
 	return _edited(doc, out)
+
+
+## What each of [param keys] paints in [param doc], one line each, e.g.
+## "L": "f_locker (palette roof_palette); terrain t_null: keeps fill_ter
+## t_floor", so a key that means something else than meant shows at once.
+static func _key_summaries(doc: MapDocument, keys: Array) -> Dictionary:
+	var out := {}
+	for key: String in keys:
+		var info: ResolvedMapgen.SymbolInfo = doc.resolved.symbols.get(key)
+		var fill := doc.resolved.fill_ter
+		if info == null:
+			out[key] = "undefined: fill_ter %s" % fill if fill else "undefined: no terrain"
+			continue
+		var parts := PackedStringArray()
+		if info.terrain:
+			parts.append(_binding_line(info.terrain))
+		elif info.null_terrain:
+			parts.append("t_null: keeps fill_ter %s" % fill if fill else "t_null: keeps what is there")
+		elif not info.listed_terrain:
+			parts.append("no terrain: fill_ter %s" % fill if fill else "no terrain")
+		if info.furniture:
+			parts.append(_binding_line(info.furniture))
+		for kind: String in info.extras:
+			var from := PackedStringArray()
+			for b: ResolvedMapgen.Binding in info.extras[kind]:
+				if not from.has(b.source_label()):
+					from.append(b.source_label())
+			parts.append("%s (%s)" % [kind, ", ".join(from)])
+		out[key] = "; ".join(parts)
+	return out
+
+
+static func _binding_line(b: ResolvedMapgen.Binding) -> String:
+	var what := b.id() if b.ids.size() <= 1 else "|".join(b.ids.slice(0, 3)) + ("|..." if b.ids.size() > 3 else "")
+	return "%s (%s)" % [what if what else BnJson.stringify(b.value), b.source_label()]
 
 
 static func _point(args: Dictionary, x := "x", y := "y") -> Vector2i:
@@ -1019,17 +1077,46 @@ func add_symbol(args: Dictionary) -> Variant:
 	if got is Failure:
 		return got
 	var doc: MapDocument = got
-	var ter: String = args.get("terrain", "")
-	var furn: String = args.get("furniture", "")
-	var key: String = args.get("key", "")
-	if not args.has("key"):
+	if not args.has("symbols"):
+		var one: Variant = _add_one_symbol(doc, args)
+		if one is Failure:
+			return one
+		return _edited(doc, {"symbol": {one: _symbol(doc.resolved.symbols[one])}})
+	for k in ["key", "terrain", "furniture"]:
+		if args.has(k):
+			return Failure.new("Pass either symbols or key/terrain/furniture, not both.")
+	var keys := PackedStringArray()
+	doc.begin_group("New symbols")
+	for i in args.symbols.size():
+		var s: Dictionary = args.symbols[i]
+		var problem := _check_args({"properties": {"key": _string(""), "terrain": _string(""),
+			"furniture": _string("")}}, s)
+		var got_key: Variant = Failure.new(problem) if problem else _add_one_symbol(doc, s)
+		if got_key is Failure:
+			doc.cancel_group()
+			return Failure.new("symbols[%d]: %s Nothing was added." % [i, got_key.message])
+		keys.append(got_key)
+	doc.end_group()
+	var out := {}
+	for key in keys:
+		out[key] = _symbol(doc.resolved.symbols[key])
+	return _edited(doc, {"symbols": out})
+
+
+## Adds the symbol [param s] describes (key, terrain, furniture): its key,
+## or a Failure.
+func _add_one_symbol(doc: MapDocument, s: Dictionary) -> Variant:
+	var ter: String = s.get("terrain", "")
+	var furn: String = s.get("furniture", "")
+	var key: String = s.get("key", "")
+	if not s.has("key"):
 		key = doc.suggest_key(ter, furn)
 		if key.is_empty():
 			return Failure.new("No free symbol left in %s." % doc.ref.title())
 	var err := doc.add_symbol(key, ter, furn)
 	if err:
 		return Failure.new(err)
-	return _edited(doc, {"symbol": {key: _symbol(doc.resolved.symbols[key])}})
+	return key
 
 
 func remove_symbol(args: Dictionary) -> Variant:
@@ -1037,10 +1124,12 @@ func remove_symbol(args: Dictionary) -> Variant:
 	if got is Failure:
 		return got
 	var doc: MapDocument = got
-	if not doc.own_keys().has(args.key):
-		return Failure.new("'%s' isn't in the map's own terrain/furniture (its own symbols: %s)." % [
-			args.key, " ".join(doc.own_keys())])
-	doc.remove_own_symbol(args.key)
+	var every: bool = args.get("every_kind", false)
+	var own := doc.defined_keys() if every else doc.own_keys()
+	if not own.has(args.key):
+		return Failure.new("'%s' isn't in the map's own %s (its own symbols: %s)." % [
+			args.key, "definitions" if every else "terrain/furniture", " ".join(own)])
+	doc.remove_own_symbol(args.key, "", every)
 	var info: ResolvedMapgen.SymbolInfo = doc.resolved.symbols.get(args.key)
 	var out := {"symbol": {args.key: _symbol(info) if info else null}}
 	var cells := 0
@@ -1049,6 +1138,24 @@ func remove_symbol(args: Dictionary) -> Variant:
 	if cells:
 		out["cells_using_it"] = cells
 	return _edited(doc, out)
+
+
+func rename_symbol(args: Dictionary) -> Variant:
+	var got: Variant = _edit_doc(args)
+	if got is Failure:
+		return got
+	var doc: MapDocument = got
+	var old: String = args.key
+	var new_key: String = args.new_key
+	var cells := 0
+	for row in doc.resolved.cells:
+		cells += row.count(old)
+	var err := doc.rename_own_symbol(old, new_key)
+	if err:
+		return Failure.new(err)
+	var info: ResolvedMapgen.SymbolInfo = doc.resolved.symbols.get(new_key)
+	return _edited(doc, {"renamed": {"from": old, "to": new_key}, "cells_repainted": cells,
+		"symbol": {new_key: _symbol(info) if info else null}})
 
 
 # --- undo / redo ---------------------------------------------------------------
@@ -1063,7 +1170,9 @@ func undo(args: Dictionary) -> Variant:
 	if not doc.can_undo():
 		return Failure.new("Nothing to undo in %s (this session's edits only)." % doc.ref.title())
 	var name := doc.undo_name()
-	doc.undo()
+	var err := doc.undo()
+	if err:
+		return Failure.new(err)
 	return _edited(doc, {"undone": name, "redo": doc.redo_name()})
 
 
@@ -1077,7 +1186,9 @@ func redo(args: Dictionary) -> Variant:
 	if not doc.can_redo():
 		return Failure.new("Nothing to redo in %s." % doc.ref.title())
 	var name := doc.redo_name()
-	doc.redo()
+	var err := doc.redo()
+	if err:
+		return Failure.new(err)
 	return _edited(doc, {"redone": name})
 
 
@@ -1173,13 +1284,40 @@ func add_placement(args: Dictionary) -> Variant:
 	if got is Failure:
 		return got
 	var doc: MapDocument = got
-	var member: String = args.member
+	if args.has("entries") == (args.has("member") or args.has("entry")):
+		return Failure.new("Pass member and entry, or entries.")
+	if not args.has("entries"):
+		if not (args.has("member") and args.has("entry")):
+			return Failure.new("Pass both member and entry.")
+		var at: Variant = _add_one_placement(doc, args.member, args.entry)
+		if at is Failure:
+			return at
+		return _edited(doc, {"placement": _placement_info(doc, args.member, at)})
+	var added := []
+	var members: Array = Placement.KINDS.keys()
+	doc.begin_group("Add placements")
+	for n in args.entries.size():
+		var e: Dictionary = args.entries[n]
+		var problem := _check_args({"properties": {"member": _enum("", members), "entry": _object("")},
+			"required": ["member", "entry"]}, e)
+		var at: Variant = Failure.new(problem) if problem else _add_one_placement(doc, e.member, e.entry)
+		if at is Failure:
+			doc.cancel_group()
+			return Failure.new("entries[%d]: %s Nothing was added." % [n, at.message])
+		added.append([e.member, at])
+	doc.end_group()
+	return _edited(doc, {"placements": added.map(func(a: Array) -> Dictionary:
+		return _placement_info(doc, a[0], a[1]))})
+
+
+## Adds [param entry] to list [param member]: its index there, or a Failure.
+func _add_one_placement(doc: MapDocument, member: String, entry: Dictionary) -> Variant:
 	var list: Variant = doc.object().get(member)
 	var i: int = list.size() if list is Array else 0
-	var err := doc.add_placement(member, args.entry)
+	var err := doc.add_placement(member, entry)
 	if err:
 		return Failure.new(err)
-	return _edited(doc, {"placement": _placement_info(doc, member, i)})
+	return i
 
 
 func update_placement(args: Dictionary) -> Variant:
@@ -1249,6 +1387,55 @@ func set_map_palettes(args: Dictionary) -> Variant:
 	_exact_palettes(ids)
 	doc.set_palettes(list)
 	return _edited(doc, {"palettes": doc.palette_list()})
+
+
+const MAP_FIELDS := ["fill_ter", "rotation", "predecessor_mapgen"]
+
+
+func set_map_fields(args: Dictionary) -> Variant:
+	var got: Variant = _edit_doc(args)
+	if got is Failure:
+		return got
+	var doc: MapDocument = got
+	var fields := {}
+	for k: String in MAP_FIELDS:
+		if args.has(k):
+			fields[k] = args[k]
+	if fields.is_empty():
+		return Failure.new("Pass at least one of %s." % ", ".join(MAP_FIELDS))
+	if fields.has("fill_ter"):
+		var f: Variant = fields.fill_ter
+		if not (f == null or f is String):
+			return Failure.new("fill_ter is a terrain id, or null to remove it (BN ignores any other value).")
+		if f == "":
+			fields.fill_ter = null
+		elif f != null:
+			var why := doc.check_fill_ter(f)
+			if why:
+				return Failure.new(why + (" lookup_id with kind \"terrain\" finds ids." if why.begins_with("Unknown") else ""))
+	if fields.has("rotation"):
+		var r: Variant = fields.rotation
+		var ok: bool = r == null or _is_type(r, "integer") or (r is Array and r.size() == 2 \
+				and r.all(func(v: Variant) -> bool: return _is_type(v, "integer")))
+		if not ok:
+			return Failure.new("rotation is an int or [min, max] (quarter turns), or null.")
+		if r is float:
+			fields.rotation = int(r)
+		elif r is Array:
+			fields.rotation = r.map(func(v: Variant) -> int: return int(v))
+	if fields.has("predecessor_mapgen"):
+		var pm: Variant = fields.predecessor_mapgen
+		if pm != null and not (pm is String and session.index.overmap_terrain.has(pm)):
+			return Failure.new("predecessor_mapgen is an overmap_terrain id BN knows (lookup_id kind " \
+					+ "\"oter_type\"), or null.")
+	doc.begin_group("Set " + ", ".join(PackedStringArray(fields.keys())))
+	for k: String in fields:
+		doc.set_object_member(k, fields[k])
+	doc.end_group()
+	var out := {}
+	for k: String in fields:
+		out[k] = doc.object().get(k)
+	return _edited(doc, {"fields": out})
 
 
 func set_symbol_mapping(args: Dictionary) -> Variant:
@@ -1648,6 +1835,24 @@ func _add_palette_tools() -> void:
 		"dry_run": dry_run,
 		"limit": limit,
 	}, ["id", "palettes"], set_palette_includes)
+	_add("rename_key", "Rename a key the palette defines itself (every kind, \"mapping\" too), and repaint " \
+			+ "the maps using the palette that take the key from it: their cells of the old key get the new one " \
+			+ "(maps defining the old key themselves keep it: map keys win). Refused when the new key is defined " \
+			+ "by the palette or its includes, or already means something in a using map. Answers the maps " \
+			+ "repainted and the maps that look different afterwards (\"changed\"; ideally none). One undo " \
+			+ "step in the palette (undo with palette also undoes the maps' repaint) and one in each map.", {
+		"id": _string("The palette id."),
+		"key": _string("The key to rename."),
+		"new_key": _string("The new key: one character."),
+		"dry_run": dry_run,
+		"limit": limit,
+	}, ["id", "key", "new_key"], rename_key)
+	_add("delete_palette", "Delete a palette from its file (unsaved until save; the file's later objects move " \
+			+ "down one index). Refused while a loaded map or palette uses it (the answer names them). undo " \
+			+ "with palette brings it back until the file is saved.", {
+		"id": _string("The palette id."),
+		"dry_run": _bool("Only check whether it can be deleted (default false)."),
+	}, ["id"], delete_palette)
 	_add("create_palette", "Create an empty palette in a new file or appended to an existing one; fill it " \
 			+ "with edit_palette_key / set_palette_includes and point maps at it with set_map_palettes. Unsaved " \
 			+ "until save; discard removes it again.", {
@@ -1793,6 +1998,55 @@ func set_palette_includes(args: Dictionary) -> Variant:
 	return out
 
 
+func rename_key(args: Dictionary) -> Variant:
+	var got: Variant = _palette_doc(args.id)
+	if got is Failure:
+		return got
+	var doc: PaletteDocument = got
+	var plan := PaletteImpact.plan_rename(session, doc, args.key, args.new_key)
+	if plan.problem:
+		return Failure.new(plan.problem)
+	var dry: bool = args.get("dry_run", false)
+	var out := {"palette": doc.id, "file": doc.file.rel_path, "renamed": {"from": args.key, "to": args.new_key}}
+	if dry:
+		out["dry_run"] = true
+	out["would_repaint" if dry else "repainted"] = _impact(plan.repainted, _limit(args))
+	out["would_change" if dry else "changed"] = _impact(plan.changed, _limit(args))
+	if dry:
+		return out
+	var err := session.rename_palette_key(doc, plan)
+	if err:
+		out["error"] = err
+	out["undo"] = doc.undo_name()
+	var dirty := session.dirty_files()
+	dirty.sort()
+	out["dirty_files"] = Array(dirty)
+	return out
+
+
+func delete_palette(args: Dictionary) -> Variant:
+	if _session() == null:
+		return _no_session()
+	var got: Variant = _find_palette(args.id)
+	if got is Failure:
+		return got
+	var def: DataIndex.Definition = got
+	var problem := session.check_delete_palette(def)
+	if problem:
+		return Failure.new(problem)
+	var out := {"palette": def.id, "file": def.source.path, "index": def.source.index}
+	if args.get("dry_run", false):
+		out["dry_run"] = true
+		out["can_delete"] = true
+		return out
+	var err := session.delete_palette(def)
+	if err:
+		return Failure.new(err)
+	out["deleted"] = true
+	out["dirty"] = session.is_dirty(def.source.path)
+	return out
+
+
 func create_palette(args: Dictionary) -> Variant:
 	if _session() == null:
 		return _no_session()
@@ -1811,9 +2065,18 @@ func _palette_history(id: String, back: bool) -> Variant:
 	if _session() == null:
 		return _no_session()
 	var got: Variant = _find_palette(id)
+	var doc := session.palette_doc_for(got) if not got is Failure else null
+	var deleted := session.deleted_palette(id)
+	# The deletion is undone first, unless the definition in effect now was
+	# edited after it.
+	if back and deleted and not (doc and doc.undo_count() > deleted.edits_before):
+		var err := session.restore_palette(id)
+		if err:
+			return Failure.new(err)
+		return {"palette": id, "restored": true, "file": deleted.rel, "index": deleted.def.source.index,
+			"dirty": session.is_dirty(deleted.rel)}
 	if got is Failure:
 		return got
-	var doc := session.palette_doc_for(got)
 	var what := "undo" if back else "redo"
 	if doc == null or not (doc.can_undo() if back else doc.can_redo()):
 		return Failure.new("Nothing to %s in palette %s (this session's edits only)." % [what, id])

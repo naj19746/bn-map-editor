@@ -1111,6 +1111,46 @@ func add_palette(o: Dictionary, src: Source) -> Definition:
 	return palette(str(o.get("id", "")))
 
 
+## Puts back a definition remove_palette() took out, at [param position]
+## in its id's load order.
+func insert_palette(def: Definition, position: int) -> void:
+	if not palettes.has(def.id):
+		palettes[def.id] = []
+	var defs: Array = palettes[def.id]
+	defs.insert(clampi(position, 0, defs.size()), def)
+
+
+## Moves the objects of file [param rel] at index [param at] and after by
+## [param delta]: -1 after the object at [param at] was taken out of the
+## file (its own Source, if still indexed, is left alone), +1 before one is
+## put back there. Every Source the index holds moves once, however many
+## entries share it.
+func shift_sources(rel: String, at: int, delta: int) -> void:
+	var seen := {}
+	var all: Array = []
+	for table: Dictionary in [terrain, furniture]:
+		for id: String in table:
+			all.append(table[id].source)
+	for table: Dictionary in [palettes, item_groups, monster_groups]:
+		for id: String in table:
+			for d: Definition in table[id]:
+				all.append(d.source)
+	for ref in mapgens:
+		all.append(ref.source)
+	all.append_array(overmap_terrain.values())
+	for id: String in buildings:
+		all.append(buildings[id].source)
+		all.append(buildings[id].overmaps_source)
+	for kind: String in ids:
+		all.append_array(ids[kind].values())
+	for src: Source in all:
+		if src == null or src.path != rel or seen.has(src):
+			continue
+		seen[src] = true
+		if src.index > at or (delta > 0 and src.index == at):
+			src.index += delta
+
+
 ## Undoes add_palette.
 func remove_palette(def: Definition) -> void:
 	var defs: Array = palettes.get(def.id, [])

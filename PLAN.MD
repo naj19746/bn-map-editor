@@ -2386,6 +2386,78 @@ Stage 11 - Loose ends of the level work, and editor housekeeping (planned 2026-0
          reason), unless the user means to take the palette's meaning (not offered).
        - MCP: rename_symbol, and rename_key for palettes (edit_palette_key doesn't rename);
          delete_palette. All answer the maps repainted, like edit_palette_key.
+   - 11e done (2026-09-28). Deviations and details:
+     - Taking an object out: JsonFile.remove(i) -> Removed (the object, its original span, its
+       touch/save bookkeeping) and insert(Removed), which puts it back as its original text.
+       DataIndex.shift_sources(rel, at, delta) moves every Source the index holds (tiles,
+       palettes and groups, mapgens, overmap_terrain, buildings and their overmaps_source, ids),
+       each shared Source once; EditSession._remove_object / _insert_object also move the open
+       MapDocuments' and PaletteDocuments' object_index. The _new_* tables hold index objects,
+       so they follow without a table of their own.
+     - A map's own symbol: MapDocument.rename_own_symbol(old, new) renames every definition the
+       map itself has for it (every MAPPING_KINDS member and "mapping", each keeping its place;
+       defined_keys()) and repaints its cells, one undo step. Refused when the new key is defined
+       for the map in any way (check_new_key: palettes, any option of a palette choice), and,
+       beyond the plan, when the old key also takes definitions from a palette (the renamed cells
+       would lose them). remove_own_symbol(key, name, every_kind): the Legend's Remove takes
+       every kind; MCP remove_symbol gains every_kind (default: terrain/furniture, as before).
+       The Legend has Rename... (a small dialog checking as you type) and Remove, enabled for a
+       symbol the map defines; the brush follows a rename.
+     - A palette key: PaletteImpact.plan_rename(session, doc, old, new) -> RenamePlan, measured
+       by key_signature before and after (all palette options), not by "does the map define the
+       old key": repainted = maps whose rows use the old key and whose meaning of it changes
+       with the palette's rename, unless they define it themselves; changed = maps defining it
+       themselves that took part of it from the palette (they keep the old key), repainted maps
+       whose new key doesn't mean what the old one did (another palette gave part of it), and the
+       maps placing a changed chunk ("via"). Refused when the palette or its includes define the
+       new key (PaletteDocument.check_rename), or a using map's rows use the new key, or use the
+       old one while the map defines the new one (itself or through another palette): cells
+       would change meaning. PaletteDocument.EDITED now snapshots every mapping kind.
+       EditSession.rename_palette_key commits the palette's step and paints each repainted map
+       (opened as a document, no tab) as its own step; deviation: the palette's step carries
+       on_undo / on_redo hooks (PaletteDocument.Change), so undoing it in the palette undoes each
+       map's repaint too while that is still the map's last step (EditSession._follow_palette).
+       The palette editor has Rename key... (asks, listing both groups, when maps other than the
+       current one are affected).
+     - Deleting a palette: EditSession.delete_palette / check_delete_palette / restore_palette /
+       deleted_palette(s). Refused while any loaded map (EditSession.palette_users: maps_using)
+       or palette uses it, naming them; a definition not in effect (replaced by a mod's) can
+       always go. An open document of it closes, but its file stays open (dirty, no document)
+       until saved or discarded. Undo (the palette editor's Undo with no palette shown; MCP undo
+       with palette) puts it back until the file is saved, last deleted first per file; discard
+       puts the index back as on disk. Not undoable after a save.
+     - The overmap_terrain stub is an undo step of the map ("Add overmap_terrain ids"):
+       MapDocument.Change.file_undo / file_redo (each returns "" or why not), MapDocument.record(),
+       and undo() / redo() now return an error (main and MCP show it). Undo is refused when
+       anything follows the stub in its file (create_mapgen of the new map adds the stub, so a
+       second new map in the same file blocks undoing the first's stub).
+     - MCP: rename_symbol, rename_key (dry_run; answers repainted / changed like edit_palette_key,
+       and the dirty files), delete_palette (dry_run); undo with palette restores a deleted one.
+       35 tools.
+     - Accept: tests/test_renames.gd::test_accept_bn renames a state_police key used by two of its
+       three maps (to a free key) in a temp workspace: both repainted, only the key's cells
+       change, nothing else looks different; and deletes FEMA_camp_interior (object 1 of 4 in
+       fema.json, used by nothing). After save, every other object of the three files is
+       byte-identical to BN's. The fake-tree tests cover the rest (the plan's groups, conflicts,
+       undo through the palette, a palette in the middle of a file with maps after it that stay
+       open and save to the right object, discard, the stub's refused undo, MCP, the Legend and
+       palette editor).
+     - Result: tools/run_tests.sh passes 200 tests.
+     - Review fixes (2026-09-29): the stub's undo is refused while a palette deleted after it
+       is still out (restoring it would have gone past the file's end; restore_palette now
+       refuses that too); the stub's redo puts back the removed object (the file is clean
+       again when that is how it was saved), and only an unsaved stub's ids go on discard;
+       discarding a file indexes its overmap_terrain ids the index lost again
+       (_reindex_from_disk) and resolves the maps using its palettes again (they kept the
+       discarded meanings). A key rename opens every map it repaints first and changes
+       nothing when one can't be opened. The palette editor's rename confirmed after another
+       palette is shown does nothing, Enter in its dialog renames, and its Undo shows the
+       restored definition itself. MCP undo with palette restores a deletion before edits of
+       another definition of the id made earlier, after ones made later
+       (DeletedPalette.edits_before). 205 tests.
+     - Not done: deleting a palette doesn't offer to remove it from the maps using it (do that
+       first); a rename's repainted maps have no tabs (Save all saves them; the palette
+       editor's status says so).
    - 11f. UI polish.
      - The toolbar fits at 1280 px: the ghost picker, Dim and the level controls move into a
        Level toolbar group that collapses to a menu button when narrow (they need ~1800 px now).

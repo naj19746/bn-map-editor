@@ -12,6 +12,11 @@ extends Window
 ## (Placement.MAPPING_KINDS) are edited under the pickers (SymbolPieces);
 ## other per-key kinds (traps, signs, ...) are shown read-only. A key's computer opens in the same ComputerDialog as a map's
 ## ("Edit computer...", or "Add computer..." for a key without one).
+##
+## "Rename key..." renames a key the palette defines and repaints the maps
+## taking it from the palette (PaletteImpact.plan_rename; asks first when
+## other maps change). "Delete palette" takes an unused palette out of its
+## file; Undo brings it back until the file is saved.
 
 ## Files changed (an edit, undo, save): tab titles and the browser may need
 ## updating.
@@ -61,6 +66,15 @@ var _use_button: Button
 var _apply_button: Button
 var _remove_button: Button
 var _computer_button: Button
+var _rename_button: Button
+var _delete_button: Button
+## Asks for the new key of "Rename key...".
+var rename_dialog: ConfirmationDialog
+var rename_edit: LineEdit
+var _rename_info: Label
+## The palette deleted last while none is shown ("" for none), and its file.
+var _deleted_id := ""
+var _deleted_rel := ""
 var _move_button: Button
 var _move_label: Label
 var _new_info: Label
@@ -118,6 +132,8 @@ func _init() -> void:
 	_save_button.tooltip_text = "Save the palette's file to the workspace"
 	bar.add_child(VSeparator.new())
 	_use_button = _button(bar, "Use in map", toggle_use_in_map)
+	bar.add_child(VSeparator.new())
+	_delete_button = _button(bar, "Delete palette", ask_delete_palette)
 
 	var middle := HSplitContainer.new()
 	middle.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -160,6 +176,8 @@ func _init() -> void:
 	_apply_button.tooltip_text = "Set this key's terrain and furniture in the palette"
 	_remove_button = _button(key_row, "Remove key", remove_key)
 	_remove_button.tooltip_text = "Remove this key's terrain and furniture from the palette"
+	_rename_button = _button(key_row, "Rename key...", open_rename_dialog)
+	_rename_button.tooltip_text = "Give this key another symbol here and in every map taking it from the palette"
 	_computer_button = _button(key_row, "Add computer...", func() -> void: edit_computer())
 	terrain = NewSymbolDialog.IdPicker.new("Terrain")
 	furniture = NewSymbolDialog.IdPicker.new("Furniture")
@@ -245,6 +263,7 @@ func _init() -> void:
 			then.call())
 	add_child(confirm)
 	_build_new_dialog()
+	_build_rename_dialog()
 	computer_dialog = ComputerDialog.new()
 	computer_dialog.palette_computer_ready.connect(_on_computer_ready)
 	add_child(computer_dialog)
@@ -255,6 +274,8 @@ func setup(p_session: EditSession) -> void:
 	session = p_session
 	doc = null
 	map_doc = null
+	_deleted_id = ""
+	_deleted_rel = ""
 	terrain.table = session.index.terrain
 	furniture.table = session.index.furniture
 	terrain.refresh()
@@ -447,6 +468,19 @@ func undo() -> void:
 		var name := doc.undo_name()
 		doc.undo()
 		status.text = "Undid " + name
+	elif doc == null and _deleted_id and session.deleted_palette(_deleted_id):
+		var id := _deleted_id
+		var def := session.deleted_palette(id).def
+		var err := session.restore_palette(id)
+		if err:
+			status.text = err
+			return
+		_deleted_id = ""
+		refresh_list()
+		# The definition deleted, even when another of its id is in effect.
+		show_palette(def)
+		status.text = "Restored palette %s." % id
+		files_changed.emit()
 
 
 func redo() -> void:
@@ -457,11 +491,141 @@ func redo() -> void:
 
 
 func save() -> void:
-	if doc == null:
+	var rel := doc.file.rel_path if doc else _deleted_rel
+	if rel.is_empty() or not session.is_dirty(rel):
 		return
-	var err := session.save(doc.file.rel_path)
-	status.text = "Save failed: " + err if err else "Saved %s to the workspace." % doc.file.rel_path
+	var err := session.save(rel)
+	status.text = "Save failed: " + err if err else "Saved %s to the workspace." % rel
+	if not err and doc == null:
+		_deleted_id = ""
 	_after_change()
+
+
+# --- Rename and delete -----------------------------------------------------------
+
+func open_rename_dialog() -> void:
+	if doc == null or key_edit.text.is_empty():
+		return
+	rename_edit.text = ""
+	rename_dialog.title = "Rename '%s' in %s" % [LegendPanel._show_key(key_edit.text), doc.id]
+	_update_rename()
+	_popup(rename_dialog)
+	if rename_edit.is_inside_tree():
+		rename_edit.grab_focus()
+
+
+func _build_rename_dialog() -> void:
+	rename_dialog = ConfirmationDialog.new()
+	rename_dialog.ok_button_text = "Rename"
+	var box := VBoxContainer.new()
+	rename_dialog.add_child(box)
+	box.add_child(_label("New key (maps taking the key from this palette are repainted):"))
+	rename_edit = LineEdit.new()
+	rename_edit.max_length = 4
+	rename_edit.text_changed.connect(func(_t: String) -> void: _update_rename())
+	rename_edit.text_submitted.connect(func(_t: String) -> void:
+		if not rename_dialog.get_ok_button().disabled:
+			rename_dialog.hide()
+			rename_key(rename_edit.text))
+	box.add_child(rename_edit)
+	_rename_info = _label("")
+	_rename_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_rename_info.custom_minimum_size = Vector2(420, 0)
+	box.add_child(_rename_info)
+	rename_dialog.confirmed.connect(func() -> void: rename_key(rename_edit.text))
+	add_child(rename_dialog)
+
+
+func _update_rename() -> void:
+	var why := doc.check_rename(key_edit.text, rename_edit.text) if doc else "No palette."
+	_rename_info.text = why if why else "The maps using %s are checked when you press Rename." % doc.id
+	rename_dialog.get_ok_button().disabled = not why.is_empty()
+
+
+## Renames the Key box's key to [param new_key] (see
+## PaletteImpact.plan_rename), asking first when maps other than the
+## current one are repainted or change. Returns an error, or "" (also while
+## it waits for the confirmation).
+func rename_key(new_key: String) -> String:
+	if doc == null:
+		return "No palette."
+	var old := key_edit.text
+	var plan := PaletteImpact.plan_rename(session, doc, old, new_key)
+	if plan.problem:
+		status.text = plan.problem
+		return plan.problem
+	# The plan is for this palette as it is now; the confirmation may come
+	# after another palette is shown.
+	var planned := doc
+	var run := func() -> void:
+		if doc != planned:
+			status.text = "Not renamed: palette %s isn't shown any more." % planned.id
+			return
+		var err := session.rename_palette_key(doc, plan)
+		if err:
+			status.text = err
+			return
+		key_edit.text = new_key
+		_shown_key = new_key
+		_after_change()
+		show_key(new_key)
+		status.text = "Renamed '%s' to '%s': repainted %s%s (unsaved: Save all saves the maps; Undo here undoes them too)." % [
+			old, new_key, _count_text(plan.repainted),
+			", changed %s" % _count_text(plan.changed) if not plan.changed.is_empty() else ""]
+	var others := (plan.repainted + plan.changed).filter(func(a: PaletteImpact.Affected) -> bool:
+		return map_doc == null or a.ref != map_doc.ref)
+	if others.is_empty():
+		run.call()
+		return ""
+	var lines := PackedStringArray()
+	lines.append("Renaming '%s' to '%s' repaints %s:" % [old, new_key, _count_text(plan.repainted)])
+	lines.append_array(_named(plan.repainted))
+	if not plan.changed.is_empty():
+		lines.append("and changes how %s look (they keep '%s' themselves, or get part of it elsewhere):" % [
+			_count_text(plan.changed), old])
+		lines.append_array(_named(plan.changed))
+	confirm.dialog_text = "\n".join(lines)
+	_pending = run
+	_popup(confirm)
+	return ""
+
+
+## Deletes the palette shown, after asking. Returns why it can't, or "".
+func ask_delete_palette() -> String:
+	if doc == null:
+		return "No palette."
+	var problem := session.check_delete_palette(doc.def)
+	if problem:
+		status.text = problem
+		return problem
+	confirm.dialog_text = "Delete palette %s from %s? Unsaved until you save the file; Undo brings it back until then." % [
+		doc.id, doc.file.rel_path]
+	_pending = delete_palette
+	_popup(confirm)
+	return ""
+
+
+## Deletes the palette shown (see EditSession.delete_palette). Returns an
+## error, or "".
+func delete_palette() -> String:
+	if doc == null:
+		return "No palette."
+	var id := doc.id
+	var rel := doc.file.rel_path
+	var old := doc
+	var err := session.delete_palette(doc.def)
+	if err:
+		status.text = err
+		return err
+	old.changed.disconnect(_on_doc_changed)
+	doc = null
+	_deleted_id = id
+	_deleted_rel = rel
+	key_edit.text = ""
+	_shown_key = ""
+	status.text = "Deleted palette %s from %s (unsaved; Undo brings it back, Save writes the file)." % [id, rel]
+	_after_change()
+	return ""
 
 
 ## Adds this palette to the current map's "palettes" (last, so it wins), or
@@ -517,14 +681,20 @@ func _try(c: PaletteDocument.Change) -> void:
 
 
 func _ask(affected: Array[PaletteImpact.Affected], then: Callable) -> void:
-	var lines := PackedStringArray()
-	for a in affected.slice(0, MAX_NAMED):
-		lines.append("  %s (%s): %s" % [a.ref.title(), a.ref.source.path, a.what()])
-	if affected.size() > MAX_NAMED:
-		lines.append("  ... and %d more" % (affected.size() - MAX_NAMED))
+	var lines := _named(affected)
 	confirm.dialog_text = "This changes %s (the symbols listed, or via a nested chunk they place):\n%s" % [_count_text(affected), "\n".join(lines)]
 	_pending = then
 	_popup(confirm)
+
+
+## One line per map of [param affected] (at most MAX_NAMED).
+static func _named(affected: Array) -> PackedStringArray:
+	var lines := PackedStringArray()
+	for a: PaletteImpact.Affected in affected.slice(0, MAX_NAMED):
+		lines.append("  %s (%s): %s" % [a.ref.title(), a.ref.source.path, a.what()])
+	if affected.size() > MAX_NAMED:
+		lines.append("  ... and %d more" % (affected.size() - MAX_NAMED))
+	return lines
 
 
 static func _count_text(affected: Array) -> String:
@@ -848,11 +1018,16 @@ func _refresh_map_part() -> void:
 
 func _update_buttons() -> void:
 	var has := doc != null
-	_undo_button.disabled = not (has and doc.can_undo())
-	_undo_button.tooltip_text = "Undo " + doc.undo_name() if has and doc.can_undo() else "Undo"
+	var restorable := not has and _deleted_id and session != null and session.deleted_palette(_deleted_id) != null
+	_undo_button.disabled = not ((has and doc.can_undo()) or restorable)
+	_undo_button.tooltip_text = "Undo " + doc.undo_name() if has and doc.can_undo() else (
+			"Undo deleting palette " + _deleted_id if restorable else "Undo")
 	_redo_button.disabled = not (has and doc.can_redo())
 	_redo_button.tooltip_text = "Redo " + doc.redo_name() if has and doc.can_redo() else "Redo"
-	_save_button.disabled = not (has and doc.file.is_dirty())
+	_save_button.disabled = not ((has and doc.file.is_dirty()) or (not has and _deleted_rel and session != null \
+			and session.is_dirty(_deleted_rel)))
+	_delete_button.disabled = not has
+	_rename_button.disabled = not has or not doc.own_keys().has(key_edit.text)
 	_apply_button.disabled = not has or key_edit.text.is_empty()
 	_remove_button.disabled = not has or key_edit.text.is_empty() \
 			or (doc.tile_value(key_edit.text, "terrain") == null and doc.tile_value(key_edit.text, "furniture") == null)

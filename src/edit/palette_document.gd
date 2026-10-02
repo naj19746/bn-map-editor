@@ -19,10 +19,13 @@ signal changed
 ## Where a missing member goes, relative to the others.
 const MEMBER_ORDER := ["type", "id", "parameters", "palettes", "mapping", "terrain", "furniture", "computers",
 		"toilets", "vendingmachines", "items", "item", "monsters", "monster", "vehicles", "nested"]
-## The members an edit can touch (every Placement.MAPPING_KINDS kind among
-## them); each change snapshots all of them.
-const EDITED := ["palettes", "mapping", "terrain", "furniture", "computers", "toilets", "vendingmachines",
-		"items", "item", "monsters", "monster", "vehicles", "nested"]
+## The members an edit can touch: the includes, "mapping" and every
+## MapgenResolver.MAPPING_KINDS kind (a key rename touches them all); each
+## change snapshots all of them.
+const EDITED := ["palettes", "mapping", "terrain", "furniture", "fields", "npcs", "signs", "vendingmachines",
+		"toilets", "gaspumps", "items", "monsters", "vehicles", "item", "artifact", "artifacts", "traps",
+		"monster", "rubble", "computers", "sealed_item", "nested", "liquids", "graffiti", "translate", "zones",
+		"ter_furn_transforms", "faction_owner_character", "remove_all"]
 const TILE_KINDS := ["terrain", "furniture"]
 
 
@@ -35,6 +38,10 @@ class Change:
 	## The palette's member order before and after.
 	var order_before := []
 	var order_after := []
+	## Run after the change is undone / redone (and before changed is
+	## emitted): e.g. a key rename's repainted maps follow it.
+	var on_undo := Callable()
+	var on_redo := Callable()
 
 
 var index: DataIndex
@@ -250,6 +257,49 @@ func build_set_tiles(key: String, terrain: Variant, furniture: Variant, name := 
 				_set_tile(p, key, pair[0], pair[1]))
 
 
+## Why [param old] can't be renamed [param new_key], or "": the palette
+## must define [param old] itself, and [param new_key] must be free in it
+## and its includes (the maps using it are checked by
+## PaletteImpact.plan_rename).
+func check_rename(old: String, new_key: String) -> String:
+	if not own_keys().has(old):
+		return "Palette %s doesn't define '%s' itself." % [id, old]
+	if old == new_key:
+		return "The new key is the same as the old one."
+	var shape := MapDocument.check_key_shape(new_key)
+	if shape:
+		return shape
+	if new_key == " " or new_key == ".":
+		return "' ' and '.' are left undefined on purpose; pick another key."
+	var v := view()
+	if v.symbols.has(new_key):
+		var info: ResolvedMapgen.SymbolInfo = v.symbols[new_key]
+		var from := PackedStringArray()
+		for b: ResolvedMapgen.Binding in MapDocument._bindings(info):
+			var label := "the palette itself" if b.source == ResolvedMapgen.SOURCE_MAP else b.source_label()
+			if not from.has(label):
+				from.append(label)
+		return "'%s' is already defined by %s." % [new_key, ", ".join(from)]
+	for r in MapgenResolver.resolve_variants(index, {"nested_mapgen_id": id, "object": palette()}).slice(1):
+		if r.symbols.has(new_key):
+			return "'%s' is already defined by %s, an option of an included palette choice." % [
+				new_key, ", ".join(r.palettes)]
+	return ""
+
+
+## A change renaming the palette's own key [param old] to [param new_key]
+## in every kind and "mapping", each keeping its place. Null when
+## check_rename fails.
+func build_rename_key(old: String, new_key: String) -> Change:
+	if check_rename(old, new_key):
+		return null
+	return _build("Rename '%s' to '%s'" % [old, new_key], func(p: Dictionary) -> void:
+		for member: String in MapgenResolver.MAPPING_KINDS + ["mapping"]:
+			var defs: Variant = p.get(member)
+			if defs is Dictionary and defs.has(old):
+				MapDocument.rename_key_in(defs, old, new_key))
+
+
 ## A change removing [param key]'s terrain and furniture from this palette.
 func build_remove_key(key: String) -> Change:
 	return build_set_tiles(key, "", "", "Remove '%s'" % key)
@@ -362,6 +412,11 @@ func can_undo() -> bool:
 	return not _undo.is_empty()
 
 
+## The number of steps undo() can take back.
+func undo_count() -> int:
+	return _undo.size()
+
+
 func can_redo() -> bool:
 	return not _redo.is_empty()
 
@@ -380,6 +435,8 @@ func undo() -> void:
 	var c: Change = _undo.pop_back()
 	apply(c, false)
 	_redo.append(c)
+	if c.on_undo.is_valid():
+		c.on_undo.call()
 	changed.emit()
 
 
@@ -389,4 +446,6 @@ func redo() -> void:
 	var c: Change = _redo.pop_back()
 	apply(c, true)
 	_undo.append(c)
+	if c.on_redo.is_valid():
+		c.on_redo.call()
 	changed.emit()

@@ -1356,16 +1356,16 @@ func undo() -> void:
 	var m := current_map()
 	if m and m.doc.can_undo():
 		var name := m.doc.undo_name()
-		m.doc.undo()
-		_status.text = "Undid " + name
+		var err := m.doc.undo()
+		_status.text = err if err else "Undid " + name
 
 
 func redo() -> void:
 	var m := current_map()
 	if m and m.doc.can_redo():
 		var name := m.doc.redo_name()
-		m.doc.redo()
-		_status.text = "Redid " + name
+		var err := m.doc.redo()
+		_status.text = err if err else "Redid " + name
 
 
 ## Saves the current map's file to the workspace. Returns an error or "".

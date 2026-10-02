@@ -112,9 +112,9 @@ func test_protocol() -> void:
 		check(t.description is String and t.inputSchema.type == "object", "tool %s has a schema" % t.name)
 	check_eq(names, ["search_maps", "get_map", "get_palette", "validate_map", "validate_palette", "lookup_id",
 		"list_mods", "sync_status", "paint_cells", "paint_rect", "paint_line", "fill", "paint_rows", "add_symbol",
-		"remove_symbol", "undo", "redo", "save", "discard", "reload", "add_placement", "update_placement",
-		"remove_placement", "set_map_palettes", "set_symbol_mapping", "create_mapgen", "get_building", "validate_building", "create_building",
-		"edit_palette_key", "set_palette_includes", "create_palette"])
+		"remove_symbol", "rename_symbol", "undo", "redo", "save", "discard", "reload", "add_placement", "update_placement",
+		"remove_placement", "set_map_palettes", "set_map_fields", "set_symbol_mapping", "create_mapgen", "get_building", "validate_building", "create_building",
+		"edit_palette_key", "set_palette_includes", "rename_key", "delete_palette", "create_palette"])
 	check_eq(reply.call('{"jsonrpc":"2.0","id":4,"method":"nope"}').error.code, McpServer.METHOD_NOT_FOUND)
 	check_eq(reply.call('{"jsonrpc":"2.0","id":5,"method":').error.code, McpServer.PARSE_ERROR)
 	check_eq(reply.call('{"id":6,"method":"ping"}').error.code, McpServer.INVALID_REQUEST, "no jsonrpc member")
@@ -314,7 +314,8 @@ func test_paint_tools() -> void:
 	_setup()
 	var house := {"id": "house"}
 	check_eq(_call("paint_cells", house.merged({"key": "x", "cells": [[3, 3], [4, 3], [3, 3]]})),
-			{"changed": 2, "undo": "Paint 'x'", "problems": NONE, "dirty": true}, "a cell listed twice counts once")
+			{"changed": 2, "keys": {"x": "t_dirt (map)"}, "undo": "Paint 'x'", "problems": NONE, "dirty": true},
+			"a cell listed twice counts once")
 	check_eq(_call("get_map", house).rows[3], "#..xx" + ".".repeat(18) + "#")
 	var outside := _call("paint_cells", house.merged({"key": "#", "cells": [[30, 1], [1, 1]]}))
 	check_eq(outside.get("changed"), 1)
@@ -457,6 +458,66 @@ func test_save_guards() -> void:
 
 
 ## Stage 9d: placements, palettes and symbol mappings.
+func test_fields_and_batches() -> void:
+	_setup()
+	var house := {"id": "house"}
+	# set_map_fields: one undo step for all fields; null removes.
+	var set := _call("set_map_fields", house.merged({"fill_ter": "t_dirt", "rotation": [0, 3]}))
+	check_eq([set.get("fields"), set.get("undo")], [{"fill_ter": "t_dirt", "rotation": [0, 3]},
+		"Set fill_ter, rotation"])
+	check_eq(_call("get_map", house).get("fill_ter"), "t_dirt")
+	check_eq(_call("set_map_fields", house.merged({"rotation": null})).get("fields"), {"rotation": null})
+	check_eq(_tools.session.open(_tools.session.index.mapgens_for("house")[0]).object().has("rotation"),
+		false)
+	_call("undo", house)
+	_call("undo", house)
+	check_eq(_call("get_map", house).get("fill_ter"), "t_grass", "undone")
+	_fails("set_map_fields", house.merged({"fill_ter": "t_nope"}), "Unknown terrain")
+	_fails("set_map_fields", house.merged({"fill_ter": {"distribution": [["t_dirt", 1]]}}), "BN ignores")
+	check_eq(_call("set_map_fields", house.merged({"fill_ter": ""})).get("fields"), {"fill_ter": null})
+	_call("undo", house)
+	_fails("set_map_fields", house.merged({"rotation": "x"}), "rotation is an int")
+	_fails("set_map_fields", house.merged({"predecessor_mapgen": "nope"}), "overmap_terrain id")
+	_fails("set_map_fields", house, "Pass at least one")
+
+	# add_symbol with symbols: all or nothing, one undo step.
+	var syms := _call("add_symbol", house.merged({"symbols": [{"key": "A", "terrain": "t_dirt"},
+		{"key": "B", "furniture": "f_chair"}]}))
+	check_eq(syms.get("symbols", {}).keys(), ["A", "B"])
+	check_eq(syms.get("undo"), "New symbols")
+	_fails("add_symbol", house.merged({"symbols": [{"key": "C", "terrain": "t_dirt"},
+		{"key": "h", "furniture": "f_chair"}]}), "symbols[1]")
+	var doc := _tools.session.open(_tools.session.index.mapgens_for("house")[0])
+	check_eq([doc.own_keys().has("A"), doc.own_keys().has("C")], [true, false], "the refused batch added nothing")
+	_fails("add_symbol", house.merged({"symbols": [{"key": "D", "tree": "t_dirt"}]}), "Unknown argument")
+	_fails("add_symbol", house.merged({"key": "E", "symbols": []}), "not both")
+	_call("undo", house)
+	check_eq([doc.own_keys().has("A"), doc.own_keys().has("B")], [false, false], "one undo takes both back")
+
+	# add_placement with entries: all or nothing.
+	var placed := _call("add_placement", house.merged({"entries": [
+		{"member": "place_monster", "entry": {"monster": "mon_zombie", "x": 2, "y": 2}},
+		{"member": "place_items", "entry": {"item": "stuff", "x": [1, 3], "y": 4, "chance": 50}}]}))
+	check_eq(placed.get("placements", []).map(func(p: Dictionary) -> Array: return [p.member, p.index]),
+		[["place_monster", 0], ["place_items", 0]])
+	_fails("add_placement", house.merged({"entries": [
+		{"member": "place_monster", "entry": {"monster": "mon_zombie", "x": 3, "y": 3}},
+		{"member": "nope", "entry": {}}]}), "entries[1]")
+	_fails("add_placement", house.merged({"entries": [
+		{"member": "place_monster", "entry": {"monster": "mon_zombie", "x": 3, "y": 3}},
+		{"member": "place_monster", "entry": {"monster": "mon_zombie", "x": [20, 30], "y": 3}}]}), "entries[1]")
+	var monsters: Array = _call("get_map", house).placements.filter(func(p: Dictionary) -> bool:
+		return p.member == "place_monster")
+	check_eq(monsters.size(), 1, "refused batches added nothing")
+	_fails("add_placement", house.merged({"member": "place_monster"}), "both member and entry")
+
+	# Paint answers say what each key means, and where from.
+	var painted := _call("paint_rows", house.merged({"x": 1, "y": 1, "rows": ["hx"]}))
+	check_eq(painted.get("keys"), {"h": "no terrain: fill_ter t_grass; f_chair (palette pal); items (palette pal)",
+		"x": "t_dirt (map)"})
+	_cleanup()
+
+
 func test_placement_tools() -> void:
 	_setup()
 	var house := {"id": "house"}
@@ -616,7 +677,7 @@ func test_stdio() -> void:
 		return
 	check_eq(replies.map(func(r: Dictionary) -> Variant: return r.get("id")), [1, 2, 3, 4])
 	check_eq(replies[0].result.serverInfo.name, "bn-map-editor")
-	check_eq(replies[1].result.tools.size(), 32)
+	check_eq(replies[1].result.tools.size(), 36)
 	var found: Dictionary = BnJson.parse(replies[2].result.content[0].text).value
 	check_eq(found.maps[0].ids, ["chunk_a"])
 	var m: Dictionary = BnJson.parse(replies[3].result.content[0].text).value

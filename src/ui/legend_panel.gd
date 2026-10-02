@@ -9,7 +9,11 @@ extends VBoxContainer
 ## map defines it, else in the palette editor at the palette defining it.
 ## Below the list, the selected symbol's "nested", "items", ... mappings
 ## (SymbolPieces): the map's own are edited there, a palette's open in the
-## palette editor.
+## palette editor. "Rename..." and "Remove" act on a symbol the map defines
+## itself (every kind it defines; renaming repaints its cells too), each one
+## undo step of the map. The fill_ter row above the list sets the map's
+## fill_ter (the terrain of cells whose symbol gives none), or removes it
+## when left blank; chunks have none.
 
 ## A symbol was selected ("" when the selection was cleared).
 signal key_selected(key: String)
@@ -46,8 +50,21 @@ var _editable := true
 var _new_button: Button
 var _new_computer_button: Button
 var _edit_computer_button: Button
+var _rename_button: Button
+var _remove_button: Button
+## Asks for the new symbol of "Rename...".
+var rename_dialog: ConfirmationDialog
+var rename_edit: LineEdit
+var _rename_info: Label
 ## What the selected computer reaches (see set_reach()).
 var reach_label: Label
+## The fill_ter row (hidden for chunks): the map's fill_ter, applied on
+## Enter or when it loses focus.
+var fill_row: HBoxContainer
+var fill_edit: LineEdit
+var fill_completer: IdCompleter
+## The map whose fill_ter the row holds (typed text never moves to another).
+var _fill_doc: MapDocument
 
 
 func _init() -> void:
@@ -86,6 +103,19 @@ func _init() -> void:
 		if _selected is String:
 			edit_computer_requested.emit(_selected))
 	row.add_child(_edit_computer_button)
+	row.add_child(VSeparator.new())
+	_rename_button = Button.new()
+	_rename_button.text = "Rename..."
+	_rename_button.disabled = true
+	_rename_button.pressed.connect(open_rename_dialog)
+	row.add_child(_rename_button)
+	_remove_button = Button.new()
+	_remove_button.text = "Remove"
+	_remove_button.disabled = true
+	_remove_button.pressed.connect(func() -> void: remove_selected())
+	row.add_child(_remove_button)
+	_build_rename_dialog()
+	_build_fill_row()
 	var split := VSplitContainer.new()
 	split.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	add_child(split)
@@ -163,7 +193,72 @@ func show_map(ascii: AsciiMap, editable := true, p_doc: MapDocument = null) -> v
 	_new_button.disabled = ascii == null or not editable
 	_new_computer_button.disabled = _new_button.disabled
 	_editable = editable
+	_update_fill_row()
 	_rebuild()
+
+
+func _build_fill_row() -> void:
+	fill_row = HBoxContainer.new()
+	fill_row.visible = false
+	add_child(fill_row)
+	var l := Label.new()
+	l.text = "fill_ter:"
+	fill_row.add_child(l)
+	fill_edit = LineEdit.new()
+	fill_edit.placeholder_text = "none: every cell needs a terrain"
+	fill_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	fill_edit.tooltip_text = "Terrain of cells whose symbol sets none (and of undefined ' ' / '.'). " \
+			+ "Leave blank for none: then BN only loads the map if every cell gets a terrain " \
+			+ "(or it has a predecessor_mapgen)."
+	fill_edit.text_submitted.connect(func(_t: String) -> void: apply_fill())
+	fill_edit.focus_exited.connect(func() -> void: apply_fill())
+	fill_row.add_child(fill_edit)
+	fill_completer = IdCompleter.new(fill_edit, func() -> PackedStringArray:
+		return Validator.id_candidates(doc.index, "terrain") if doc else PackedStringArray())
+
+
+## Shows the map's fill_ter in the row (unless it's being typed in).
+func _update_fill_row() -> void:
+	fill_row.visible = doc != null and doc.ref.kind == DataIndex.MapgenRef.OM_TERRAIN
+	if not fill_row.visible:
+		_fill_doc = null
+		return
+	fill_edit.editable = _editable
+	if doc != _fill_doc or not fill_edit.has_focus():
+		fill_edit.text = _fill_text()
+	_fill_doc = doc
+
+
+## The map's fill_ter as written (JSON for a non-string, which BN ignores).
+func _fill_text() -> String:
+	var v: Variant = doc.object().get("fill_ter")
+	return "" if v == null else (v if v is String else JSON.stringify(v))
+
+
+## Sets the map's fill_ter to the row's text (none when blank). An unknown
+## terrain is refused and the row shows the map's again. Returns an error,
+## or "".
+func apply_fill() -> String:
+	if doc == null or not fill_row.visible or not _editable:
+		return ""
+	var id := fill_edit.text.strip_edges()
+	if id == _fill_text():
+		return ""
+	var why := doc.set_fill_ter(id)
+	if why:
+		fill_edit.text = _fill_text()
+		message.emit(why)
+		return why
+	var bare := doc.keys_without_terrain()
+	var shown := ", ".join(Array(bare).map(func(k: String) -> String: return "'%s'" % _show_key(k)))
+	if id:
+		message.emit("fill_ter is now %s%s (undo with Ctrl+Z)." % [id,
+				": %s show it" % shown if shown else ""])
+	elif bare.is_empty() or not doc.resolved.predecessor_mapgen.is_empty():
+		message.emit("Removed fill_ter (undo with Ctrl+Z).")
+	else:
+		message.emit("Removed fill_ter: %s now have no terrain, so BN won't load the map until they do (undo with Ctrl+Z)." % shown)
+	return ""
 
 
 ## Selects [param key]'s entry without emitting key_selected.
@@ -206,12 +301,110 @@ func computer_palette(key: String) -> String:
 	return b.source if b.from_palette() else ""
 
 
+## Why the selected symbol can't be renamed or removed ("" if it can): the
+## map must define it itself.
+func own_state() -> String:
+	if doc == null or not _editable:
+		return "Nothing to edit."
+	if not _selected is String:
+		return "Select a symbol."
+	if not doc.defined_keys().has(_selected):
+		return "'%s' isn't defined in the map itself; rename or remove it in its palette." % _show_key(_selected)
+	return ""
+
+
+## Renames the selected symbol (the map's own) to [param new_key],
+## repainting its cells; it stays selected (and the brush) under its new
+## name. Returns an error, or "".
+func rename_selected(new_key: String) -> String:
+	var why := own_state()
+	if why.is_empty():
+		why = doc.rename_own_symbol(_selected, new_key)
+	if why:
+		message.emit(why)
+		return why
+	var old: String = _selected
+	_selected = new_key
+	message.emit("Renamed '%s' to '%s' (undo with Ctrl+Z)." % [_show_key(old), _show_key(new_key)])
+	select_key(new_key)
+	key_selected.emit(new_key)
+	return ""
+
+
+## Removes the map's own definitions of the selected symbol (every kind).
+## Returns an error, or "".
+func remove_selected() -> String:
+	var why := own_state()
+	if why:
+		message.emit(why)
+		return why
+	var key: String = _selected
+	doc.remove_own_symbol(key, "", true)
+	var cells := 0
+	for row in doc.resolved.cells:
+		cells += row.count(key)
+	var left := ""
+	if cells:
+		left = " %d cell(s) still use it: %s." % [cells, "now from %s" % ", ".join(doc.symbol_sources(key)) \
+				if doc.resolved.symbols.has(key) else "undefined now"]
+	message.emit("Removed the map's own '%s'.%s (undo with Ctrl+Z)" % [_show_key(key), left])
+	return ""
+
+
+func open_rename_dialog() -> void:
+	if own_state():
+		return
+	rename_edit.text = ""
+	rename_dialog.title = "Rename '%s'" % _show_key(_selected)
+	_update_rename()
+	PaletteEditor._popup(rename_dialog)
+	if rename_edit.is_inside_tree():
+		rename_edit.grab_focus()
+
+
+func _build_rename_dialog() -> void:
+	rename_dialog = ConfirmationDialog.new()
+	rename_dialog.ok_button_text = "Rename"
+	var box := VBoxContainer.new()
+	rename_dialog.add_child(box)
+	var l := Label.new()
+	l.text = "New symbol (its definitions and every cell painted with it follow):"
+	box.add_child(l)
+	rename_edit = LineEdit.new()
+	rename_edit.max_length = 4
+	rename_edit.text_changed.connect(func(_t: String) -> void: _update_rename())
+	rename_edit.text_submitted.connect(func(_t: String) -> void:
+		if not rename_dialog.get_ok_button().disabled:
+			rename_dialog.hide()
+			rename_selected(rename_edit.text))
+	box.add_child(rename_edit)
+	_rename_info = Label.new()
+	_rename_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_rename_info.custom_minimum_size = Vector2(360, 0)
+	box.add_child(_rename_info)
+	rename_dialog.confirmed.connect(func() -> void: rename_selected(rename_edit.text))
+	add_child(rename_dialog)
+
+
+func _update_rename() -> void:
+	var why := own_state()
+	if why.is_empty():
+		why = doc.check_rename(_selected, rename_edit.text)
+	_rename_info.text = why
+	rename_dialog.get_ok_button().disabled = not why.is_empty()
+
+
 func _update_computer_button() -> void:
 	var why := computer_state(_selected) if _selected is String else "Select a computer symbol."
 	_edit_computer_button.disabled = not why.is_empty()
 	var pal := computer_palette(_selected) if _selected is String else ""
 	_edit_computer_button.tooltip_text = why if why else ("Edit the selected symbol's computer in palette %s (every map using it changes)" % pal \
 			if pal else "Edit the selected symbol's computer (or double-click it)")
+	var own := own_state()
+	_rename_button.disabled = not own.is_empty()
+	_remove_button.disabled = not own.is_empty()
+	_rename_button.tooltip_text = own if own else "Give the selected symbol another key: its definitions in the map and every cell painted with it"
+	_remove_button.tooltip_text = own if own else "Remove the map's own definitions of the selected symbol (cells keep the key)"
 
 
 ## The palette defining the selected symbol's terrain (else furniture, else

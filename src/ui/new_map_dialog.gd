@@ -70,6 +70,7 @@ func _init() -> void:
 		_validate())
 	fill_edit = _field(grid, "fill_ter:", LineEdit.new())
 	fill_edit.text = EditSession.DEFAULT_FILL
+	fill_edit.placeholder_text = "none: every cell needs a terrain"
 	fill_edit.text_changed.connect(func(_t: String) -> void: _validate())
 	fill_completer = IdCompleter.new(fill_edit, func() -> PackedStringArray:
 		return Validator.id_candidates(_session.index, "terrain") if _session else PackedStringArray())

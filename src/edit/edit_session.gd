@@ -22,6 +22,11 @@ extends RefCounted
 ## Files other programs change (the MCP server next to the editor) are
 ## noticed by external_changes(): the open files, and the workspace's
 ## manifest and the files it lists, against what was read or saved.
+##
+## Taking an object out of a file (a deleted palette, an undone
+## overmap_terrain stub) moves every later object down one index: the
+## index's Sources (DataIndex.shift_sources) and the open documents follow
+## (_remove_object / _insert_object).
 
 ## A map changed (a stroke's cells, or a completed edit), or the chunks it
 ## draws did: views drawing it elsewhere (neighbours, ghosts) redraw it.
@@ -59,6 +64,9 @@ var _new_overmap := {}
 var _new_palettes := {}
 ## rel path -> Array of DataIndex.Building the editor created there.
 var _new_buildings := {}
+## rel path -> Array of DeletedPalette, oldest first, until the file is
+## saved or discarded.
+var _deleted := {}
 ## rel path of a map file -> the building files a new level of it edited,
 ## released with it (see add_level_tiles).
 var _linked := {}
@@ -70,6 +78,21 @@ var _stamps := {}
 ## again only when its time or size moved (or it was written in the last
 ## couple of seconds, which a time in whole seconds can't tell apart).
 var _hashes := {}
+
+
+## A palette delete_palette() took out of its file, and where it was.
+class DeletedPalette:
+	var def: DataIndex.Definition
+	var rel := ""
+	var removed: JsonFile.Removed
+	## Its place among the definitions of its id (load order).
+	var position := 0
+	## It was created in this session and not saved.
+	var was_new := false
+	## The undo steps the definition of its id in effect afterwards had
+	## then (0 when it had no document): more now are edits made after
+	## the deletion, which undo takes back first.
+	var edits_before := 0
 
 
 func _init(p_index: DataIndex, p_workspace: Workspace, p_formatter: JsonFormatter = null) -> void:
@@ -366,6 +389,7 @@ func save(rel: String) -> String:
 	_new_refs.erase(rel)
 	_new_overmap.erase(rel)
 	_new_palettes.erase(rel)
+	_deleted.erase(rel)
 	return ""
 
 
@@ -520,12 +544,30 @@ func _release_file(rel: String) -> void:
 	_new_overmap.erase(rel)
 	_new_palettes.erase(rel)
 	_new_buildings.erase(rel)
+	# Deleted palettes are back (last first), and the objects after them at
+	# their indexes on disk.
+	var deleted: Array = _deleted.get(rel, [])
+	for k in range(deleted.size() - 1, -1, -1):
+		var d: DeletedPalette = deleted[k]
+		if not d.was_new:
+			index.shift_sources(rel, d.removed.index, 1)
+			index.insert_palette(d.def, d.position)
+	_deleted.erase(rel)
 	files.erase(rel)
 	objects.forget(rel)
 	if dirty:
 		_reindex_from_disk(rel)
-		# Chunks or palettes from the file are back as on disk.
+		# Palettes from the file are back as on disk: the maps using them
+		# resolve again. Chunks from it too: the maps placing them lay them
+		# out again.
+		var palettes := PackedStringArray()
+		for id: String in index.palettes:
+			for def: DataIndex.Definition in index.palettes[id]:
+				if def.source.path == rel and not palettes.has(id):
+					palettes.append(id)
 		for d in docs:
+			if Array(palettes).any(func(id: String) -> bool: return d.uses_palette(id)):
+				d.refresh()
 			d.refresh_overlay()
 	for other: String in _linked.get(rel, []):
 		_release_file(other)
@@ -558,6 +600,17 @@ func _reindex_from_disk(rel: String) -> void:
 			var obj: Variant = on_disk[ref.source.index].get("object")
 			ref.palettes = DataIndex.palette_options(obj) if obj is Dictionary else PackedStringArray()
 			ref.chunks = DataIndex.chunk_options(obj) if obj is Dictionary else PackedStringArray()
+	# An overmap_terrain the editor took out (an undone stub, saved before):
+	# the ids the index lost are back (the last definition, as loading does).
+	var lost := {}
+	for i in on_disk.size():
+		var o: Variant = on_disk[i]
+		if o is Dictionary and o.get("type") == "overmap_terrain":
+			var src := DataIndex.Source.new(index.mod_for_path(rel), rel, i)
+			for id in DataIndex._tags(o.get("id", [])):
+				if lost.has(id) or not index.overmap_terrain.has(id):
+					lost[id] = src
+	index.overmap_terrain.merge(lost, true)
 
 
 # --- New palette ---------------------------------------------------------------
@@ -630,6 +683,7 @@ func _check_new_path(rel: String) -> String:
 class NewMapgen:
 	var rel_path := ""
 	var ids: Array[PackedStringArray] = []
+	## "" for none (every cell then needs a terrain).
 	var fill_ter := EditSession.DEFAULT_FILL
 	var palettes := PackedStringArray()
 	## Also add overmap_terrain entries for ids that have none.
@@ -700,7 +754,7 @@ func check_new_mapgen(spec: NewMapgen) -> String:
 			if seen.has(id):
 				return "\"%s\" appears twice in the grid." % id
 			seen[id] = true
-	if not spec.is_chunk() and not index.terrain.has(spec.fill_ter):
+	if not spec.is_chunk() and spec.fill_ter and not index.terrain.has(spec.fill_ter):
 		return "Unknown fill_ter terrain \"%s\"." % spec.fill_ter
 	for p in spec.palettes:
 		if index.palette(p) == null:
@@ -754,7 +808,8 @@ static func _new_mapgen_object(spec: NewMapgen) -> Dictionary:
 		obj["mapgensize"] = [cells.x, cells.y]
 	else:
 		cells = Vector2i(spec.ids[0].size(), spec.ids.size()) * MapgenResolver.OMT_SIZE
-		obj["fill_ter"] = spec.fill_ter
+		if spec.fill_ter:
+			obj["fill_ter"] = spec.fill_ter
 	var rows := []
 	for y in cells.y:
 		rows.append(" ".repeat(cells.x))
@@ -774,20 +829,301 @@ static func _new_mapgen_object(spec: NewMapgen) -> Dictionary:
 
 ## Appends a minimal overmap_terrain for [param doc]'s om_terrain ids that
 ## have none, next to the map in its file, copying [param base] ("":
-## OVERMAP_STUB_BASE). Returns the ids added.
+## OVERMAP_STUB_BASE), as an undo step of the map (undoing it takes the
+## stub out of the file again). Returns the ids added.
 func add_missing_overmap_terrain(doc: MapDocument, base := "") -> PackedStringArray:
 	var missing := doc.missing_overmap_terrain()
 	if missing.is_empty():
 		return missing
 	var rel := doc.file.rel_path
-	var i := doc.file.append(overmap_stub(missing, base))
+	var stub := overmap_stub(missing, base)
+	var c := MapDocument.Change.new()
+	c.name = "Add overmap_terrain " + ", ".join(missing)
+	# Bound to the path, the stub and a state shared by undo and redo, not
+	# the document (a reference cycle).
+	var state := {"removed": null, "unsaved": true}
+	c.file_undo = _remove_stub.bind(rel, stub, missing, state)
+	c.file_redo = _append_stub.bind(rel, stub, missing, state)
+	_append_stub(rel, stub, missing, state)
+	doc.record(c)
+	return missing
+
+
+## Appends [param stub] (an overmap_terrain for [param ids]) to open file
+## [param rel] and indexes it; a redo puts back what _remove_stub took out
+## (its saved state too). [param state]: "removed", the JsonFile.Removed of
+## the last undo; "unsaved", the stub isn't in the file on disk (discard
+## takes its ids out of the index). Returns "".
+func _append_stub(rel: String, stub: Dictionary, ids: PackedStringArray, state: Dictionary) -> String:
+	var f: JsonFile = files.get(rel)
+	if f == null:
+		return "%s isn't open any more." % rel
+	var removed: JsonFile.Removed = state.removed
+	var i := f.objects.size()
+	if removed and removed.index == i:
+		_insert_object(rel, removed)
+	else:
+		f.append(stub)
+	state.removed = null
 	var src := DataIndex.Source.new(index.mod_for_path(rel), rel, i)
-	for id in missing:
+	for id in ids:
 		index.overmap_terrain[id] = src
-		_remember(_new_overmap, rel, id)
+		if state.unsaved:
+			_remember(_new_overmap, rel, id)
+	_forget_all_findings()
+	return ""
+
+
+## Takes [param stub] out of [param rel] again, when nothing was added to
+## the file after it (nor deleted from after it: that must come back
+## first). Returns why it can't, or "".
+func _remove_stub(rel: String, stub: Dictionary, ids: PackedStringArray, state: Dictionary) -> String:
+	var f: JsonFile = files.get(rel)
+	var i := -1
+	if f:
+		for k in f.objects.size():
+			if is_same(f.objects[k], stub):
+				i = k
+	if i < 0:
+		return "The overmap_terrain for %s is no longer in %s." % [", ".join(ids), rel]
+	if i != f.objects.size() - 1:
+		return "Can't undo adding the overmap_terrain for %s: something was added to %s after it (a new map, level or palette); undo or discard that first." % [
+			", ".join(ids), rel]
+	for d: DeletedPalette in _deleted.get(rel, []):
+		if d.removed.index > i:
+			return "Can't undo adding the overmap_terrain for %s: palette %s was deleted from %s after it; undo that first." % [
+				", ".join(ids), d.def.id, rel]
+	state.unsaved = _new_overmap.has(rel) and _new_overmap[rel].has(ids[0])
+	state.removed = _remove_object(rel, i)
+	for id in ids:
+		index.overmap_terrain.erase(id)
+		if _new_overmap.has(rel):
+			_new_overmap[rel].erase(id)
+	_forget_all_findings()
+	return ""
+
+
+func _forget_all_findings() -> void:
 	for d in docs:
 		d.forget_findings()
-	return missing
+
+
+# --- Taking objects out --------------------------------------------------------
+
+## Takes object [param i] out of open file [param rel]: the index's Sources
+## and the open documents after it move down one. The caller takes the
+## object's own entries out of the index.
+func _remove_object(rel: String, i: int) -> JsonFile.Removed:
+	var f: JsonFile = files[rel]
+	var r := f.remove(i)
+	index.shift_sources(rel, i, -1)
+	_shift_documents(rel, i, -1)
+	objects.forget(rel)
+	return r
+
+
+## Puts back what _remove_object() took out; the caller indexes it again.
+func _insert_object(rel: String, r: JsonFile.Removed) -> void:
+	index.shift_sources(rel, r.index, 1)
+	_shift_documents(rel, r.index, 1)
+	files[rel].insert(r)
+	objects.forget(rel)
+
+
+func _shift_documents(rel: String, at: int, delta: int) -> void:
+	for d in docs:
+		if d.file.rel_path == rel and (d.object_index > at or (delta > 0 and d.object_index == at)):
+			d.object_index += delta
+	for d in palette_docs:
+		if d.file.rel_path == rel and (d.object_index > at or (delta > 0 and d.object_index == at)):
+			d.object_index += delta
+
+
+# --- Deleting a palette --------------------------------------------------------
+
+## What uses palette [param id]: [maps (by title), palettes including it].
+func palette_users(id: String) -> Array:
+	var maps := index.maps_using(id)
+	maps.sort_custom(func(a: DataIndex.MapgenRef, b: DataIndex.MapgenRef) -> bool: return a.title() < b.title())
+	var including := PackedStringArray()
+	for pid: String in index.palettes:
+		var p := index.palette(pid)
+		if pid != id and p and DataIndex.palette_options(p.data).has(id):
+			including.append(pid)
+	including.sort()
+	return [maps, including]
+
+
+## Why [param def] can't be deleted, or "". A palette something loaded
+## uses can't be (unless another definition of its id stays in effect).
+func check_delete_palette(def: DataIndex.Definition) -> String:
+	if def.source.path.is_empty():
+		return "Palette %s has no file." % def.id
+	var defs: Array = index.palettes.get(def.id, [])
+	if not defs.has(def):
+		return "Palette %s (%s) isn't loaded." % [def.id, def.source]
+	if index.palette(def.id) == def:
+		var users := palette_users(def.id)
+		var maps: Array = users[0]
+		var including: PackedStringArray = users[1]
+		if not maps.is_empty() or not including.is_empty():
+			var names := PackedStringArray()
+			for ref: DataIndex.MapgenRef in maps.slice(0, 12):
+				names.append(ref.title())
+			if maps.size() > 12:
+				names.append("%d more" % (maps.size() - 12))
+			var parts := PackedStringArray()
+			if not maps.is_empty():
+				parts.append("%d map(s) (%s)" % [maps.size(), ", ".join(names)])
+			if not including.is_empty():
+				parts.append("palette(s) including it: %s" % ", ".join(including))
+			var also := " and the definition it replaces would take over" if defs.size() > 1 else ""
+			return "Palette %s is used by %s%s; stop using it first." % [def.id, "; ".join(parts), also]
+	var f := get_file(def.source.path)
+	if f == null:
+		return "Can't open %s: %s" % [def.source.path, last_error]
+	if not _is_palette_at(f, def):
+		return "%s #%d is no longer palette %s; reload the data (F5)." % [def.source.path, def.source.index, def.id]
+	return ""
+
+
+static func _is_palette_at(f: JsonFile, def: DataIndex.Definition) -> bool:
+	var i := def.source.index
+	return i < f.objects.size() and f.objects[i] is Dictionary and f.objects[i].get("type") == "palette" \
+			and str(f.objects[i].get("id", "")) == def.id
+
+
+## Takes palette [param def] out of its file (unsaved; the objects after it
+## move down one) and out of the index. An open document of it closes, but
+## the file stays open, with the deletion as an unsaved change until it is
+## saved or discarded. restore_palette() puts it back until then. Returns
+## an error, or "".
+func delete_palette(def: DataIndex.Definition) -> String:
+	var problem := check_delete_palette(def)
+	if problem:
+		return _fail(problem)
+	var rel := def.source.path
+	var doc := palette_doc_for(def)
+	if doc:
+		# Not close_palette(): that would drop the file, deletion and all.
+		palette_docs.erase(doc)
+		doc.changed.disconnect(_on_palette_changed)
+	var d := DeletedPalette.new()
+	d.def = def
+	d.rel = rel
+	d.position = index.palettes[def.id].find(def)
+	d.was_new = _new_palettes.has(rel) and _new_palettes[rel].has(def)
+	if d.was_new:
+		_new_palettes[rel].erase(def)
+	index.remove_palette(def)
+	var now := index.palette(def.id)
+	var now_doc := palette_doc_for(now) if now else null
+	d.edits_before = now_doc.undo_count() if now_doc else 0
+	d.removed = _remove_object(rel, def.source.index)
+	_remember(_deleted, rel, d)
+	_forget_all_findings()
+	return ""
+
+
+## The palette with id [param id] that restore_palette() would put back,
+## or null.
+func deleted_palette(id: String) -> DeletedPalette:
+	for rel: String in _deleted:
+		for d: DeletedPalette in _deleted[rel]:
+			if d.def.id == id:
+				return d
+	return null
+
+
+## The palettes deleted and not saved yet, oldest first per file.
+func deleted_palettes() -> Array[DeletedPalette]:
+	var out: Array[DeletedPalette] = []
+	for rel: String in _deleted:
+		out.append_array(_deleted[rel])
+	return out
+
+
+## Puts the deleted palette [param id] back where it was (an undo of
+## delete_palette). Only the file's last deletion can go back first.
+## Returns an error, or "".
+func restore_palette(id: String) -> String:
+	var d := deleted_palette(id)
+	if d == null:
+		return _fail("No deleted palette %s to restore (only until its file is saved)." % id)
+	var list: Array = _deleted[d.rel]
+	if list[-1] != d:
+		return _fail("Restore palette %s first (deleted from %s after %s)." % [list[-1].def.id, d.rel, id])
+	if d.removed.index > files[d.rel].objects.size():
+		return _fail("Can't restore palette %s: %s has fewer objects than when it was deleted (#%d); redo what took them out first." % [
+			id, d.rel, d.removed.index])
+	list.pop_back()
+	if list.is_empty():
+		_deleted.erase(d.rel)
+	_insert_object(d.rel, d.removed)
+	d.def.source.index = d.removed.index
+	index.insert_palette(d.def, d.position)
+	if d.was_new:
+		_remember(_new_palettes, d.rel, d.def)
+	_forget_all_findings()
+	return ""
+
+
+# --- Renaming a palette key ----------------------------------------------------
+
+## Renames palette key [param plan].old to .new_key as
+## PaletteImpact.plan_rename worked out: one undo step in the palette, and
+## one in each repainted map (opened for it). Undoing the palette's step
+## undoes the maps' too while it is still their last. Refused, changing
+## nothing, when a map to repaint can't be opened (a lua mapgen, an
+## unreadable file). Returns an error, or "".
+func rename_palette_key(doc: PaletteDocument, plan: PaletteImpact.RenamePlan) -> String:
+	if plan.problem:
+		return _fail(plan.problem)
+	var name := "%s (palette %s)" % [plan.change.name, doc.id]
+	var refs: Array[DataIndex.MapgenRef] = []
+	for a in plan.repainted:
+		refs.append(a.ref)
+	# Every map opens before anything changes: one that can't would keep
+	# the old key with the palette no longer defining it.
+	var opened: Array[MapDocument] = []
+	var failed := PackedStringArray()
+	for ref in refs:
+		var was_open := docs.any(func(d: MapDocument) -> bool: return d.ref == ref)
+		var md := open(ref)
+		if md == null:
+			failed.append("%s: %s" % [ref.title(), last_error])
+		elif not was_open:
+			opened.append(md)
+	if not failed.is_empty():
+		for md in opened:
+			close(md)
+		return _fail("Not renamed: these maps using the key can't be repainted: " + "; ".join(failed))
+	plan.change.on_undo = _follow_palette.bind(refs, name, true)
+	plan.change.on_redo = _follow_palette.bind(refs, name, false)
+	doc.commit(plan.change)
+	for ref in refs:
+		var md := open(ref)
+		var points: Array[Vector2i] = []
+		for y in md.resolved.cells.size():
+			var row := md.resolved.cells[y]
+			for x in row.size():
+				if row[x] == plan.old:
+					points.append(Vector2i(x, y))
+		md.paint(points, plan.new_key, name)
+	return ""
+
+
+## The palette step [param name] was undone ([param back]) or redone: the
+## open maps of [param refs] whose last step (or last undone step) it is
+## follow.
+func _follow_palette(refs: Array[DataIndex.MapgenRef], name: String, back: bool) -> void:
+	for d in docs.duplicate():
+		if not refs.has(d.ref):
+			continue
+		if back and d.undo_name() == name:
+			d.undo()
+		elif not back and d.redo_name() == name:
+			d.redo()
 
 
 ## A minimal overmap_terrain for [param ids]: a city building named after
