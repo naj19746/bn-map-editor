@@ -40,14 +40,48 @@ under File > Open BN folder.
 
 ## MCP server
 
-`tools/mcp_server.sh` runs a stdio MCP server that can search, read, validate and edit maps,
-palettes and buildings. To register it with Claude Code:
+The editor can also run as a stdio MCP server, so an AI assistant can work on maps the way you do in
+the editor:
+
+- **Read**: search maps, get a map's rows, legend, placements and an ASCII view, look up palettes,
+  ids, mods and buildings.
+- **Edit**: paint cells, lines, rectangles and fills; add, rename and remove symbols; add, change
+  and remove placements; create new maps, building levels and buildings; edit palettes (with a dry
+  run showing every map an edit would change). Every edit is one undo step.
+- **Validate**: the same findings as the Problems panel, for a map, a palette or a whole building.
+
+Edits stay in memory until the assistant saves, and saves go to your workspace only, never into
+BN. You review them and push them into BN from the editor's Sync window, as with your own edits.
+
+Start the downloaded build with `--headless --mcp`. To register it with Claude Code:
+
+```sh
+# Linux
+claude mcp add bn-map-editor -- /abs/path/to/bn_map_editor.x86_64 --headless --mcp
+# Windows: use the .console.exe next to the .exe, which keeps stdin/stdout attached
+claude mcp add bn-map-editor -- C:\path\to\bn_map_editor.console.exe --headless --mcp
+```
+
+> **TODO:** the MCP server is untested on Windows. The `.console.exe` route above is the expected
+> way to run it, but it hasn't been tried yet; reports welcome.
+
+Other MCP clients take the same command and arguments, e.g. in a JSON config:
+
+```json
+{"mcpServers": {"bn-map-editor": {"command": "/abs/path/to/bn_map_editor.x86_64", "args": ["--headless", "--mcp"]}}}
+```
+
+The server uses the editor's saved BN folder, mods and workspace, so open the editor once first, or
+pass `--bn <path>`, `--workspace <path>` and `--mods <id,id>` after `--mcp`. It reads them when it
+starts: after changing the BN folder or mods in the editor, restart the server (in Claude Code,
+reconnect it from `/mcp`). The editor and the server can share a workspace; each notices the
+other's saves.
+
+From source, register `tools/mcp_server.sh` instead (it takes the same flags):
 
 ```sh
 claude mcp add bn-map-editor -- /abs/path/to/bn_map_editor/tools/mcp_server.sh
 ```
-
-The editor and the server can share a workspace; each notices the other's saves.
 
 ## Development
 
