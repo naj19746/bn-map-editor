@@ -28,11 +28,15 @@ var _pending := Callable()
 func _init() -> void:
 	title = "Sync with BN"
 	ok_button_text = "Close"
-	min_size = Vector2i(900, 560)
+	min_size = Vector2i(520, 380)
 	var box := VBoxContainer.new()
 	add_child(box)
 	_header = Label.new()
-	_header.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	# Not autowrapped: a wrapped Label measured while narrow asks for a huge
+	# height, and the dialog grows to fit it. Long paths are cut; the
+	# tooltip has them whole.
+	_header.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	_header.mouse_filter = Control.MOUSE_FILTER_PASS
 	box.add_child(_header)
 	var split := VSplitContainer.new()
 	split.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -45,15 +49,18 @@ func _init() -> void:
 	tree.set_column_title(1, "Status")
 	tree.set_column_title(2, "Objects")
 	tree.set_column_expand_ratio(0, 3)
-	tree.set_column_expand_ratio(1, 2)
+	tree.set_column_expand_ratio(1, 1)
 	tree.set_column_expand_ratio(2, 2)
-	tree.custom_minimum_size = Vector2(0, 260)
+	tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	tree.custom_minimum_size = Vector2(0, 100)
 	tree.item_selected.connect(_show_details)
 	tree.item_edited.connect(_update_buttons)
 	split.add_child(tree)
 	details = TextEdit.new()
 	details.editable = false
-	details.custom_minimum_size = Vector2(0, 140)
+	details.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+	details.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	details.custom_minimum_size = Vector2(0, 80)
 	split.add_child(details)
 	var buttons := HBoxContainer.new()
 	box.add_child(buttons)
@@ -80,9 +87,29 @@ func _init() -> void:
 	add_child(_confirm)
 
 
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_ENTER_TREE:
+		get_tree().root.size_changed.connect(_fit_to_window)
+	elif what == NOTIFICATION_EXIT_TREE:
+		get_tree().root.size_changed.disconnect(_fit_to_window)
+
+
 func open(p_session: EditSession) -> void:
 	setup(p_session)
-	popup_centered_ratio(0.7)
+	popup_centered_clamped(Vector2i(1200, 760), 0.85)
+	_fit_to_window()
+
+
+## Keeps the window inside the editor's window, shrinking it if it's bigger.
+func _fit_to_window() -> void:
+	if not visible:
+		return
+	var area := Vector2i(get_tree().root.get_visible_rect().size)
+	var title_h := get_theme_constant("title_height")
+	var room := Vector2i(area.x, area.y - title_h)
+	size = Vector2i(mini(size.x, room.x), mini(size.y, room.y)).max(min_size)
+	position = Vector2i(clampi(position.x, 0, maxi(area.x - size.x, 0)),
+			clampi(position.y, title_h, maxi(area.y - size.y, title_h)))
 
 
 func setup(p_session: EditSession) -> void:
@@ -102,6 +129,7 @@ func refresh_list() -> void:
 	var commit := Workspace.bn_commit(ws.bn_path)
 	_header.text = "Workspace: %s\nBN: %s%s\nPush copies files into BN and deletes their workspace copies. Nothing is committed." % [
 		ws.root, ws.bn_path, " (at %s)" % commit.left(10) if commit else ""]
+	_header.tooltip_text = _header.text
 	statuses = sync.scan()
 	tree.clear()
 	var root := tree.create_item()
@@ -116,7 +144,9 @@ func refresh_list() -> void:
 		if s.is_conflict() or s.state == WorkspaceSync.State.MISSING:
 			item.set_custom_color(1, Color(1, 0.6, 0.5))
 		item.set_text(2, "" if s.state in [WorkspaceSync.State.SAME, WorkspaceSync.State.MISSING] else s.summary_text())
-		item.set_tooltip_text(0, s.rel)
+		for c in 3:
+			item.set_text_overrun_behavior(c, TextServer.OVERRUN_TRIM_ELLIPSIS)
+			item.set_tooltip_text(c, item.get_text(c))
 		item.set_metadata(0, s)
 	if statuses.is_empty():
 		details.text = "The workspace has no files. Edits saved in the editor show up here."
