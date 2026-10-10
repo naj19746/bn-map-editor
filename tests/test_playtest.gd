@@ -81,6 +81,8 @@ func _options() -> Playtest.Options:
 	o.template_world = ""
 	# Today's behavior (the map's own ids); the own_terrain tests turn it on.
 	o.own_start_terrain = false
+	# A start on the building's ground floor; test_start_outside turns it on.
+	o.start_outside = false
 	# The character and world extras have their own tests.
 	o.strong_character = false
 	o.daylight = false
@@ -255,6 +257,31 @@ func test_upper_floor_starts_on_the_ground() -> void:
 	check(lua.contains("local stairs = \"GOES_DOWN\""), "arrives on the stairs down")
 	check(lua.contains("game.add_hook(\"on_game_started\""), "the hook")
 	check(lua.contains("gdebug.log_error(\"bnme_playtest: "), "a failure names the mod")
+	_cleanup()
+
+
+func test_start_outside() -> void:
+	_setup()
+	var o := _options()
+	o.start_outside = true
+	var b := _build(_ref(HOUSE, 0), o)
+	check_eq(b.start_terrain, PackedStringArray([Playtest.START_TILE]))
+	var mod: Array = _read(b.basepath.path_join(MOD).path_join(Playtest.MOD_FILE))
+	check_eq(mod[0].terrain, [Playtest.START_TILE], "the start location")
+	check_eq(mod[0].flags, ["ALLOW_OUTSIDE"], "BN only starts a player outside with this flag")
+	# The house and its roof are at [0, 0]: two empty tiles, then the start.
+	check_eq(mod[3].overmaps.back(), {"point": [0, 3, 0], "overmap": Playtest.START_TILE}, "south of the building")
+	check_eq(mod[4].id, Playtest.START_TILE, "its overmap terrain")
+	check_eq([mod[5].type, mod[5].om_terrain, mod[5].object.fill_ter], ["mapgen", [Playtest.START_TILE], "t_grass"])
+	check_eq(mod[5].object.rows.size(), 24, "a full tile")
+	# An upper floor still starts outside, and the hook moves the player up.
+	b = _build(_ref("data/json/mapgen/roof.json", 0), o)
+	check_eq(b.start_terrain, PackedStringArray([Playtest.START_TILE]))
+	check_eq(b.move_to, PackedStringArray(["house_roof"]))
+	# The reveal covers the building from the start tile.
+	o.reveal_building = true
+	b = _build(_ref(HOUSE, 0), o)
+	check_eq(b.reveal_radius, 4)
 	_cleanup()
 
 
@@ -833,6 +860,7 @@ func test_settings_saved() -> void:
 	var dir := TempTree.make({"keep.txt": ""})
 	var s := AppSettings.new()
 	check_eq([s.game_binary, s.playtest_world, s.only_my_mapgen, s.own_start_terrain], ["", "", true, true], "defaults")
+	check(s.playtest_start_outside, "starts outside by default")
 	check_eq([s.strong_character, s.no_monsters, s.start_in_daylight, s.reveal_building], [true, false, true, true], "character defaults")
 	s.game_binary = "/x/cataclysm-bn-tiles"
 	s.playtest_world = AppSettings.NO_WORLD
@@ -842,8 +870,10 @@ func test_settings_saved() -> void:
 	s.no_monsters = true
 	s.start_in_daylight = false
 	s.reveal_building = false
+	s.playtest_start_outside = false
 	check_eq(s.save_to(dir.path_join("s.cfg")), OK)
 	var back := AppSettings.load_from(dir.path_join("s.cfg"))
+	check(not back.playtest_start_outside, "start outside saved")
 	check_eq([back.strong_character, back.no_monsters, back.start_in_daylight, back.reveal_building],
 		[false, true, false, false], "character settings")
 	check_eq([back.game_binary, back.playtest_world, back.only_my_mapgen, back.own_start_terrain],

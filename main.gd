@@ -2017,6 +2017,7 @@ func playtest_options() -> Playtest.Options:
 		o.root = playtest_root
 	o.own_start_terrain = settings.own_start_terrain
 	o.only_my_mapgen = settings.only_my_mapgen
+	o.start_outside = settings.playtest_start_outside
 	o.strong_character = settings.strong_character
 	o.no_monsters = settings.no_monsters
 	o.daylight = settings.start_in_daylight

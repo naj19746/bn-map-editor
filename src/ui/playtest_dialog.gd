@@ -15,6 +15,7 @@ var no_monsters: CheckBox
 var daylight: CheckBox
 var reveal: CheckBox
 var only_mine: CheckBox
+var start_outside: CheckBox
 var check_first: CheckBox
 
 var _settings: AppSettings
@@ -58,6 +59,9 @@ func _init() -> void:
 	only_mine = CheckBox.new()
 	only_mine.text = "Only my mapgen: disable the other mapgens of the map's ids (without own start terrain)"
 	box.add_child(only_mine)
+	start_outside = CheckBox.new()
+	start_outside.text = "Start outside: on open ground near the building (a start inside removes the monsters in view)"
+	box.add_child(start_outside)
 	strong = CheckBox.new()
 	strong.text = "Strong character: high skills, stat traits, gear and loaded guns"
 	box.add_child(strong)
@@ -111,6 +115,7 @@ func setup(settings: AppSettings, bn: String, user_dir: String) -> void:
 	own_terrain.button_pressed = settings.own_start_terrain
 	only_mine.button_pressed = settings.only_my_mapgen
 	_update_only_mine()
+	start_outside.button_pressed = settings.playtest_start_outside
 	check_first.button_pressed = settings.check_before_playtest
 	strong.button_pressed = settings.strong_character
 	no_monsters.button_pressed = settings.no_monsters
@@ -129,6 +134,7 @@ func apply() -> void:
 	_settings.playtest_world = _world_values[world.selected] if world.selected >= 0 else ""
 	_settings.own_start_terrain = own_terrain.button_pressed
 	_settings.only_my_mapgen = only_mine.button_pressed
+	_settings.playtest_start_outside = start_outside.button_pressed
 	_settings.check_before_playtest = check_first.button_pressed
 	_settings.strong_character = strong.button_pressed
 	_settings.no_monsters = no_monsters.button_pressed

@@ -29,6 +29,9 @@ var own_start_terrain := true
 ## Disable the other mapgens of a playtested map's ids (without
 ## own_start_terrain).
 var only_my_mapgen := true
+## A playtest starts outside, away from the building
+## (Playtest.Options.start_outside).
+var playtest_start_outside := true
 ## Load the data in the game (Playtest.check) before a playtest and refuse to
 ## start it on errors naming the user's files. It takes ~12 s, so off.
 var check_before_playtest := false
@@ -55,6 +58,7 @@ static func load_from(file := DEFAULT_FILE) -> AppSettings:
 		s.playtest_world = str(cfg.get_value("playtest", "world", ""))
 		s.own_start_terrain = bool(cfg.get_value("playtest", "own_terrain", true))
 		s.only_my_mapgen = bool(cfg.get_value("playtest", "only_my_mapgen", true))
+		s.playtest_start_outside = bool(cfg.get_value("playtest", "start_outside", true))
 		s.check_before_playtest = bool(cfg.get_value("playtest", "check_before", false))
 		s.strong_character = bool(cfg.get_value("playtest", "strong_character", true))
 		s.no_monsters = bool(cfg.get_value("playtest", "no_monsters", false))
@@ -80,6 +84,7 @@ func save_to(file := DEFAULT_FILE) -> Error:
 	cfg.set_value("playtest", "world", playtest_world)
 	cfg.set_value("playtest", "own_terrain", own_start_terrain)
 	cfg.set_value("playtest", "only_my_mapgen", only_my_mapgen)
+	cfg.set_value("playtest", "start_outside", playtest_start_outside)
 	cfg.set_value("playtest", "check_before", check_before_playtest)
 	cfg.set_value("playtest", "strong_character", strong_character)
 	cfg.set_value("playtest", "no_monsters", no_monsters)

@@ -37,6 +37,15 @@ const MOD_ID := "bnme_playtest"
 const WORLD := "Playtest"
 const START_LOCATION := "bnme_playtest"
 const SPECIAL := "bnme_playtest_special"
+## The overmap terrain the player starts on with Options.start_outside: an
+## open grass tile the playtest's special places START_GAP tiles from the
+## building.
+const START_TILE := "bnme_playtest_start"
+## Empty overmap tiles between the building and START_TILE. A new game removes
+## every monster with a clear path to the player within 40 tiles
+## (game::start_game), and BN's clear_path sees through floors between levels:
+## two tiles keep every spot of START_TILE more than 40 tiles from the building.
+const START_GAP := 2
 ## The scenario Play Now uses (scenario::generic).
 const SCENARIO := "evacuee"
 const MOD_FILE := "playtest.json"
@@ -123,6 +132,10 @@ class Options:
 	## Disable the other mapgens of the map's ids (only without
 	## own_start_terrain).
 	var only_my_mapgen := true
+	## Start on START_TILE, outside and away from the building, instead of on
+	## its ground floor: a start inside removes the monsters the player could
+	## see from there (START_GAP).
+	var start_outside := true
 	## A world folder whose worldoptions.json and mods.json the playtest
 	## world starts from, or "".
 	var template_world := ""
@@ -151,7 +164,8 @@ class Build:
 	var warnings := PackedStringArray()
 	var basepath := ""
 	var userdir := ""
-	## The overmap terrain ids the player starts on.
+	## The overmap terrain ids the player starts on (START_TILE with
+	## Options.start_outside).
 	var start_terrain := PackedStringArray()
 	## For a map that isn't on its building's ground floor: the ids the Lua
 	## hook moves the player to when the game starts, on level move_to_z.
@@ -635,6 +649,7 @@ static func build(session: EditSession, ref: DataIndex.MapgenRef, options: Optio
 		own_oters = _own_terrain(session, ref, texts, special, b)
 		if b.error:
 			return b
+	var start_objects := _start_outside(special, b) if options.start_outside else []
 	var reveal_note := _reveal_area(special, options, b)
 
 	# The mods the world must list: the map's and every replaced or added
@@ -671,14 +686,17 @@ static func build(session: EditSession, ref: DataIndex.MapgenRef, options: Optio
 		scenario["professions"] = [PROFESSION]
 	if reveal_note:
 		b.applied.append(reveal_note)
+	var start_location := {"type": "start_location", "id": START_LOCATION, "name": "Playtest: " + ref.title(),
+			"terrain": Array(b.start_terrain)}
+	if options.start_outside:
+		start_location["flags"] = ["ALLOW_OUTSIDE"]
 	texts[mod_dir.path_join(MOD_FILE)] = BnJson.stringify([
-		{"type": "start_location", "id": START_LOCATION, "name": "Playtest: " + ref.title(),
-			"terrain": Array(b.start_terrain)},
+		start_location,
 		scenario,
 		# Only evacuee can be picked: the main menu's plain "Play Now!" (and
 		# Random Character) picks a random scenario.
 		{"type": "SCENARIO_BLACKLIST", "subtype": "whitelist", "scenarios": [SCENARIO]},
-	] + profession + own_oters + [special])
+	] + profession + own_oters + [special] + start_objects)
 
 	for info: ModCatalog.ModInfo in index.catalog.mods.values():
 		var folder := info.info_file.get_base_dir()
@@ -954,7 +972,7 @@ static func _lua(ids: PackedStringArray, z: int, radius := 0, levels: Array[int]
 
 
 const _LUA_MOVE := """-- Start locations work on the ground floor, so the game starts the player on
--- the building's ground floor and this moves them to the playtested level.
+-- the ground and this moves them to the playtested level.
 
 local targets = { %s }
 local level = %d
@@ -1009,7 +1027,7 @@ end
 
 const _LUA_REVEAL := """
 -- Shows the building on the overmap: the radius covers the special from any
--- of its tiles, the player starts on one.
+-- of its tiles, and the player starts on one.
 local reveal_levels = { %s }
 local reveal_radius = %d
 
@@ -1223,6 +1241,33 @@ static func _special(session: EditSession, ref: DataIndex.MapgenRef, b: Build) -
 	special["flags"] = ["GLOBALLY_UNIQUE"]
 	special["absolute_spawn_loc"] = {"x": 0, "y": 0}
 	return special
+
+
+## Adds START_TILE to [param special] (Options.start_outside): on the ground,
+## START_GAP tiles south of everything the special places, so the gap holds
+## no tile of it. Makes it b.start_terrain. Returns its overmap_terrain and its
+## mapgen (grass).
+static func _start_outside(special: Dictionary, b: Build) -> Array:
+	var low_x := 0
+	var high_y := 0
+	var first := true
+	for o: Variant in special.overmaps:
+		var point: Variant = o.get("point") if o is Dictionary else null
+		if point is Array and point.size() >= 3:
+			low_x = int(point[0]) if first else mini(low_x, int(point[0]))
+			high_y = int(point[1]) if first else maxi(high_y, int(point[1]))
+			first = false
+	special.overmaps.append({"point": [low_x, high_y + START_GAP + 1, 0], "overmap": START_TILE})
+	b.start_terrain = PackedStringArray([START_TILE])
+	var rows := []
+	for y in 24:
+		rows.append(".".repeat(24))
+	return [
+		{"type": "overmap_terrain", "id": START_TILE, "name": "playtest start", "sym": "*",
+			"color": "light_green", "see_cost": 2, "flags": ["NO_ROTATE"]},
+		{"type": "mapgen", "method": "json", "om_terrain": [START_TILE],
+			"object": {"fill_ter": "t_grass", "rows": rows}},
+	]
 
 
 ## Gives the playtest overmap terrains of its own (Options.own_start_terrain):
