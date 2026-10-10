@@ -301,7 +301,8 @@ func _define_character_data(skip := PackedStringArray()) -> void:
 		objects.append({"type": "skill", "id": id})
 	objects.append({"type": "mutation", "id": "TOUGH"})
 	objects.append({"type": "bionic", "id": "bio_armor_torso"})
-	for id: String in ["tank_top", "boots_combat", "katana", "m4a1", "556", "grenade", "mask_gas"]:
+	for id: String in ["tank_top", "boots_combat", "katana", "m4a1", "556", "grenade", "mask_gas",
+			"flashlight", "light_disposable_cell", "battery"]:
 		objects.append({"type": "ARMOR" if id == "tank_top" else "GENERIC", "id": id})
 	objects.append({"type": "ITEM_BLACKLIST", "items": ["grenade"]})
 	objects = objects.filter(func(o: Dictionary) -> bool: return not skip.has(o.get("id", "")))
@@ -329,8 +330,10 @@ func test_strong_character() -> void:
 	var entries: Array = group["entries"]
 	var by_item := {}
 	for e: Dictionary in entries:
-		by_item[e.item] = e
+		by_item[e.get("container-item", e.item)] = e
 	check_eq(by_item.keys().size(), entries.size(), "no entry twice")
+	check_eq(by_item.get("flashlight"), {"item": "light_disposable_cell", "ammo-item": "battery", "charges": 300,
+		"container-item": "flashlight"}, "a flashlight with a charged cell in it")
 	check_eq(by_item.get("m4a1"), {"item": "m4a1", "ammo-item": "556", "charges": 30}, "a loaded gun")
 	check_eq(by_item.get("katana"), {"item": "katana", "custom-flags": ["auto_wield"]})
 	check(not by_item.has("stanag30") and not by_item.has("glock_19") and not by_item.has("grenade"),
@@ -350,6 +353,13 @@ func test_strong_character() -> void:
 	for e: Dictionary in mod[3]["items"]["both"]["entries"]:
 		if e.item == "m4a1":
 			check_eq(e, {"item": "m4a1"}, "no ammo to load")
+	# No flashlight: no cell put in one, the spare cell stays.
+	_define_character_data(PackedStringArray(["flashlight"]))
+	b = _build(_ref(HOUSE, 0), o)
+	mod = _read(b.basepath.path_join(MOD).path_join(Playtest.MOD_FILE))
+	var cells: Array = mod[3]["items"]["both"]["entries"].filter(
+		func(e: Dictionary) -> bool: return e.item == "light_disposable_cell")
+	check_eq(cells, [{"item": "light_disposable_cell", "ammo-item": "battery", "charges": 300}], "the spare cell")
 	# Off: no profession and no override.
 	b = _build(_ref(HOUSE, 0))
 	mod = _read(b.basepath.path_join(MOD).path_join(Playtest.MOD_FILE))

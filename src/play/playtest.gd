@@ -66,17 +66,21 @@ const STRONG_SKILLS := ["melee", "bashing", "cutting", "stabbing", "dodge", "gun
 ## gives a profession's "traits" without a points check.
 const STRONG_TRAITS := ["STR_UP_4", "DEX_UP_4", "PER_UP_4", "INT_UP_4", "TOUGH", "FASTHEALER", "QUICK",
 	"PAINRESIST", "NIGHTVISION", "GOODHEARING"]
-## CBMs (data/json/bionics): added by avatar::create without an installation.
+## CBMs (data/json/bionics): added by avatar::create without an installation,
+## with power full. bio_lockpick opens most locks with no skill (50 J a try).
 const STRONG_CBMS := ["bio_armor_head", "bio_armor_torso", "bio_armor_arms", "bio_armor_legs",
-	"bio_power_storage_mkII", "bio_power_storage_mkII"]
+	"bio_power_storage_mkII", "bio_power_storage_mkII", "bio_lockpick"]
 ## Items of the profession's "both" group. Worn in this order: avatar::create
 ## drops what doesn't fit over what is already worn, so no two share a layer
 ## and a body part.
 const STRONG_ITEMS := ["tank_top", "briefs", "socks", "gloves_tactical", "boots_combat", "armor_riot",
-	"tac_fullhelmet", "molle_pack", "tool_belt", "legpouch_large", "ear_plugs", "flashlight", "lighter",
+	"tac_fullhelmet", "molle_pack", "tool_belt", "legpouch_large", "ear_plugs", "lighter", "picklocks",
 	"crowbar", "hammer", "screwdriver_set", "toolbox", "1st_aid", "water_clean", "mre_beef_box"]
 ## Item group entries (item_factory.cpp add_entry): "ammo-item" and "charges"
 ## load a gun's default magazine (or fill a magazine), "count" repeats.
+## "container-item" puts the item in another: a flashlight takes a battery
+## cell (a magazine) and would spawn empty on its own, as charged_flashlight
+## in BN's professions.json does.
 ## "custom-flags": no_auto_equip keeps it in the pack (it would not fit over
 ## the helmet), auto_wield wields it.
 const STRONG_ENTRIES := [
@@ -91,6 +95,8 @@ const STRONG_ENTRIES := [
 	{"item": "mossberg_500", "ammo-item": "shot_00", "charges": 6},
 	{"item": "shot_00", "charges": 24},
 	{"item": "grenade", "count": 5},
+	{"item": "light_disposable_cell", "ammo-item": "battery", "charges": 300, "container-item": "flashlight"},
+	{"item": "light_disposable_cell", "ammo-item": "battery", "charges": 300},
 ]
 ## A game flag (a BN patch) that starts a new game in a world with no saves, as
 ## Play Now! (Default Scenario) does. Without it the player starts it by hand.
@@ -1056,6 +1062,8 @@ static func _profession(index: DataIndex, b: Build) -> Dictionary:
 	var entries := []
 	for e: Dictionary in STRONG_ENTRIES:
 		if not known.call("item", e.item):
+			continue
+		if e.has("container-item") and not known.call("item", e["container-item"]):
 			continue
 		var entry := e.duplicate(true)
 		if entry.has("ammo-item") and not known.call("item", entry["ammo-item"]):
