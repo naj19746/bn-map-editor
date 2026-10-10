@@ -193,6 +193,8 @@ var playtest_build: Playtest.Build
 ## What the last playtest's debug.log may name (Playtest.log_names).
 var _playtest_names := PackedStringArray()
 var _playtest_started := 0
+## Each of the last playtest's log paths -> its size before the game started.
+var _playtest_log_sizes := {}
 var _playtest_dialog: PlaytestDialog
 var _relaunch_dialog: ConfirmationDialog
 var _playtest_timer: Timer
@@ -1903,6 +1905,9 @@ func playtest(replace := false) -> String:
 						.map(func(e: Playtest.LogEntry) -> String: return e.describe()))])
 		if r.error:
 			b.warnings.append("The check before the playtest didn't run: " + r.error)
+	_playtest_log_sizes = {}
+	for path in b.log_paths:
+		_playtest_log_sizes[path] = FileAccess.get_size(path) if FileAccess.file_exists(path) else 0
 	var pid := Playtest.launch(binary, b)
 	if pid < 0:
 		return _playtest_failed("Can't start %s." % binary)
@@ -2039,7 +2044,13 @@ func check_playtest() -> void:
 	if path.is_empty():
 		_status.text = "The playtest game exited; it wrote no debug.log."
 		return
-	var all := Playtest.read_log(FileAccess.get_file_as_string(path))
+	# The game appends to debug.log, so only what this playtest wrote is read
+	# (earlier runs' entries may name bnme_playtest too).
+	var bytes := FileAccess.get_file_as_bytes(path)
+	var at: int = _playtest_log_sizes.get(path, 0)
+	if bytes.size() < at:
+		at = 0
+	var all := Playtest.read_log(bytes.slice(at).get_string_from_utf8())
 	var mine := Playtest.real_names(Playtest.entries_naming(all, _playtest_names), playtest_build)
 	var others := all.size() - mine.size()
 	var title := "Last playtest (%s): %d error%s and warning%s naming your files or ids" % [

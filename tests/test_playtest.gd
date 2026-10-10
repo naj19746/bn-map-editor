@@ -953,6 +953,38 @@ func test_main_playtest() -> void:
 	_cleanup()
 
 
+func test_main_playtest_reads_only_its_log() -> void:
+	_setup()
+	var main := _main()
+	main.open_id("house")
+	# The game appends to its config folder's debug.log, which holds an
+	# earlier run's error naming the playtest mod.
+	var log_path := _config.path_join("debug.log")
+	var f := FileAccess.open(log_path, FileAccess.WRITE)
+	f.store_string("09:00:00.000 ERROR : Json error: data/mods/bnme_playtest/bad.json:1:2: circular\n")
+	f.close()
+	DirAccess.make_dir_recursive_absolute(_out)
+	var game := _out.path_join("appending-bn")
+	f = FileAccess.open(game, FileAccess.WRITE)
+	f.store_string("#!/bin/sh\nif [ \"$1\" = --help ]; then exit 0; fi\ncat >> '" + log_path
+		+ "' <<'END'\n" + LOG + "END\n")
+	f.close()
+	OS.execute("chmod", ["+x", game])
+	main.settings.game_binary = game
+	check_eq(main.playtest(), "", "started")
+	var waited := 0
+	while OS.is_process_running(main.playtest_pid) and waited < 5000:
+		OS.delay_msec(20)
+		waited += 20
+	main.check_playtest()
+	var shown: Array = main._problems_panel.game_log.map(func(e: Playtest.LogEntry) -> String: return e.text)
+	check_eq(shown.size(), 1, "only this run's entry naming the user's files: %s" % [shown])
+	check(not str(shown).contains("bad.json"), "the earlier run's entry is left out")
+	check(main._problems_panel.game_log_title.contains("2 others"), main._problems_panel.game_log_title)
+	main.free()
+	_cleanup()
+
+
 func test_main_options_from_settings() -> void:
 	_setup()
 	var main := _main()
