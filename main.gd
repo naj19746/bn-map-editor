@@ -24,6 +24,10 @@ extends Control
 ## offered. The level below (or above: the toolbar's ghost picker) shows
 ## through the map's open air, with its stairs to this level marked.
 ##
+## Playtest (Ctrl+F5) builds a throwaway BN with the current map and its
+## unsaved edits (Playtest) and starts the game on it; when the game exits,
+## the debug.log errors naming the user's files show on the Problems tab.
+##
 ## Command line (after "--"): --bn <path> overrides the BN checkout,
 ## --workspace <path> the workspace folder, and --open <id> opens a mapgen by
 ## om_terrain / nested id once loaded.
@@ -37,7 +41,7 @@ enum Menu {
 	SPRING, SUMMER, AUTUMN, WINTER,
 	NEW_MAP, NEW_CHUNK, SAVE, SAVE_ALL, WORKSPACE,
 	UNDO, REDO, NEW_SYMBOL, NEW_COMPUTER, ADD_OVERMAP, PALETTES, CHUNK_PARENTS,
-	SYNC,
+	SYNC, PLAYTEST, CHECK_IN_GAME, PLAYTEST_SETTINGS,
 	LEVEL_UP, LEVEL_DOWN, NEW_LEVEL_UP, NEW_ROOF, NEW_LEVEL_DOWN, NEW_BUILDING, VIEW_PLACED,
 	CELL_PICK, CELL_EDIT_COMPUTER, CELL_DOOR_COMPUTER,
 }
@@ -178,6 +182,25 @@ var _mutable_refs: Array = []
 var _dim_button: Button
 ## Where settings are kept; "" keeps them in memory only (tests).
 var settings_file := AppSettings.DEFAULT_FILE
+## Where playtests are built ("": Playtest.default_root()). UI tests set it.
+var playtest_root := ""
+## BN's config and data folders for the user (Playtest.Options). UI tests set them.
+var playtest_config_dir := Playtest.default_config_dir()
+var playtest_user_dir := Playtest.default_user_dir()
+## The running (or last) playtest game's process id, -1 when none is watched.
+var playtest_pid := -1
+var playtest_build: Playtest.Build
+## What the last playtest's debug.log may name (Playtest.log_names).
+var _playtest_names := PackedStringArray()
+var _playtest_started := 0
+var _playtest_dialog: PlaytestDialog
+var _relaunch_dialog: ConfirmationDialog
+var _playtest_timer: Timer
+## The running data check (check_in_game), polled by _check_timer.
+var _check: Playtest.Check
+var _check_timer: Timer
+var _check_title := ""
+var _check_names := PackedStringArray()
 ## Maps edited since the last flush_level_views() (MapgenRef -> true), and
 ## whether the current map's findings were forgotten meanwhile.
 var _edited_refs := {}
@@ -1776,6 +1799,12 @@ func _on_menu(id: int) -> void:
 		Menu.SYNC:
 			if session:
 				_sync_dialog.open(session)
+		Menu.PLAYTEST:
+			playtest()
+		Menu.CHECK_IN_GAME:
+			check_in_game()
+		Menu.PLAYTEST_SETTINGS:
+			_playtest_dialog.open(settings, index.bn_path if index else bn_path(), playtest_user_dir)
 		Menu.LEVEL_UP:
 			level_step(1)
 		Menu.LEVEL_DOWN:
@@ -1823,6 +1852,216 @@ func _update_edit_menu() -> void:
 			m == null or m.doc.missing_overmap_terrain().is_empty())
 	_edit_menu.set_item_disabled(_edit_menu.get_item_index(Menu.CHUNK_PARENTS),
 			m == null or m.doc.chunk_id().is_empty())
+
+
+# --- Playtest -----------------------------------------------------------------
+
+## Starts the game on the current map (PLAYTEST.MD): refuses when BN won't
+## load it, asks first when the last playtest game still runs ([param
+## replace] closes it), then builds and launches. Returns why it didn't
+## start, or "" (also "" while asking).
+func playtest(replace := false) -> String:
+	var m := current_map()
+	if m == null:
+		return _playtest_failed("Open a map to playtest.")
+	if _check:
+		return _playtest_failed("A check in the game is still running.")
+	var fatal := PackedStringArray()
+	var found := m.doc.findings()
+	if m.place:
+		found.append_array(Validator.validate_building(index, m.place.building))
+	for f in found:
+		if f.severity == Validator.Severity.ERROR and f.load_fails:
+			fatal.append(f.describe())
+	if fatal.size():
+		return _playtest_failed("BN won't load %s:\n%s" % [m.ref.title(), "\n".join(fatal)])
+	if playtest_running():
+		if not replace:
+			if is_inside_tree():
+				_relaunch_dialog.popup_centered()
+			return ""
+		OS.kill(playtest_pid)
+	playtest_pid = -1
+	var binary := Playtest.find_binary(index.bn_path, settings.game_binary)
+	if binary.is_empty():
+		if is_inside_tree():
+			_playtest_dialog.open(settings, index.bn_path, playtest_user_dir)
+		return _playtest_failed("No Cataclysm-BN game binary found: choose one in Play > Playtest settings.")
+	_status.text = "Building the playtest of %s ..." % m.ref.title()
+	var b := Playtest.build(session, m.ref, playtest_options())
+	if not b.ok():
+		return _playtest_failed("Can't build the playtest: " + b.error)
+	if settings.check_before_playtest:
+		_status.text = "Checking the playtest of %s in the game (about 12 s) ..." % m.ref.title()
+		var names := Playtest.log_names(session, b)
+		var r := Playtest.check(binary, b, names)
+		_show_check(r, "Check before the playtest")
+		if r.my_errors():
+			return _playtest_failed("The game reports %d error%s in your files, so the playtest was not started:\n%s" % [
+				r.my_errors(), "" if r.my_errors() == 1 else "s",
+				"\n".join(r.mine.filter(func(e: Playtest.LogEntry) -> bool: return e.level == "ERROR")
+						.map(func(e: Playtest.LogEntry) -> String: return e.describe()))])
+		if r.error:
+			b.warnings.append("The check before the playtest didn't run: " + r.error)
+	var pid := Playtest.launch(binary, b)
+	if pid < 0:
+		return _playtest_failed("Can't start %s." % binary)
+	playtest_pid = pid
+	playtest_build = b
+	_playtest_started = int(Time.get_unix_time_from_system())
+	_playtest_names = Playtest.log_names(session, b)
+	_problems_panel.show_game_log([] as Array[Playtest.LogEntry], "")
+	if _playtest_timer.is_inside_tree():
+		_playtest_timer.start()
+	var note := "The game starts it by itself." if b.new_game else "In BN: New Game -> Play Now! (Default Scenario)."
+	_status.text = "Playtest of %s started. %s" % [m.ref.title(), note]
+	var lines := PackedStringArray([note, "",
+		"The game: " + binary, "Data: " + b.basepath, "User folder: " + b.userdir,
+		"Starts on: " + ", ".join(b.start_terrain), "Mods: " + ", ".join(b.world_mods)])
+	if b.move_to.size():
+		lines.insert(5, "Then moved to: %s on level %d (the playtest mod's Lua hook)" % [
+			", ".join(b.move_to), b.move_to_z])
+	if b.own_terrain.size():
+		lines.append("The playtest's own terrain: %s; copied mapgens: %s" % [
+			", ".join(b.own_terrain.keys().map(func(id: String) -> String: return "%s (%s)" % [id, b.own_terrain[id]])),
+			", ".join(b.copied)])
+	if b.disabled.size():
+		lines.append("Disabled for the playtest: " + ", ".join(b.disabled))
+	if b.applied.size():
+		lines.append("Applied: " + "; ".join(b.applied))
+	if b.warnings.size():
+		lines.append("")
+		lines.append_array(b.warnings)
+	_show_report("Playtest started", lines)
+	return ""
+
+
+## Builds the current map's playtest and loads its data in the game, without
+## starting it (Playtest.check). The game runs in the background: poll_check
+## shows the result on the Problems tab. Returns why it didn't start, or "".
+func check_in_game() -> String:
+	var m := current_map()
+	if m == null:
+		return _playtest_failed("Open a map to check.")
+	if _check:
+		return _playtest_failed("A check is already running.")
+	var binary := Playtest.find_binary(index.bn_path, settings.game_binary)
+	if binary.is_empty():
+		if is_inside_tree():
+			_playtest_dialog.open(settings, index.bn_path, playtest_user_dir)
+		return _playtest_failed("No Cataclysm-BN game binary found: choose one in Play > Playtest settings.")
+	_status.text = "Building the check of %s ..." % m.ref.title()
+	var b := Playtest.build(session, m.ref, playtest_options())
+	if not b.ok():
+		return _playtest_failed("Can't build the check: " + b.error)
+	_check_names = Playtest.log_names(session, b)
+	_check = Playtest.Check.new()
+	if not _check.start(binary, b, _check_names):
+		var why := _check.result.error
+		_check = null
+		return _playtest_failed(why)
+	_check_title = m.ref.title()
+	_status.text = "The game is loading the data for %s (about 12 s) ..." % _check_title
+	if _check_timer.is_inside_tree():
+		_check_timer.start()
+	return ""
+
+
+## Shows the data check's result once the game has exited. Runs twice a
+## second while a check runs.
+func poll_check() -> void:
+	if _check == null or not _check.poll():
+		return
+	_check_timer.stop()
+	var r := _check.result
+	_check = null
+	_show_check(r, "Check in game of " + _check_title)
+	if r.error:
+		_status.text = "Check in game: " + r.error
+	elif r.mine.is_empty():
+		_status.text = "Check in game of %s: the game found nothing in your files%s (%.0f s)." % [
+			_check_title, " (%d other errors and warnings)" % r.entries.size() if r.entries.size() else "", r.seconds]
+	else:
+		_status.text = "Check in game of %s: %d error%s and warning%s in your files, see the Problems tab." % [
+			_check_title, r.mine.size(), "" if r.mine.size() == 1 else "s", "" if r.mine.size() == 1 else "s"]
+		_drawer.visible = true
+		show_drawer_tab(_problems_panel)
+
+
+## Puts the entries of check [param r] in the Problems tab's game log section,
+## headed [param what], until the next check or playtest.
+func _show_check(r: Playtest.CheckResult, what: String) -> void:
+	var others := r.entries.size() - r.mine.size()
+	var title := "%s (a data check, not a playtest; %.0f s): %d error%s and warning%s naming your files or ids" % [
+		what, r.seconds, r.mine.size(), "" if r.mine.size() == 1 else "s", "" if r.mine.size() == 1 else "s"]
+	if others:
+		title += ", %d other%s" % [others, "" if others == 1 else "s"]
+	if r.error:
+		title += ". " + r.error
+	_problems_panel.show_game_log(r.mine, title)
+
+
+func playtest_running() -> bool:
+	return playtest_pid >= 0 and OS.is_process_running(playtest_pid)
+
+
+## The Options a playtest builds with, from the settings.
+func playtest_options() -> Playtest.Options:
+	var o := Playtest.Options.new()
+	if playtest_root:
+		o.root = playtest_root
+	o.own_start_terrain = settings.own_start_terrain
+	o.only_my_mapgen = settings.only_my_mapgen
+	o.strong_character = settings.strong_character
+	o.no_monsters = settings.no_monsters
+	o.daylight = settings.start_in_daylight
+	o.reveal_building = settings.reveal_building
+	o.bn_config_dir = playtest_config_dir
+	o.bn_user_dir = playtest_user_dir
+	o.mods = settings.mods
+	var w := settings.playtest_world
+	if w.is_empty():
+		w = Playtest.default_template_world(playtest_user_dir)
+	if w and w != AppSettings.NO_WORLD and playtest_user_dir:
+		o.template_world = playtest_user_dir.path_join("save").path_join(w)
+	return o
+
+
+## Once the playtest game has exited, shows its debug.log's errors and
+## warnings that name the user's files or ids on the Problems tab. Runs
+## every second while a game is watched.
+func check_playtest() -> void:
+	if playtest_pid < 0 or OS.is_process_running(playtest_pid):
+		return
+	playtest_pid = -1
+	_playtest_timer.stop()
+	var path := Playtest.find_log(playtest_build, _playtest_started)
+	if path.is_empty():
+		_status.text = "The playtest game exited; it wrote no debug.log."
+		return
+	var all := Playtest.read_log(FileAccess.get_file_as_string(path))
+	var mine := Playtest.real_names(Playtest.entries_naming(all, _playtest_names), playtest_build)
+	var others := all.size() - mine.size()
+	var title := "Last playtest (%s): %d error%s and warning%s naming your files or ids" % [
+		path, mine.size(), "" if mine.size() == 1 else "s", "" if mine.size() == 1 else "s"]
+	if others:
+		title += ", %d other%s" % [others, "" if others == 1 else "s"]
+	_problems_panel.show_game_log(mine, title)
+	if mine.is_empty():
+		_status.text = "The playtest game exited. Its debug.log says nothing about your files%s." % [
+			" (%d other errors and warnings)" % others if others else ""]
+	else:
+		_status.text = "The playtest game exited. Its debug.log names your files or ids %d time%s: see the Problems tab." % [
+			mine.size(), "" if mine.size() == 1 else "s"]
+		_drawer.visible = true
+		show_drawer_tab(_problems_panel)
+
+
+func _playtest_failed(why: String) -> String:
+	_status.text = why.get_slice("\n", 0)
+	if why.contains("\n"):
+		_show_report("Playtest", PackedStringArray(why.split("\n")))
+	return why
 
 
 # --- Files changed on disk ----------------------------------------------------
@@ -2036,6 +2275,11 @@ func _build_ui() -> void:
 	_menu(menu_bar, "Sync", [
 		["Sync with BN...", Menu.SYNC, KEY_MASK_CTRL | KEY_MASK_SHIFT | KEY_P],
 	])
+	_menu(menu_bar, "Play", [
+		["Playtest", Menu.PLAYTEST, KEY_MASK_CTRL | KEY_F5],
+		["Check in game", Menu.CHECK_IN_GAME, 0],
+		["Playtest settings...", Menu.PLAYTEST_SETTINGS, 0],
+	])
 	_season_menu = PopupMenu.new()
 	_season_menu.name = "Season"
 	for i in SEASONS.size():
@@ -2110,6 +2354,14 @@ func _build_ui() -> void:
 	level.add_child(_ghost_picker)
 	_dim_button = _toggle("Dim", settings.ghost_dim, "Draw the ghost level faded (off: at full color)", set_ghost_dim)
 	level.add_child(_dim_button)
+	var play := _toolbar_group(top)
+	play.add_child(VSeparator.new())
+	var play_button := Button.new()
+	play_button.text = "Playtest"
+	play_button.tooltip_text = "Start Cataclysm-BN with this map, unsaved edits included (Ctrl+F5). " \
+			+ "Play > Playtest settings... picks the game and the world it copies."
+	play_button.pressed.connect(_on_menu.bind(Menu.PLAYTEST))
+	play.add_child(play_button)
 
 	_split = HSplitContainer.new()
 	_split.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -2265,6 +2517,23 @@ func _build_ui() -> void:
 	_palette_editor.files_changed.connect(_on_palette_files_changed)
 	_palette_editor.open_map_requested.connect(func(ref: DataIndex.MapgenRef) -> void: open_ref(ref))
 	add_child(_palette_editor)
+	_playtest_dialog = PlaytestDialog.new()
+	_playtest_dialog.settings_changed.connect(_save_settings)
+	add_child(_playtest_dialog)
+	_relaunch_dialog = ConfirmationDialog.new()
+	_relaunch_dialog.title = "Playtest"
+	_relaunch_dialog.dialog_text = "The last playtest game is still running. Close it and start a new one?"
+	_relaunch_dialog.ok_button_text = "Close it and relaunch"
+	_relaunch_dialog.confirmed.connect(func() -> void: playtest(true))
+	add_child(_relaunch_dialog)
+	_playtest_timer = Timer.new()
+	_playtest_timer.wait_time = 1.0
+	_playtest_timer.timeout.connect(check_playtest)
+	add_child(_playtest_timer)
+	_check_timer = Timer.new()
+	_check_timer.wait_time = 0.5
+	_check_timer.timeout.connect(poll_check)
+	add_child(_check_timer)
 	_sync_dialog = SyncDialog.new()
 	_sync_dialog.files_changed.connect(_on_sync_files_changed)
 	add_child(_sync_dialog)

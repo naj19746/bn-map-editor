@@ -4,6 +4,9 @@ extends VBoxContainer
 ## palettes it uses (see Validator), errors first, each saying how BN
 ## reacts. Selecting one shows what it points at: a symbol, a cell, a
 ## placement, or a palette key in the palette editor.
+##
+## Below them: the errors and warnings of the last playtest's debug.log that
+## name the user's files or ids (show_game_log), kept until the next one.
 
 ## A finding was picked in the list.
 signal finding_selected(f: Validator.Finding)
@@ -13,6 +16,10 @@ const COLORS := [Color(1.0, 0.45, 0.45), Color(1.0, 0.8, 0.35), Color(0.65, 0.75
 const NAMES := ["Errors", "Warnings", "Notes"]
 
 var findings: Array[Validator.Finding] = []
+## The last playtest's debug.log entries shown (see show_game_log).
+var game_log: Array[Playtest.LogEntry] = []
+## The game log section's heading ("" hides the section).
+var game_log_title := ""
 var list: Tree
 ## Show errors / warnings / notes, by Validator.Severity.
 var toggles: Array[Button] = []
@@ -68,6 +75,14 @@ func show_findings(p_findings: Array[Validator.Finding], choices := PackedString
 	_rebuild()
 
 
+## Shows [param entries] from a playtest's debug.log under [param title]
+## ("" hides the section).
+func show_game_log(entries: Array[Playtest.LogEntry], title: String) -> void:
+	game_log = entries
+	game_log_title = title
+	_rebuild()
+
+
 ## Picks finding [param i] as if clicked.
 func activate(i: int) -> void:
 	if i >= 0 and i < findings.size():
@@ -87,6 +102,22 @@ func _rebuild() -> void:
 		it.set_custom_color(0, COLORS[f.severity])
 		it.set_tooltip_text(0, f.describe())
 		it.set_metadata(0, i)
+	if game_log_title.is_empty():
+		return
+	var head := list.create_item(root)
+	head.set_text(0, game_log_title)
+	head.set_selectable(0, false)
+	head.set_metadata(0, -1)
+	for e in game_log:
+		var s := 0 if e.level == "ERROR" else 1
+		if not toggles[s].button_pressed:
+			continue
+		var it := list.create_item(head)
+		it.set_text(0, e.describe())
+		it.set_autowrap_mode(0, TextServer.AUTOWRAP_WORD_SMART)
+		it.set_custom_color(0, COLORS[s])
+		it.set_tooltip_text(0, e.describe())
+		it.set_metadata(0, -1)
 
 
 func _on_selected() -> void:

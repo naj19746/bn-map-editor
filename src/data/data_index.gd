@@ -256,6 +256,7 @@ const ID_TYPES := {
 	"TOOLMOD": "item", "TOOL_ARMOR": "item", "BOOK": "item", "COMESTIBLE": "item",
 	"CONTAINER": "item", "ENGINE": "item", "WHEEL": "item", "FUEL": "item", "GUNMOD": "item",
 	"MAGAZINE": "item", "BATTERY": "item", "GENERIC": "item", "BIONIC_ITEM": "item",
+	"skill": "skill", "mutation": "mutation", "bionic": "bionic",
 }
 ## Types loaded through BN's generic_factory, which also registers "alias" ids.
 const ALIAS_TYPES := ["MONSTER", "vehicle_group", "trap", "field_type", "overmap_connection",
@@ -293,6 +294,9 @@ var building_tiles := {}
 var city_listed := {}
 ## Kind (a value of ID_TYPES) -> {id: Source of its last definition}.
 var ids := {}
+## Item ids an ITEM_BLACKLIST object of a loaded mod names (id -> Source):
+## BN removes them after loading.
+var item_blacklist := {}
 ## om_terrain mapgen ids something other than an overmap_terrain uses: map
 ## extras with generator_method "mapgen", and ids a Lua
 ## "on_make_mapgen_factory_list" hook adds (id -> where).
@@ -490,6 +494,9 @@ func _add_object(o: Dictionary, src: Source) -> void:
 				if not _building_defs.has(id):
 					_building_defs[id] = []
 				_building_defs[id].append([o, src])
+		"ITEM_BLACKLIST":
+			for id in _tags(o.get("items", [])):
+				item_blacklist[id] = src
 		"region_settings", "region_overlay":
 			_add_city_lists(o)
 		"map_extra":

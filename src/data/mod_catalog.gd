@@ -71,9 +71,25 @@ static func _find_modinfo_files(dir: String) -> PackedStringArray:
 
 
 func _read_modinfo(file: String) -> Array[ModInfo]:
+	return _parse_modinfo(file, FileAccess.get_file_as_string(file))
+
+
+## Adds the mods of [param text], the contents of the modinfo.json at [param file]
+## (a workspace copy, possibly with unsaved edits), that aren't known yet: a mod
+## only the workspace has. Returns their ids. Known ids keep BN's definition.
+func add_modinfo(file: String, text: String) -> PackedStringArray:
+	var added := PackedStringArray()
+	for info in _parse_modinfo(file, text):
+		if not mods.has(info.id):
+			mods[info.id] = info
+			added.append(info.id)
+	return added
+
+
+func _parse_modinfo(file: String, text: String) -> Array[ModInfo]:
 	var out: Array[ModInfo] = []
 	var json := JSON.new()
-	if json.parse(FileAccess.get_file_as_string(file)) != OK:
+	if json.parse(text) != OK:
 		errors.append("%s: %s" % [file, json.get_error_message()])
 		return out
 	var objects: Variant = json.data

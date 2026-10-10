@@ -61,6 +61,15 @@ static func load_file(abs_path: String, rel: String, error_out: Array = []) -> J
 	if bytes.is_empty() and not FileAccess.file_exists(abs_path):
 		error_out.append("can't read " + abs_path)
 		return null
+	var f := from_bytes(bytes, rel, error_out)
+	if f:
+		f.disk_path = abs_path
+	return f
+
+
+## Parses [param bytes] as file [param rel], read from nowhere (no
+## disk_path). Returns null and sets [param error_out][0] on failure.
+static func from_bytes(bytes: PackedByteArray, rel: String, error_out: Array = []) -> JsonFile:
 	var parsed := BnJson.parse_bytes(bytes)
 	if not parsed.ok():
 		error_out.append("%s:%d: %s" % [rel, parsed.error_line, parsed.error])
@@ -78,7 +87,6 @@ static func load_file(abs_path: String, rel: String, error_out: Array = []) -> J
 		f.single_object = true
 		f._spans = [Vector2i(0, bytes.size())]
 	f._saved_count = f.objects.size()
-	f.disk_path = abs_path
 	f.disk_sha256 = sha256_of(bytes)
 	return f
 

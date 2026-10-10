@@ -20,12 +20,17 @@ static func make(files: Dictionary) -> String:
 	return root
 
 
-## Deletes [param root] recursively. Only touches the temp folder.
+## Deletes [param root] recursively. Only touches the temp folder, and
+## removes symlinks without following them (a playtest overlay links into BN).
 static func remove(root: String) -> void:
 	if not root.begins_with(OS.get_temp_dir()) or not DirAccess.dir_exists_absolute(root):
 		return
+	var dir := DirAccess.open(root)
 	for f in DirAccess.get_files_at(root):
 		DirAccess.remove_absolute(root.path_join(f))
 	for d in DirAccess.get_directories_at(root):
-		remove(root.path_join(d))
+		if dir.is_link(root.path_join(d)):
+			DirAccess.remove_absolute(root.path_join(d))
+		else:
+			remove(root.path_join(d))
 	DirAccess.remove_absolute(root)
